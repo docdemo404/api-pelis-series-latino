@@ -462,6 +462,24 @@ export class RealScraperService {
         }
       }
 
+      // Para series/animes/doramas, auto-resolver los servidores del episodio 1 (S1:E1) para tener primary_stream y reproductores garantizados
+      let primaryStream = isMovie ? servers[0] || undefined : undefined;
+
+      if (!isMovie && seasons.length > 0 && (!tioplusUrl.includes('/season/') && !tioplusUrl.includes('/episode/'))) {
+        try {
+          const firstSeasonNum = seasons[0].season_number || 1;
+          const firstEpNum = seasons[0].episodes[0]?.episode_number || 1;
+          const cat = tioplusUrl.includes('/anime/') ? 'anime' : tioplusUrl.includes('/dorama/') ? 'dorama' : 'serie';
+          const epUrl = `${BASE_URL}/${cat}/${slug}/season/${firstSeasonNum}/episode/${firstEpNum}`;
+          const epDetail = await this.scrapeDetail(epUrl);
+          if (epDetail && epDetail.servers && epDetail.servers.length > 0) {
+            seasons[0].episodes[0].servers = epDetail.servers;
+            primaryStream = epDetail.servers[0];
+            servers.push(...epDetail.servers);
+          }
+        } catch {}
+      }
+
       return {
         id: slug,
         tmdb_id: 0,
@@ -483,8 +501,8 @@ export class RealScraperService {
         trailer: null,
         cast,
         dubbing_cast: [],
-        primary_stream: servers[0] || undefined,
-        servers: isMovie ? servers : (servers.length > 0 ? servers : undefined),
+        primary_stream: primaryStream,
+        servers: servers.length > 0 ? servers : undefined,
         total_seasons: totalSeasons || undefined,
         total_episodes: totalEpisodes || undefined,
         seasons: seasons.length > 0 ? seasons : undefined,

@@ -31,17 +31,12 @@ export class CatalogService {
   static async getById(id: string): Promise<MediaItem | null> {
     const q = id.toLowerCase().trim();
 
-    // 1. Intentar como slug directo en TioPlus (película)
-    let detail = await RealScraperService.scrapeDetail(`https://tioplus.app/pelicula/${q}`);
-    if (detail && (detail.servers?.length || detail.seasons?.length)) return detail;
-
-    // 2. Intentar como serie en TioPlus
-    detail = await RealScraperService.scrapeDetail(`https://tioplus.app/serie/${q}`);
-    if (detail && (detail.servers?.length || detail.seasons?.length)) return detail;
-
-    // 3. Intentar como anime en TioPlus
-    detail = await RealScraperService.scrapeDetail(`https://tioplus.app/anime/${q}`);
-    if (detail && (detail.servers?.length || detail.seasons?.length)) return detail;
+    // 1. Intentar por categorías directas en TioPlus (película, serie, anime, dorama)
+    const categories = ['pelicula', 'serie', 'anime', 'dorama'];
+    for (const cat of categories) {
+      const detail = await RealScraperService.scrapeDetail(`https://tioplus.app/${cat}/${q}`);
+      if (detail && (detail.servers?.length || detail.seasons?.length)) return detail;
+    }
 
     // 4. Buscar por texto de forma inteligente en TioPlus
     const scraped = await RealScraperService.scrapeRealMovies(q);
