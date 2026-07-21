@@ -1,0 +1,25 @@
+{
+  "name": "api-pelis-series-latino",
+  "version": "1.0.0",
+  "description": "API REST de Películas y Series en Español Latino con verificación de enlaces, super metadatos y feeds estilo Netflix",
+  "main": "api/index.ts",
+  "scripts": {
+    "dev": "ts-node-dev --respawn --transpile-only api/index.ts",
+    "build": "tsc",
+    "start": "node dist/api/index.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "cheerio": "^1.0.0-rc.12",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.9",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.5.2"
+  }
+}
