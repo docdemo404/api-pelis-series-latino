@@ -135,7 +135,11 @@
           "quality": { "type": "string", "example": "1080p" },
           "language": { "type": "string", "example": "latino" },
           "embed_url": { "type": "string", "example": "https://vidhideplus.com/v/f1kgebbi5bly" },
-          "status": { "type": "string", "example": "online" },
+          "status": {
+            "type": "string",
+            "enum": ["online", "offline"],
+            "description": "Estado de salud del servidor verificado en la capa de aplicación (Soft Errors). Los reproductores o clientes DEBEN IGNORAR O FILTRAR los servidores con status: 'offline'."
+          },
           "last_checked": { "type": "string", "format": "date-time" }
         }
       },

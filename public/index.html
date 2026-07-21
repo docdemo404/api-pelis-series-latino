@@ -32,6 +32,10 @@
           <strong>🤖 Machine-Readable API:</strong> Esta API incluye autodocumentación en formato OpenAPI 3.0 para consumo automático por asistentes AI, GPTs y clientes automatizados en <a href="/api/v1/openapi.json" class="alert-link text-warning">/api/v1/openapi.json</a>.
         </div>
 
+        <div class="alert alert-warning bg-dark text-warning border-warning mb-4" role="alert">
+          <strong>⚠️ Regla de Consumo de Servidores:</strong> El campo <code>status</code> de cada servidor en <code>servers</code> indica su disponibilidad real comprobada en capa de aplicación (inspección de Soft Errors). Todo reproductor o aplicación cliente <strong>DEBE IGNORAR O FILTRAR</strong> los servidores que retornen <code>"status": "offline"</code>.
+        </div>
+
         <h3 class="mb-4 text-warning">📌 Endpoints Principales</h3>
 
         <!-- Endpoint Búsqueda General -->
