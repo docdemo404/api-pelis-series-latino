@@ -76,7 +76,7 @@ export class TmdbService {
   }
 
   /**
-   * Obtiene la información completa de metadatos desde TMDB por TMDB ID
+   * Obtiene la información completa de metadatos desde TMDB por TMDB ID de forma ultra-rápida (Paralelizada).
    */
   static async getTmdbDetails(tmdbId: number, type: ContentType = 'movie'): Promise<any | null> {
     const cacheKey = `${type}:${tmdbId}`;
@@ -86,39 +86,37 @@ export class TmdbService {
 
     const endpoint = type === 'tvseries' ? 'tv' : 'movie';
     try {
-      const res = await axios.get(`https://api.themoviedb.org/3/${endpoint}/${tmdbId}`, {
-        params: {
-          api_key: API_KEY,
-          language: 'es-MX',
-          append_to_response: 'credits,videos'
-        },
-        timeout: 4000
-      });
+      // Peticiones paralelas en una sola ida y vuelta de red (sub-300ms)
+      const [primaryRes, fallbackEsRes, fallbackVidRes] = await Promise.allSettled([
+        axios.get(`https://api.themoviedb.org/3/${endpoint}/${tmdbId}`, {
+          params: { api_key: API_KEY, language: 'es-MX', append_to_response: 'credits,videos' },
+          timeout: 2500
+        }),
+        axios.get(`https://api.themoviedb.org/3/${endpoint}/${tmdbId}`, {
+          params: { api_key: API_KEY, language: 'es-ES' },
+          timeout: 2000
+        }),
+        axios.get(`https://api.themoviedb.org/3/${endpoint}/${tmdbId}/videos`, {
+          params: { api_key: API_KEY },
+          timeout: 2000
+        })
+      ]);
 
-      let data = res.data;
-      if (!data) return null;
-
-      // Si la sinopsis está vacía en es-MX, probar es-ES o en-US
-      if (!data.overview) {
-        try {
-          const esRes = await axios.get(`https://api.themoviedb.org/3/${endpoint}/${tmdbId}`, {
-            params: { api_key: API_KEY, language: 'es-ES' },
-            timeout: 3000
-          });
-          if (esRes.data?.overview) data.overview = esRes.data.overview;
-        } catch {}
+      if (primaryRes.status !== 'fulfilled' || !primaryRes.value.data) {
+        return null;
       }
 
-      // Si no hay trailers en es-MX, consultar videos globales
+      let data = primaryRes.value.data;
+
+      // Usar sinopsis en español de España si la de México está vacía
+      if (!data.overview && fallbackEsRes.status === 'fulfilled' && fallbackEsRes.value.data?.overview) {
+        data.overview = fallbackEsRes.value.data.overview;
+      }
+
+      // Usar vídeos globales si los de es-MX están vacíos
       let videos = data.videos?.results || [];
-      if (videos.length === 0) {
-        try {
-          const vidRes = await axios.get(`https://api.themoviedb.org/3/${endpoint}/${tmdbId}/videos`, {
-            params: { api_key: API_KEY },
-            timeout: 3000
-          });
-          if (vidRes.data?.results) videos = vidRes.data.results;
-        } catch {}
+      if (videos.length === 0 && fallbackVidRes.status === 'fulfilled' && fallbackVidRes.value.data?.results) {
+        videos = fallbackVidRes.value.data.results;
       }
       data.all_videos = videos;
 
