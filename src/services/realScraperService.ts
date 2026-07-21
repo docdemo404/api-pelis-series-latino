@@ -48,6 +48,27 @@ const SOFT_ERROR_PATTERNS = [
 async function verifyEmbedStatus(embedUrl: string): Promise<'online' | 'offline'> {
   if (!embedUrl) return 'offline';
   try {
+    // 0. Detectar reproductores SPA basados en HASH (#hash_id) ej. upns.pro, rpmstream.live, 4meplayer.pro, strp2p.com
+    const hashMatch = embedUrl.match(/https?:\/\/([^\/#]+)\/.*?#([a-zA-Z0-9_-]+)/);
+    if (hashMatch) {
+      const domain = hashMatch[1];
+      const hashId = hashMatch[2];
+      const apiUrl = `https://${domain}/api/v1/info?id=${hashId}`;
+      try {
+        const hashRes = await axios.get(apiUrl, {
+          headers: { 'User-Agent': UA, 'Referer': embedUrl },
+          timeout: 4000,
+          validateStatus: () => true
+        });
+        const dataStr = typeof hashRes.data === 'string' ? hashRes.data : JSON.stringify(hashRes.data || '');
+        if (hashRes.status !== 200 || dataStr.length < 3600 || dataStr.includes('error') || dataStr.includes('not found')) {
+          return 'offline';
+        }
+      } catch {
+        return 'offline';
+      }
+    }
+
     const res = await axios.get(embedUrl, {
       headers: {
         'User-Agent': UA,
