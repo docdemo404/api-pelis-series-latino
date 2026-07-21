@@ -2,6 +2,7 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { MediaItem, ServerOption, CastMember } from '../types';
 import { SourceManager } from './sourceManager';
+import { TmdbService } from './tmdbService';
 
 const BASE_URL = 'https://tioplus.app';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
@@ -607,8 +608,11 @@ export class RealScraperService {
       const episodeUrl = `${BASE_URL}/${cat}/${seriesSlug}/season/${season}/episode/${episode}`;
       const detail = await this.scrapeDetail(episodeUrl);
       if (detail && detail.servers && detail.servers.length > 0) {
+        const tmdbId = isNaN(Number(seriesSlug)) ? await TmdbService.getTmdbId(detail.title || seriesSlug, 'tvseries') : Number(seriesSlug);
         return {
-          series_id: seriesSlug,
+          id: `${tmdbId}-${season}-${episode}`,
+          tmdb_id: tmdbId,
+          series_id: String(tmdbId),
           season_number: season,
           episode_number: episode,
           primary_stream: detail.primary_stream,

@@ -1,6 +1,7 @@
-import { MediaItem } from '../types';
+import { MediaItem, ServerOption } from '../types';
 import { supabase } from './supabaseService';
 import { RealScraperService } from './realScraperService';
+import { TmdbService } from './tmdbService';
 
 export class CatalogService {
   /**
@@ -36,29 +37,33 @@ export class CatalogService {
     if (fuegocineMatch) {
       const fuegocineUrl = `https://www.fuegocine.com/${fuegocineMatch[1]}/${fuegocineMatch[2]}/${fuegocineMatch[3]}.html`;
       const fcDetail = await RealScraperService.scrapeFuegocineDetail(fuegocineUrl);
-      if (fcDetail) return fcDetail;
+      if (fcDetail) {
+        const tmdbId = await TmdbService.getTmdbId(fcDetail.title, fcDetail.type);
+        fcDetail.tmdb_id = tmdbId;
+        fcDetail.id = String(tmdbId);
+        return fcDetail;
+      }
     }
 
     // 1. Intentar por categorías directas en TioPlus (película, serie, anime, dorama)
     const categories = ['pelicula', 'serie', 'anime', 'dorama'];
     for (const cat of categories) {
       const detail = await RealScraperService.scrapeDetail(`https://tioplus.app/${cat}/${q}`);
-      if (detail && (detail.servers?.length || detail.seasons?.length)) return detail;
+      if (detail && (detail.servers?.length || detail.seasons?.length)) {
+        const tmdbId = await TmdbService.getTmdbId(detail.title, detail.type);
+        detail.tmdb_id = tmdbId;
+        detail.id = String(tmdbId);
+        return detail;
+      }
     }
 
-    // 2. Buscar por texto de forma inteligente en TioPlus & FuegoCine
-    const scraped = await RealScraperService.scrapeRealMovies(q);
+    // 2. Buscar por texto o TMDB ID de forma inteligente con unificación profunda
+    const scraped = await this.search(q);
     if (scraped.length > 0) {
-      // Si el primer resultado es de fuegocine, obtener sus detalles completos
-      const rawUrl = (scraped[0] as any)._tioplus_url || '';
-      if (rawUrl.includes('fuegocine.com')) {
-        const fcDetail = await RealScraperService.scrapeFuegocineDetail(rawUrl);
-        if (fcDetail) return fcDetail;
-      }
       return scraped[0];
     }
 
-    // 5. Fallback final a Supabase (buscando por id, slug o tmdb_id)
+    // 3. Fallback final a Supabase
     try {
       const { data } = await supabase
         .from('media_items')
@@ -105,10 +110,10 @@ export class CatalogService {
 
   /**
    * Unifica y agrupa elementos multimedia que corresponden al mismo título,
-   * fusionando sus servidores y respetando el orden de prioridad de las fuentes activas.
+   * fusionando SERVIDORES DE TODAS LAS FUENTES ACTIVAS y asignando ID TMDB numérico real.
    */
   private static async unifyMediaItems(items: MediaItem[]): Promise<MediaItem[]> {
-    const grouped = new Map<string, MediaItem>();
+    const grouped = new Map<string, { item: MediaItem; sourceUrls: string[] }>();
 
     const getCanonicalKey = (t: string) => {
       let norm = t
@@ -132,48 +137,64 @@ export class CatalogService {
         .trim();
     };
 
+    // 1. Agrupar ítems por clave canónica y acumular sus URLs de fuentes
     for (const item of items) {
       const key = getCanonicalKey(item.title);
+      const url = (item as any)._tioplus_url;
+
       if (!grouped.has(key)) {
-        grouped.set(key, { ...item, servers: [...(item.servers || [])] });
+        grouped.set(key, {
+          item: { ...item, servers: [...(item.servers || [])] },
+          sourceUrls: url ? [url] : []
+        });
       } else {
-        const existing = grouped.get(key)!;
-        existing.overview = existing.overview || item.overview;
-        existing.poster = existing.poster || item.poster;
-        existing.backdrop = existing.backdrop || item.backdrop;
-
-        // Si el elemento entrante no tiene servidores pero tiene URL de detalle, resolver sus servidores
-        let itemServers = item.servers || [];
-        if (itemServers.length === 0 && (item as any)._tioplus_url) {
-          const detailed = await RealScraperService.scrapeDetail((item as any)._tioplus_url);
-          if (detailed && detailed.servers) {
-            itemServers = detailed.servers;
-          }
-        }
-
-        // Fusionar servidores evitando URLs de reproductor duplicadas
-        const existingUrls = new Set(existing.servers?.map(s => s.embed_url));
-        if (itemServers.length > 0) {
-          existing.servers = existing.servers || [];
-          for (const s of itemServers) {
-            if (!existingUrls.has(s.embed_url)) {
-              existing.servers.push(s);
-              existingUrls.add(s.embed_url);
-            }
-          }
-        }
-
-        // Unificar subcategorías de fuentes
-        existing.subcategories = Array.from(new Set([...(existing.subcategories || []), ...(item.subcategories || [])]));
-        
-        // Recalcular primary_stream
-        if (existing.servers && existing.servers.length > 0) {
-          existing.primary_stream = existing.servers.find(s => s.status === 'online') || existing.servers[0];
+        const entry = grouped.get(key)!;
+        entry.item.overview = entry.item.overview || item.overview;
+        entry.item.poster = entry.item.poster || item.poster;
+        entry.item.backdrop = entry.item.backdrop || item.backdrop;
+        entry.item.subcategories = Array.from(new Set([...(entry.item.subcategories || []), ...(item.subcategories || [])]));
+        if (url && !entry.sourceUrls.includes(url)) {
+          entry.sourceUrls.push(url);
         }
       }
     }
 
-    return Array.from(grouped.values());
+    const unifiedList: MediaItem[] = [];
+
+    // 2. Para cada grupo unificado, resolver y fusionar SERVIDORES DE TODAS LAS FUENTES y asignar ID TMDB
+    for (const [key, entry] of grouped.entries()) {
+      const targetItem = entry.item;
+      const allServers: ServerOption[] = [...(targetItem.servers || [])];
+      const existingUrls = new Set(allServers.map(s => s.embed_url));
+
+      for (const sourceUrl of entry.sourceUrls) {
+        try {
+          const detail = await RealScraperService.scrapeDetail(sourceUrl);
+          if (detail && detail.servers && detail.servers.length > 0) {
+            for (const s of detail.servers) {
+              if (!existingUrls.has(s.embed_url)) {
+                allServers.push(s);
+                existingUrls.add(s.embed_url);
+              }
+            }
+          }
+        } catch {}
+      }
+
+      // Asignar ID TMDB numérico real
+      const tmdbId = targetItem.tmdb_id || await TmdbService.getTmdbId(targetItem.title, targetItem.type);
+      targetItem.tmdb_id = tmdbId;
+      targetItem.id = String(tmdbId);
+
+      targetItem.servers = allServers;
+      if (allServers.length > 0) {
+        targetItem.primary_stream = allServers.find(s => s.status === 'online') || allServers[0];
+      }
+
+      unifiedList.push(targetItem);
+    }
+
+    return unifiedList;
   }
 
   private static mapDbItemToMediaItem(dbRow: any): MediaItem {
