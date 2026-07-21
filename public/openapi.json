@@ -12,6 +12,51 @@
     }
   ],
   "paths": {
+    "/api/v1/panel": {
+      "get": {
+        "summary": "Obtener fuentes activas y su orden de prioridad",
+        "description": "Retorna el listado de proveedores de scraping configurados (TioPlus, FuegoCine, Supabase), con su estado (activada/desactivada) y prioridad.",
+        "responses": {
+          "200": {
+            "description": "Estado del panel obtenido con éxito"
+          }
+        }
+      }
+    },
+    "/api/v1/panel/sources": {
+      "post": {
+        "summary": "Actualizar activación y prioridad de fuentes de catálogo",
+        "description": "Permite activar/desactivar proveedores y ajustar su orden de prioridad para determinar qué servidores aparecen primero en la unificación.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "sources": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": { "type": "string" },
+                        "enabled": { "type": "boolean" },
+                        "priority": { "type": "number" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Fuentes actualizadas exitosamente"
+          }
+        }
+      }
+    },
     "/api/v1/search": {
       "get": {
         "summary": "Búsqueda general en tiempo real",

@@ -73,18 +73,21 @@ export class CatalogService {
   }
 
   /**
-   * Búsqueda en vivo con Web Scraping Real de TioPlus (IDs son siempre Slugs)
+   * Búsqueda en vivo con Web Scraping Real (IDs son siempre Slugs) y Unificación de Catálogo
    */
   static async search(query: string): Promise<MediaItem[]> {
     const q = query.toLowerCase().trim();
 
-    // 1. Scraping en vivo de TioPlus
+    // 1. Scraping en vivo de fuentes activas
     const realScraped = await RealScraperService.scrapeRealMovies(q);
-    if (realScraped.length > 0) {
-      return realScraped;
+    
+    // 2. Unificar catálogo para eliminar títulos duplicados y fusionar servidores
+    const unified = this.unifyMediaItems(realScraped);
+    if (unified.length > 0) {
+      return unified;
     }
 
-    // 2. Fallback a Supabase
+    // 3. Fallback a Supabase
     try {
       const { data } = await supabase
         .from('media_items')
@@ -92,11 +95,64 @@ export class CatalogService {
         .or(`title.ilike.%${q}%,original_title.ilike.%${q}%`);
 
       if (data && data.length > 0) {
-        return data.map(this.mapDbItemToMediaItem);
+        const dbItems = data.map(this.mapDbItemToMediaItem);
+        return this.unifyMediaItems(dbItems);
       }
     } catch (err) {}
 
     return [];
+  }
+
+  /**
+   * Unifica y agrupa elementos multimedia que corresponden al mismo título,
+   * fusionando sus servidores y respetando el orden de prioridad de las fuentes activas.
+   */
+  private static unifyMediaItems(items: MediaItem[]): MediaItem[] {
+    const grouped = new Map<string, MediaItem>();
+
+    const normalizeTitle = (t: string) => {
+      return t
+        .toLowerCase()
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+        .replace(/\s*\(\d{4}\)\s*$/, "")
+        .replace(/\bspiderman\b/g, "spider man")
+        .replace(/[^a-z0-9]+/g, " ")
+        .trim();
+    };
+
+    for (const item of items) {
+      const key = normalizeTitle(item.title);
+      if (!grouped.has(key)) {
+        grouped.set(key, { ...item, servers: [...(item.servers || [])] });
+      } else {
+        const existing = grouped.get(key)!;
+        existing.overview = existing.overview || item.overview;
+        existing.poster = existing.poster || item.poster;
+        existing.backdrop = existing.backdrop || item.backdrop;
+
+        // Fusionar servidores evitando URLs de reproductor duplicadas
+        const existingUrls = new Set(existing.servers?.map(s => s.embed_url));
+        if (item.servers && item.servers.length > 0) {
+          existing.servers = existing.servers || [];
+          for (const s of item.servers) {
+            if (!existingUrls.has(s.embed_url)) {
+              existing.servers.push(s);
+              existingUrls.add(s.embed_url);
+            }
+          }
+        }
+
+        // Unificar subcategorías de fuentes
+        existing.subcategories = Array.from(new Set([...(existing.subcategories || []), ...(item.subcategories || [])]));
+        
+        // Recalcular primary_stream
+        if (!existing.primary_stream && existing.servers && existing.servers.length > 0) {
+          existing.primary_stream = existing.servers.find(s => s.status === 'online') || existing.servers[0];
+        }
+      }
+    }
+
+    return Array.from(grouped.values());
   }
 
   private static mapDbItemToMediaItem(dbRow: any): MediaItem {

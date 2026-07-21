@@ -1,6 +1,7 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { MediaItem, ServerOption, CastMember } from '../types';
+import { SourceManager } from './sourceManager';
 
 const BASE_URL = 'https://tioplus.app';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
@@ -626,7 +627,6 @@ export class RealScraperService {
     const q = query.trim();
     if (!q) return [];
 
-    // Helper interno para buscar una palabra en TioPlus
     const fetchSearchHtml = async (searchTerm: string): Promise<MediaItem[]> => {
       try {
         const searchUrl = `${BASE_URL}/api/search/${encodeURIComponent(searchTerm)}`;
@@ -687,95 +687,60 @@ export class RealScraperService {
       }
     };
 
-    // 1. Búsqueda directa inicial
-    let results = await fetchSearchHtml(q);
+    const activeSources = SourceManager.getSources().filter(s => s.enabled);
+    const finalResults: MediaItem[] = [];
 
-    // 2. Búsqueda con Lematización Bidireccional (singular <-> plural, sin acentos, etc.)
-    if (results.length === 0 || q.includes(' ') || q.endsWith('s') || q.endsWith('es')) {
-      const STOPWORDS = new Set(['de', 'el', 'la', 'los', 'las', 'un', 'una', 'y', 'en', 'del', 'a', 'of', 'the', 'in', 'and']);
-      const tokens = q.toLowerCase().split(/\s+/).filter(t => t.length > 0);
-      const significantTokens = tokens.filter(t => !STOPWORDS.has(t) && t.length > 1);
-      const searchTokens = significantTokens.length > 0 ? significantTokens : tokens;
+    for (const src of activeSources) {
+      if (src.id === 'tioplus') {
+        let tioItems = await fetchSearchHtml(q);
+        if (tioItems.length === 0 && (q.includes(' ') || q.endsWith('s') || q.endsWith('es'))) {
+          const STOPWORDS = new Set(['de', 'el', 'la', 'los', 'las', 'un', 'una', 'y', 'en', 'del', 'a', 'of', 'the', 'in', 'and']);
+          const tokens = q.toLowerCase().split(/\s+/).filter(t => t.length > 0);
+          const significantTokens = tokens.filter(t => !STOPWORDS.has(t) && t.length > 1);
+          const searchTokens = significantTokens.length > 0 ? significantTokens : tokens;
 
-      const candidates: MediaItem[] = [];
-      for (const token of searchTokens) {
-        const stems = getWordStems(token);
-        for (const stem of stems) {
-          const items = await fetchSearchHtml(stem);
-          candidates.push(...items);
+          const candidates: MediaItem[] = [];
+          for (const token of searchTokens) {
+            const stems = getWordStems(token);
+            for (const stem of stems) {
+              const items = await fetchSearchHtml(stem);
+              candidates.push(...items);
+            }
+          }
+
+          const filtered = candidates.filter(item => {
+            const titleNorm = item.title.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+            return searchTokens.every(token => {
+              const stems = getWordStems(token);
+              return stems.some(stem => titleNorm.includes(stem));
+            });
+          });
+
+          const seen = new Set<string>();
+          tioItems = filtered.filter(item => {
+            if (seen.has(item.id)) return false;
+            seen.add(item.id);
+            return true;
+          });
         }
-      }
-
-      // Post-filtrado lematizado: Cada token DEBE coincidir con al menos uno de sus stems en el título
-      const filtered = candidates.filter(item => {
-        const titleNorm = item.title.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-        return searchTokens.every(token => {
-          const stems = getWordStems(token);
-          return stems.some(stem => titleNorm.includes(stem));
-        });
-      });
-
-      const seen = new Set<string>();
-      const stemmedResults = filtered.filter(item => {
-        if (seen.has(item.id)) return false;
-        seen.add(item.id);
-        return true;
-      });
-
-      if (stemmedResults.length > 0) {
-        results = stemmedResults;
+        finalResults.push(...tioItems);
+      } else if (src.id === 'fuegocine') {
+        const fuegocineItems = await this.scrapeFuegocine(q);
+        finalResults.push(...fuegocineItems);
       }
     }
 
-    // 2b. Si es una búsqueda sin espacios (ej. "betterma", "breakingba", "scarymovie", "badboys") y devolvió 0 resultados
-    if (results.length === 0 && !q.includes(' ') && q.length >= 4) {
-      const candidates: MediaItem[] = [];
-      const lowerQ = q.toLowerCase();
-
-      for (let i = 3; i <= lowerQ.length - 1; i++) {
-        const part1 = lowerQ.substring(0, i);
-        const part2 = lowerQ.substring(i);
-
-        const items1 = await fetchSearchHtml(part1);
-        const regexBoundary = new RegExp(`\\b${part2}`, 'i');
-        const matched = items1.filter(item => regexBoundary.test(item.title));
-
-        if (matched.length > 0) {
-          candidates.push(...matched);
-          break;
-        }
-      }
-
-      // Eliminar duplicados
-      const seen = new Set<string>();
-      results = candidates.filter(item => {
-        if (seen.has(item.id)) return false;
-        seen.add(item.id);
-        return true;
-      });
-    }
-
-    // 3. Resolver servidores del primer resultado si existe
-    if (results.length > 0) {
-      const firstUrl = (results[0] as any)._tioplus_url;
+    if (finalResults.length > 0 && finalResults[0]) {
+      const firstUrl = (finalResults[0] as any)._tioplus_url;
       if (firstUrl) {
         const detailed = await this.scrapeDetail(firstUrl);
         if (detailed) {
-          results[0] = { ...results[0], ...detailed };
+          finalResults[0] = { ...finalResults[0], ...detailed };
         }
       }
     }
 
-    const fuegocineItems = await this.scrapeFuegocine(q);
-    if (fuegocineItems.length > 0) {
-      for (const item of fuegocineItems) {
-        if (!results.some(r => r.title.toLowerCase() === item.title.toLowerCase())) {
-          results.push(item);
-        }
-      }
-    }
-
-    return results;
+    return finalResults;
   }
 
   /**
