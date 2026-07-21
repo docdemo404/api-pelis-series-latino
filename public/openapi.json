@@ -168,6 +168,33 @@
         ],
         "responses": { "200": { "description": "Feed obtenido con éxito" } }
       }
+    },
+    "/api/v1/media/batch": {
+      "get": {
+        "summary": "Consultar múltiples contenidos en lote por IDs",
+        "parameters": [
+          {
+            "name": "ids",
+            "in": "query",
+            "required": true,
+            "description": "Lista de IDs separados por comas (ej. ?ids=558,94997,748783)",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "compact",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "boolean", "default": false }
+          }
+        ],
+        "responses": { "200": { "description": "Lote de contenidos devuelto con éxito" } }
+      }
+    },
+    "/api/v1/revalidate": {
+      "get": {
+        "summary": "Invalidar y revalidar la caché de borde y memoria",
+        "responses": { "200": { "description": "Caché invalidado con éxito" } }
+      }
     }
   },
   "components": {

@@ -3,17 +3,65 @@ import { supabase } from './supabaseService';
 import { RealScraperService } from './realScraperService';
 import { TmdbService } from './tmdbService';
 
+const searchCache = new Map<string, { timestamp: number; data: MediaItem[] }>();
+const getByIdCache = new Map<string, { timestamp: number; data: MediaItem }>();
+const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutos de caché en memoria
+
 export class CatalogService {
+  /**
+   * Limpia toda la caché en memoria de la API
+   */
+  static clearCache(): void {
+    searchCache.clear();
+    getByIdCache.clear();
+  }
+
+  /**
+   * Mapea un MediaItem a un payload compacto optimizado para listados y vistas rápidas
+   */
+  static toCompactItem(item: MediaItem): Partial<MediaItem> {
+    return {
+      id: item.id,
+      tmdb_id: item.tmdb_id,
+      type: item.type,
+      title: item.title,
+      original_title: item.original_title,
+      poster: item.poster,
+      backdrop: item.backdrop,
+      rating: item.rating,
+      release_date: item.release_date,
+      genres: item.genres,
+      subcategories: item.subcategories,
+      primary_stream: item.primary_stream,
+      servers: item.servers
+    };
+  }
+
+  /**
+   * Consulta múltiples títulos en lote (Batching Request)
+   */
+  static async getBatch(ids: string[]): Promise<MediaItem[]> {
+    const results = await Promise.all(ids.map(id => this.getById(id)));
+    return results.filter((item): item is MediaItem => item !== null);
+  }
+
   /**
    * Obtiene todos los títulos del homepage en vivo enriquecidos con TMDB
    */
   static async getAll(): Promise<MediaItem[]> {
+    const cacheKey = 'all_homepage';
+    const cached = searchCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+      return cached.data;
+    }
+
     const liveItems = await RealScraperService.scrapeHomepage();
     if (liveItems.length > 0) {
       const enrichedList: MediaItem[] = [];
       for (const item of liveItems) {
         enrichedList.push(await TmdbService.enrichMediaItem(item));
       }
+      searchCache.set(cacheKey, { timestamp: Date.now(), data: enrichedList });
       return enrichedList;
     }
 
@@ -25,6 +73,7 @@ export class CatalogService {
         for (const item of dbItems) {
           enrichedList.push(await TmdbService.enrichMediaItem(item));
         }
+        searchCache.set(cacheKey, { timestamp: Date.now(), data: enrichedList });
         return enrichedList;
       }
     } catch (err) {}
@@ -33,11 +82,18 @@ export class CatalogService {
   }
 
   /**
-   * Obtiene un título por ID/Slug de forma consistente.
-   * Acepta TMDB IDs numéricos o slugs.
+   * Obtiene un título por ID/Slug de forma consistente (Caché ultrarrápida en sub-10ms).
    */
   static async getById(id: string): Promise<MediaItem | null> {
     const q = id.toLowerCase().trim();
+
+    // Verificación de caché en memoria
+    const cached = getByIdCache.get(q);
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+      return cached.data;
+    }
+
+    let result: MediaItem | null = null;
 
     // 0. Si el ID es numérico (ID oficial de TMDB), obtener metadatos de TMDB y resolver servidores
     if (!isNaN(Number(q))) {
@@ -51,55 +107,75 @@ export class CatalogService {
         const searchResults = await this.search(title);
         const match = searchResults.find(r => r.tmdb_id === tmdbNumericId) || searchResults[0];
         if (match) {
-          return await TmdbService.enrichMediaItem(match);
+          result = await TmdbService.enrichMediaItem(match);
         }
       }
     }
 
     // 1. Intentar si es un slug de FuegoCine (ej. 2025-04-spiderman-lejos-de-casa-2019-html)
-    const fuegocineMatch = q.match(/^(\d{4})-(\d{2})-(.+)-html$/);
-    if (fuegocineMatch) {
-      const fuegocineUrl = `https://www.fuegocine.com/${fuegocineMatch[1]}/${fuegocineMatch[2]}/${fuegocineMatch[3]}.html`;
-      const fcDetail = await RealScraperService.scrapeFuegocineDetail(fuegocineUrl);
-      if (fcDetail) {
-        return await TmdbService.enrichMediaItem(fcDetail);
+    if (!result) {
+      const fuegocineMatch = q.match(/^(\d{4})-(\d{2})-(.+)-html$/);
+      if (fuegocineMatch) {
+        const fuegocineUrl = `https://www.fuegocine.com/${fuegocineMatch[1]}/${fuegocineMatch[2]}/${fuegocineMatch[3]}.html`;
+        const fcDetail = await RealScraperService.scrapeFuegocineDetail(fuegocineUrl);
+        if (fcDetail) {
+          result = await TmdbService.enrichMediaItem(fcDetail);
+        }
       }
     }
 
     // 2. Intentar por categorías directas en TioPlus (película, serie, anime, dorama)
-    const categories = ['pelicula', 'serie', 'anime', 'dorama'];
-    for (const cat of categories) {
-      const detail = await RealScraperService.scrapeDetail(`https://tioplus.app/${cat}/${q}`);
-      if (detail && (detail.servers?.length || detail.seasons?.length)) {
-        return await TmdbService.enrichMediaItem(detail);
+    if (!result) {
+      const categories = ['pelicula', 'serie', 'anime', 'dorama'];
+      for (const cat of categories) {
+        const detail = await RealScraperService.scrapeDetail(`https://tioplus.app/${cat}/${q}`);
+        if (detail && (detail.servers?.length || detail.seasons?.length)) {
+          result = await TmdbService.enrichMediaItem(detail);
+          break;
+        }
       }
     }
 
     // 3. Buscar por texto o TMDB ID de forma inteligente con unificación profunda
-    const scraped = await this.search(q);
-    if (scraped.length > 0) {
-      return scraped[0];
+    if (!result) {
+      const scraped = await this.search(q);
+      if (scraped.length > 0) {
+        result = scraped[0];
+      }
     }
 
     // 4. Fallback final a Supabase
-    try {
-      const { data } = await supabase
-        .from('media_items')
-        .select('*')
-        .or(`id.eq.${q},tmdb_id.eq.${isNaN(Number(q)) ? -1 : Number(q)}`)
-        .single();
+    if (!result) {
+      try {
+        const { data } = await supabase
+          .from('media_items')
+          .select('*')
+          .or(`id.eq.${q},tmdb_id.eq.${isNaN(Number(q)) ? -1 : Number(q)}`)
+          .single();
 
-      if (data) return await TmdbService.enrichMediaItem(this.mapDbItemToMediaItem(data));
-    } catch (err) {}
+        if (data) result = await TmdbService.enrichMediaItem(this.mapDbItemToMediaItem(data));
+      } catch (err) {}
+    }
 
-    return null;
+    if (result) {
+      getByIdCache.set(q, { timestamp: Date.now(), data: result });
+      getByIdCache.set(result.id, { timestamp: Date.now(), data: result });
+    }
+
+    return result;
   }
 
   /**
-   * Búsqueda en vivo con Web Scraping Real (IDs son siempre Slugs) y Unificación de Catálogo
+   * Búsqueda en vivo con Caché en Memoria, Web Scraping y Unificación
    */
   static async search(query: string): Promise<MediaItem[]> {
     const q = query.toLowerCase().trim();
+
+    // Verificación de caché en memoria
+    const cached = searchCache.get(q);
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+      return cached.data;
+    }
 
     // 1. Scraping en vivo de fuentes activas
     const realScraped = await RealScraperService.scrapeRealMovies(q);
@@ -107,6 +183,7 @@ export class CatalogService {
     // 2. Unificar catálogo para eliminar títulos duplicados y fusionar servidores
     const unified = await this.unifyMediaItems(realScraped);
     if (unified.length > 0) {
+      searchCache.set(q, { timestamp: Date.now(), data: unified });
       return unified;
     }
 
@@ -119,7 +196,9 @@ export class CatalogService {
 
       if (data && data.length > 0) {
         const dbItems = data.map(this.mapDbItemToMediaItem);
-        return await this.unifyMediaItems(dbItems);
+        const res = await this.unifyMediaItems(dbItems);
+        searchCache.set(q, { timestamp: Date.now(), data: res });
+        return res;
       }
     } catch (err) {}
 

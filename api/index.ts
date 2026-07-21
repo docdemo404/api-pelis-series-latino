@@ -1,4 +1,4 @@
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import path from 'path';
 import { CatalogService } from '../src/services/catalogService';
@@ -10,6 +10,29 @@ import { SourceManager } from '../src/services/sourceManager';
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Cabeceras HTTP de Caché en Borde (Edge CDN & Stale-While-Revalidate)
+app.use((req: Request, res: Response, next: NextFunction) => {
+  if (req.path.startsWith('/api/v1')) {
+    if (req.path.includes('/panel') || req.path.includes('/stream/resolve') || req.path.includes('/revalidate') || req.path.includes('/cache')) {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    } else {
+      res.setHeader('Cache-Control', 'public, max-age=3600, s-maxage=86400, stale-while-revalidate=604800');
+    }
+  }
+  next();
+});
+
+function sendErrorResponse(res: Response, statusCode: number, code: string, message: string) {
+  return res.status(statusCode).json({
+    status: 'error',
+    success: false,
+    error: {
+      code,
+      message
+    }
+  });
+}
 
 // Servir portal de documentación
 app.use('/docs', express.static(path.join(__dirname, '../public')));
@@ -352,101 +375,159 @@ app.get('/api/v1', (req: Request, res: Response) => {
   });
 });
 
+// Invalidación y Revalidación de Caché en Borde / Memoria
+app.all(['/api/v1/revalidate', '/api/v1/cache/clear'], (req: Request, res: Response) => {
+  CatalogService.clearCache();
+  res.json({
+    status: 'success',
+    success: true,
+    message: 'Caché de borde y memoria invalidado con éxito.'
+  });
+});
+
 // Feeds Estilo Netflix
-app.get('/api/v1/feeds/home', async (req: Request, res: Response) => {
-  const country = (req.query.country as string) || 'CL';
-  const feed = await FeedService.getHomeFeed(country);
-  res.json({ status: 'success', data: feed });
+app.get('/api/v1/feeds/home', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const country = (req.query.country as string) || 'CL';
+    const feed = await FeedService.getHomeFeed(country);
+    res.json({ status: 'success', data: feed });
+  } catch (err) {
+    next(err);
+  }
 });
 
 // Descubrimiento Infinito
-app.get('/api/v1/discover', async (req: Request, res: Response) => {
-  const page = parseInt(req.query.page as string) || 1;
-  const limit = parseInt(req.query.limit as string) || 20;
-  const type = req.query.type as string;
-  const genre = req.query.genre as string;
+app.get('/api/v1/discover', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 20;
+    const type = req.query.type as string;
+    const genre = req.query.genre as string;
 
-  const result = await FeedService.getDiscover(page, limit, type, genre);
-  res.json({ status: 'success', data: result });
+    const result = await FeedService.getDiscover(page, limit, type, genre);
+    res.json({ status: 'success', data: result });
+  } catch (err) {
+    next(err);
+  }
 });
 
-// Búsqueda general (Películas, Series, Animes, Doramas)
-app.get('/api/v1/search', async (req: Request, res: Response) => {
-  const q = req.query.q as string;
-  if (!q) {
-    return res.status(400).json({ status: 'error', message: 'Parámetro ?q= es requerido' });
+// Consulta en Lote (Batching Request)
+app.get('/api/v1/media/batch', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const rawIds = (req.query.ids as string) || '';
+    const ids = rawIds.split(',').map(s => s.trim()).filter(Boolean);
+    if (ids.length === 0) {
+      return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'El parámetro ?ids=id1,id2 es requerido');
+    }
+    const results = await CatalogService.getBatch(ids);
+    const compact = req.query.compact === 'true';
+    const finalItems = compact ? results.map(CatalogService.toCompactItem) : results;
+    res.json({ status: 'success', count: finalItems.length, data: finalItems });
+  } catch (err) {
+    next(err);
   }
-
-  const results = await CatalogService.search(q);
-  res.json({
-    status: 'success',
-    query: q,
-    count: results.length,
-    results
-  });
 });
 
-// Alias para mantener compatibilidad
-app.get('/api/v1/movies/search', async (req: Request, res: Response) => {
-  const q = req.query.q as string;
-  if (!q) {
-    return res.status(400).json({ status: 'error', message: 'Parámetro ?q= es requerido' });
-  }
+// Búsqueda general con Paginación y Proyección Compacta
+app.get(['/api/v1/search', '/api/v1/movies/search'], async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const q = req.query.q as string;
+    if (!q) {
+      return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'El parámetro ?q= es requerido');
+    }
 
-  const results = await CatalogService.search(q);
-  res.json({
-    status: 'success',
-    query: q,
-    count: results.length,
-    results
-  });
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 20;
+    const compact = req.query.compact === 'true';
+
+    const results = await CatalogService.search(q);
+    const startIndex = (page - 1) * limit;
+    const paginated = results.slice(startIndex, startIndex + limit);
+    const finalItems = compact ? paginated.map(CatalogService.toCompactItem) : paginated;
+
+    res.json({
+      status: 'success',
+      query: q,
+      page,
+      limit,
+      total_results: results.length,
+      count: finalItems.length,
+      results: finalItems
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
-// Detalle de Episodio específico (Servidores de reproducción del episodio)
-app.get('/api/v1/series/:id/season/:season/episode/:episode', async (req: Request, res: Response) => {
-  const { id, season, episode } = req.params;
-  const epDetail = await RealScraperService.scrapeEpisodeDetail(id, parseInt(season), parseInt(episode));
-  if (!epDetail) {
-    return res.status(404).json({ status: 'error', message: 'Episodio no encontrado' });
+// Detalle de Episodio específico
+app.get('/api/v1/series/:id/season/:season/episode/:episode', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { id, season, episode } = req.params;
+    const epDetail = await RealScraperService.scrapeEpisodeDetail(id, parseInt(season), parseInt(episode));
+    if (!epDetail) {
+      return sendErrorResponse(res, 404, 'RESOURCE_NOT_FOUND', 'El episodio solicitado no existe o no está disponible.');
+    }
+    res.json({ status: 'success', data: epDetail });
+  } catch (err) {
+    next(err);
   }
-  res.json({ status: 'success', data: epDetail });
 });
 
 // Detalle específico para Series
-app.get('/api/v1/series/:id', async (req: Request, res: Response) => {
-  const { season, episode } = req.query;
-  if (season && episode) {
-    const epDetail = await RealScraperService.scrapeEpisodeDetail(req.params.id, parseInt(season as string), parseInt(episode as string));
-    if (epDetail) return res.json({ status: 'success', data: epDetail });
+app.get('/api/v1/series/:id', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { season, episode } = req.query;
+    if (season && episode) {
+      const epDetail = await RealScraperService.scrapeEpisodeDetail(req.params.id, parseInt(season as string), parseInt(episode as string));
+      if (epDetail) return res.json({ status: 'success', data: epDetail });
+    }
+    const item = await CatalogService.getById(req.params.id);
+    if (!item) {
+      return sendErrorResponse(res, 404, 'RESOURCE_NOT_FOUND', 'La serie solicitada no existe o no está disponible.');
+    }
+    res.json({ status: 'success', data: item });
+  } catch (err) {
+    next(err);
   }
-  const item = await CatalogService.getById(req.params.id);
-  if (!item) {
-    return res.status(404).json({ status: 'error', message: 'Serie no encontrada' });
-  }
-  res.json({ status: 'success', data: item });
 });
 
-// Detalle por ID o Slug (Películas o Series con soporte de ?season=1&episode=1)
-app.get('/api/v1/media/:id', async (req: Request, res: Response) => {
-  const { season, episode } = req.query;
-  if (season && episode) {
-    const epDetail = await RealScraperService.scrapeEpisodeDetail(req.params.id, parseInt(season as string), parseInt(episode as string));
-    if (epDetail) return res.json({ status: 'success', data: epDetail });
+// Detalle por ID o Slug (Películas o Series)
+app.get('/api/v1/media/:id', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { season, episode, include } = req.query;
+    if (season && episode) {
+      const epDetail = await RealScraperService.scrapeEpisodeDetail(req.params.id, parseInt(season as string), parseInt(episode as string));
+      if (epDetail) return res.json({ status: 'success', data: epDetail });
+    }
+    const item = await CatalogService.getById(req.params.id);
+    if (!item) {
+      return sendErrorResponse(res, 404, 'RESOURCE_NOT_FOUND', 'El contenido solicitado no existe o no está disponible.');
+    }
+
+    if (include === 'season_1' || include === 'first_season') {
+      const firstEp = await RealScraperService.scrapeEpisodeDetail(item.id, 1, 1);
+      if (firstEp) {
+        (item as any).season_1_first_episode = firstEp;
+      }
+    }
+
+    res.json({ status: 'success', data: item });
+  } catch (err) {
+    next(err);
   }
-  const item = await CatalogService.getById(req.params.id);
-  if (!item) {
-    return res.status(404).json({ status: 'error', message: 'Contenido no encontrado' });
-  }
-  res.json({ status: 'success', data: item });
 });
 
 // Resolver Token Dinámico de Stream
-app.get('/api/v1/stream/resolve', async (req: Request, res: Response) => {
-  const id = (req.query.id as string) || 'srv_default';
-  const originalUrl = (req.query.url as string) || 'https://streamwish.to/hls/sample.m3u8';
+app.get('/api/v1/stream/resolve', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const id = (req.query.id as string) || 'srv_default';
+    const originalUrl = (req.query.url as string) || 'https://streamwish.to/hls/sample.m3u8';
 
-  const resolved = await ResolverService.resolveStreamToken(id, originalUrl);
-  res.json({ status: 'success', data: resolved });
+    const resolved = await ResolverService.resolveStreamToken(id, originalUrl);
+    res.json({ status: 'success', data: resolved });
+  } catch (err) {
+    next(err);
+  }
 });
 
 // Reportar Enlace Roto
@@ -456,6 +537,17 @@ app.post('/api/v1/links/report', (req: Request, res: Response) => {
     status: 'success',
     message: `Enlace ${link_id || 'solicitado'} reportado con éxito. Se ha marcado para verificación.`
   });
+});
+
+// Manejador global de errores inesperados (Zero 500 HTML Pages)
+app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+  console.error('[Global API Exception]:', err);
+  sendErrorResponse(res, 500, 'INTERNAL_SERVER_ERROR', 'Ocurrió un error inesperado al procesar la solicitud.');
+});
+
+// Manejador global 404 para la API
+app.use('/api/v1/*', (req: Request, res: Response) => {
+  sendErrorResponse(res, 404, 'RESOURCE_NOT_FOUND', 'El endpoint o contenido solicitado no existe.');
 });
 
 const PORT = process.env.PORT || 3000;
