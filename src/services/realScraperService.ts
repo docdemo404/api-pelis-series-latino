@@ -83,6 +83,34 @@ function extractCanonicalSlug(href: string): string {
   return parts.pop() || '';
 }
 
+/**
+ * Genera raíces morfológicas / lematización bidireccional (singular <-> plural, sin acentos)
+ */
+function getWordStems(word: string): string[] {
+  const norm = word.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const stems = new Set<string>([word.toLowerCase(), norm]);
+
+  if (norm.endsWith('es')) {
+    stems.add(norm.slice(0, -2)); // dragones -> dragon
+    stems.add(norm.slice(0, -1)); // dragones -> dragone
+    if (norm.endsWith('ces')) {
+      stems.add(norm.slice(0, -3) + 'z'); // actrices -> actriz
+    }
+  } else if (norm.endsWith('s') && !norm.endsWith('ss')) {
+    stems.add(norm.slice(0, -1)); // peliculas -> pelicula
+  }
+
+  if (!norm.endsWith('s')) {
+    stems.add(norm + 's');  // dragon -> dragons
+    stems.add(norm + 'es'); // dragon -> dragones
+    if (norm.endsWith('z')) {
+      stems.add(norm.slice(0, -1) + 'ces'); // actriz -> actrices
+    }
+  }
+
+  return Array.from(stems);
+}
+
 export class RealScraperService {
   /**
    * Scrapea el homepage completo de TioPlus (slider + secciones)
@@ -456,35 +484,44 @@ export class RealScraperService {
       }
     };
 
-    // 1. Intentar búsqueda directa completa
+    // 1. Búsqueda directa inicial
     let results = await fetchSearchHtml(q);
 
-    // 2. Si es una búsqueda multi-palabra y devolvió 0 resultados (debido a lematización/prefijos/stopwords)
-    if (results.length === 0 && q.includes(' ')) {
+    // 2. Búsqueda con Lematización Bidireccional (singular <-> plural, sin acentos, etc.)
+    if (results.length === 0 || q.includes(' ') || q.endsWith('s') || q.endsWith('es')) {
       const STOPWORDS = new Set(['de', 'el', 'la', 'los', 'las', 'un', 'una', 'y', 'en', 'del', 'a', 'of', 'the', 'in', 'and']);
       const tokens = q.toLowerCase().split(/\s+/).filter(t => t.length > 0);
       const significantTokens = tokens.filter(t => !STOPWORDS.has(t) && t.length > 1);
-      const searchCandidates = significantTokens.length > 0 ? significantTokens : tokens;
+      const searchTokens = significantTokens.length > 0 ? significantTokens : tokens;
 
       const candidates: MediaItem[] = [];
-      for (const token of searchCandidates) {
-        const items = await fetchSearchHtml(token);
-        candidates.push(...items);
+      for (const token of searchTokens) {
+        const stems = getWordStems(token);
+        for (const stem of stems) {
+          const items = await fetchSearchHtml(stem);
+          candidates.push(...items);
+        }
       }
 
-      // Post-filtrado estricto local: Cada token significativo DEBE estar presente en el título
+      // Post-filtrado lematizado: Cada token DEBE coincidir con al menos uno de sus stems en el título
       const filtered = candidates.filter(item => {
-        const titleLower = item.title.toLowerCase();
-        return searchCandidates.every(token => titleLower.includes(token));
+        const titleNorm = item.title.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+        return searchTokens.every(token => {
+          const stems = getWordStems(token);
+          return stems.some(stem => titleNorm.includes(stem));
+        });
       });
 
-      // Eliminar duplicados
       const seen = new Set<string>();
-      results = filtered.filter(item => {
+      const stemmedResults = filtered.filter(item => {
         if (seen.has(item.id)) return false;
         seen.add(item.id);
         return true;
       });
+
+      if (stemmedResults.length > 0) {
+        results = stemmedResults;
+      }
     }
 
     // 2b. Si es una búsqueda sin espacios (ej. "breakingbad", "betterman", "scarymovie", "badboys") y devolvió 0 resultados
