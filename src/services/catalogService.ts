@@ -38,15 +38,15 @@ export class CatalogService {
 
     // 2. Intentar como slug directo en TioPlus (película)
     let detail = await RealScraperService.scrapeDetail(`https://tioplus.app/pelicula/${q}`);
-    if (detail && detail.servers && detail.servers.length > 0) return detail;
+    if (detail && (detail.servers?.length || detail.seasons?.length)) return detail;
 
     // 3. Intentar como serie
     detail = await RealScraperService.scrapeDetail(`https://tioplus.app/serie/${q}`);
-    if (detail && detail.servers && detail.servers.length > 0) return detail;
+    if (detail && (detail.servers?.length || detail.seasons?.length)) return detail;
 
     // 4. Intentar como anime
     detail = await RealScraperService.scrapeDetail(`https://tioplus.app/anime/${q}`);
-    if (detail && detail.servers && detail.servers.length > 0) return detail;
+    if (detail && (detail.servers?.length || detail.seasons?.length)) return detail;
 
     // 5. Buscar por texto
     const scraped = await RealScraperService.scrapeRealMovies(q);
