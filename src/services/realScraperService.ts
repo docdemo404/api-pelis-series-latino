@@ -497,10 +497,8 @@ export class RealScraperService {
         const part2 = lowerQ.substring(i);
 
         const items1 = await fetchSearchHtml(part1);
-        const matched = items1.filter(item => {
-          const titleLower = item.title.toLowerCase();
-          return titleLower.includes(part2);
-        });
+        const regexBoundary = new RegExp(`\\b${part2}`, 'i');
+        const matched = items1.filter(item => regexBoundary.test(item.title));
 
         if (matched.length > 0) {
           candidates.push(...matched);
