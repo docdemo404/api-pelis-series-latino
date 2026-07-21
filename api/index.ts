@@ -503,8 +503,8 @@ app.get(['/api/v1/search', '/api/v1/movies/search'], async (req: Request, res: R
   }
 });
 
-// Detalle de Episodio específico
-app.get('/api/v1/series/:id/season/:season/episode/:episode', async (req: Request, res: Response, next: NextFunction) => {
+// Detalle de Episodio específico (/series/... y /media/...)
+app.get(['/api/v1/series/:id/season/:season/episode/:episode', '/api/v1/media/:id/season/:season/episode/:episode'], async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id, season, episode } = req.params;
     const sNum = parseInt(season);

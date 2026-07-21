@@ -155,6 +155,17 @@
         }
       }
     },
+    "/api/v1/media/{id}/season/{season}/episode/{episode}": {
+      "get": {
+        "summary": "Obtener servidores de reproducción de un episodio de serie (Alias Media)",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "season", "in": "path", "required": true, "schema": { "type": "integer" } },
+          { "name": "episode", "in": "path", "required": true, "schema": { "type": "integer" } }
+        ],
+        "responses": { "200": { "description": "Servidores del episodio obtenidos con éxito" } }
+      }
+    },
     "/api/v1/home": {
       "get": {
         "summary": "Obtener feed principal estilo Netflix (Alias)",

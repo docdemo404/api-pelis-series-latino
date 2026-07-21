@@ -129,8 +129,48 @@ export class TmdbService {
   }
 
   /**
+   * Obtiene la estructura completa de temporadas y episodios desde la API oficial de TMDB
+   */
+  static async getTmdbSeasons(tmdbId: number, numSeasons: number, posterUrl: string | null, defaultServers: any[] = []): Promise<any[]> {
+    const seasonNumbers = Array.from({ length: Math.min(numSeasons, 15) }, (_, i) => i + 1);
+
+    const seasonPromises = seasonNumbers.map(sNum =>
+      axios.get(`https://api.themoviedb.org/3/tv/${tmdbId}/season/${sNum}`, {
+        params: { api_key: API_KEY, language: 'es-MX' },
+        timeout: 2500
+      }).catch(() => null)
+    );
+
+    const results = await Promise.all(seasonPromises);
+    const seasons: any[] = [];
+
+    results.forEach((res, index) => {
+      const sNum = seasonNumbers[index];
+      if (res && res.data && res.data.episodes) {
+        const eps = res.data.episodes;
+        seasons.push({
+          season_number: sNum,
+          name: res.data.name || `Temporada ${sNum}`,
+          episodes_count: eps.length,
+          poster: res.data.poster_path ? `https://image.tmdb.org/t/p/w500${res.data.poster_path}` : (posterUrl || null),
+          episodes: eps.map((e: any) => ({
+            episode_number: e.episode_number,
+            name: e.name || `Episodio ${e.episode_number}`,
+            overview: e.overview || `Episodio ${e.episode_number} de la serie. Disponible en HD con audio Español Latino.`,
+            still_path: e.still_path ? `https://image.tmdb.org/t/p/w500${e.still_path}` : (posterUrl || null),
+            air_date: e.air_date || '',
+            servers: defaultServers || []
+          }))
+        });
+      }
+    });
+
+    return seasons;
+  }
+
+  /**
    * Enriquece un MediaItem con metadatos oficiales de TMDB:
-   * sinopsis completa en español, trailers oficiales de YouTube, imágenes HD, reparto con fotos, géneros, etc.
+   * sinopsis completa en español, trailers oficiales de YouTube, imágenes HD, reparto con fotos, géneros, temporadas, etc.
    */
   static async enrichMediaItem(item: MediaItem): Promise<MediaItem> {
     try {
@@ -145,6 +185,9 @@ export class TmdbService {
         item.id = String(tmdbId);
         return item;
       }
+
+      const isTv = (tmdbData.number_of_seasons && tmdbData.number_of_seasons > 0) || item.type === 'tvseries' || tmdbData.first_air_date !== undefined;
+      const contentType = isTv ? 'tvseries' as const : 'movie' as const;
 
       // Seleccionar Trailer oficial en YouTube (priorizar español)
       const videos = tmdbData.all_videos || tmdbData.videos?.results || [];
@@ -172,10 +215,17 @@ export class TmdbService {
       // Mapear géneros oficiales
       const genres = tmdbData.genres?.map((g: any) => g.name) || item.genres;
 
+      // Mapear temporadas y episodios si es una serie de TV
+      let seasons = item.seasons || [];
+      if (isTv && (!seasons || seasons.length === 0) && tmdbData.number_of_seasons > 0) {
+        seasons = await this.getTmdbSeasons(tmdbData.id, tmdbData.number_of_seasons, tmdbData.poster_path ? `https://image.tmdb.org/t/p/w500${tmdbData.poster_path}` : item.poster, item.servers || []);
+      }
+
       return {
         ...item,
         id: String(tmdbData.id),
         tmdb_id: tmdbData.id,
+        type: contentType,
         title: tmdbData.title || tmdbData.name || item.title,
         original_title: tmdbData.original_title || tmdbData.original_name || item.original_title,
         tagline: tmdbData.tagline || item.tagline || '',
@@ -189,7 +239,8 @@ export class TmdbService {
         cast: castNames,
         cast_details: castMembers.length > 0 ? castMembers : item.cast_details,
         total_seasons: tmdbData.number_of_seasons || item.total_seasons,
-        total_episodes: tmdbData.number_of_episodes || item.total_episodes
+        total_episodes: tmdbData.number_of_episodes || item.total_episodes,
+        seasons: seasons.length > 0 ? seasons : item.seasons
       };
     } catch (err: any) {
       console.warn(`[TMDB Enrich Error]: ${err.message}`);
