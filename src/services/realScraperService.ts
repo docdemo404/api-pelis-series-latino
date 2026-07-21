@@ -72,6 +72,17 @@ function getServerName(url: string, label?: string): string {
   return 'Servidor Latino';
 }
 
+/**
+ * Extrae el slug canónico de cualquier URL de TioPlus (evita números de episodios o temporadas como slug)
+ */
+function extractCanonicalSlug(href: string): string {
+  if (!href) return '';
+  const match = href.match(/\/(pelicula|serie|anime|dorama)\/([^\/]+)/i);
+  if (match) return match[2];
+  const parts = href.split('/').filter(Boolean);
+  return parts.pop() || '';
+}
+
 export class RealScraperService {
   /**
    * Scrapea el homepage completo de TioPlus (slider + secciones)
@@ -99,9 +110,9 @@ export class RealScraperService {
         const yearMatch = h2Text.match(/\((\d{4})\)/);
         const year = yearMatch ? yearMatch[1] : '';
         const cleanTitle = h2Text.replace(/\s*\(\d{4}\)\s*$/, '').trim();
-        const slug = href.split('/').filter(Boolean).pop() || '';
+        const slug = extractCanonicalSlug(href);
 
-        if (seenSlugs.has(slug)) return;
+        if (!slug || seenSlugs.has(slug)) return;
         seenSlugs.add(slug);
 
         const contentType = href.includes('/serie/') || href.includes('/anime/')
@@ -142,8 +153,8 @@ export class RealScraperService {
 
         if (!href || !titleText) return;
 
-        const slug = href.split('/').filter(Boolean).pop() || '';
-        if (seenSlugs.has(slug)) return;
+        const slug = extractCanonicalSlug(href);
+        if (!slug || seenSlugs.has(slug)) return;
         seenSlugs.add(slug);
 
         const yearMatch = titleText.match(/\((\d{4})\)/);
@@ -393,8 +404,8 @@ export class RealScraperService {
         if (!href || (!href.includes('/pelicula/') && !href.includes('/serie/') && !href.includes('/anime/'))) return;
 
         // Evitar duplicados
-        const slug = href.split('/').filter(Boolean).pop() || '';
-        if (results.some(r => r.id === slug)) return;
+        const slug = extractCanonicalSlug(href);
+        if (!slug || results.some(r => r.id === slug)) return;
 
         const imgEl = $el.find('img').first();
         const poster = imgEl.attr('data-src') || imgEl.attr('src') || null;
