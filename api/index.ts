@@ -48,7 +48,23 @@ app.get('/api/v1/discover', async (req: Request, res: Response) => {
   res.json({ status: 'success', data: result });
 });
 
-// Búsqueda inteligente por título u alias
+// Búsqueda general (Películas, Series, Animes, Doramas)
+app.get('/api/v1/search', async (req: Request, res: Response) => {
+  const q = req.query.q as string;
+  if (!q) {
+    return res.status(400).json({ status: 'error', message: 'Parámetro ?q= es requerido' });
+  }
+
+  const results = await CatalogService.search(q);
+  res.json({
+    status: 'success',
+    query: q,
+    count: results.length,
+    results
+  });
+});
+
+// Alias para mantener compatibilidad
 app.get('/api/v1/movies/search', async (req: Request, res: Response) => {
   const q = req.query.q as string;
   if (!q) {
