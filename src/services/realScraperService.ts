@@ -440,9 +440,10 @@ export class RealScraperService {
       const backdrop = bgMatch ? bgMatch[1] : (ogImage || null);
 
       // Cast
-      const cast: CastMember[] = [];
+      const cast: string[] = [];
       $('a[href*="/actor/"]').each((_, el) => {
-        cast.push({ name: $(el).text().trim(), character: '', photo: null });
+        const actorName = $(el).text().trim();
+        if (actorName && !cast.includes(actorName)) cast.push(actorName);
       });
 
       // Director

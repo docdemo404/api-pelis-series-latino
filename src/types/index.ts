@@ -62,7 +62,8 @@ export interface MediaItem {
   backdrop: string | null;
   logo: string | null;
   trailer: string | null;
-  cast: CastMember[];
+  cast: string[];
+  cast_details?: CastMember[];
   dubbing_cast: DubbingMember[];
   // Solo para películas
   primary_stream?: ServerOption;

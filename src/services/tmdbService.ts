@@ -156,12 +156,20 @@ export class TmdbService {
 
       const trailerUrl = trailerObj ? `https://www.youtube.com/watch?v=${trailerObj.key}` : item.trailer;
 
-      // Mapear reparto con fotografías de TMDB
+      // Mapear reparto con fotografías de TMDB y lista simple de nombres
       const castMembers: CastMember[] = tmdbData.credits?.cast?.slice(0, 12).map((c: any) => ({
         name: c.name,
         character: c.character || '',
         photo: c.profile_path ? `https://image.tmdb.org/t/p/w185${c.profile_path}` : null
-      })) || item.cast;
+      })) || [];
+
+      const existingCastStrings: string[] = Array.isArray(item.cast)
+        ? item.cast.map((c: any) => (typeof c === 'string' ? c : (c.name || '')))
+        : [];
+
+      const castNames: string[] = castMembers.length > 0
+        ? castMembers.map(c => c.name)
+        : existingCastStrings;
 
       // Mapear géneros oficiales
       const genres = tmdbData.genres?.map((g: any) => g.name) || item.genres;
@@ -180,7 +188,8 @@ export class TmdbService {
         poster: tmdbData.poster_path ? `https://image.tmdb.org/t/p/w500${tmdbData.poster_path}` : item.poster,
         backdrop: tmdbData.backdrop_path ? `https://image.tmdb.org/t/p/w1280${tmdbData.backdrop_path}` : item.backdrop,
         trailer: trailerUrl,
-        cast: castMembers,
+        cast: castNames,
+        cast_details: castMembers.length > 0 ? castMembers : item.cast_details,
         total_seasons: tmdbData.number_of_seasons || item.total_seasons,
         total_episodes: tmdbData.number_of_episodes || item.total_episodes
       };

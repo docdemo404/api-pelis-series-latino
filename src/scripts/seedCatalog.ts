@@ -24,7 +24,8 @@ const initialLatinoCatalog: MediaItem[] = [
     backdrop: 'https://image.tmdb.org/t/p/original/96...jpg',
     logo: 'https://image.tmdb.org/t/p/original/logo_home_alone.png',
     trailer: 'https://www.youtube.com/watch?v=CK2Btk6k2m4',
-    cast: [
+    cast: ['Macaulay Culkin', 'Joe Pesci'],
+    cast_details: [
       { name: 'Macaulay Culkin', character: 'Kevin McCallister', photo: 'https://image.tmdb.org/t/p/w185/macaulay.jpg' },
       { name: 'Joe Pesci', character: 'Harry', photo: 'https://image.tmdb.org/t/p/w185/pesci.jpg' }
     ],
@@ -73,7 +74,8 @@ const initialLatinoCatalog: MediaItem[] = [
     backdrop: 'https://image.tmdb.org/t/p/original/96...jpg',
     logo: 'https://image.tmdb.org/t/p/original/logo_simpsons.png',
     trailer: 'https://www.youtube.com/watch?v=DXUAyRRkI6c',
-    cast: [
+    cast: ['Dan Castellaneta'],
+    cast_details: [
       { name: 'Dan Castellaneta', character: 'Homer Simpson', photo: 'https://image.tmdb.org/t/p/w185/dan.jpg' }
     ],
     dubbing_cast: [
@@ -102,7 +104,8 @@ const initialLatinoCatalog: MediaItem[] = [
     backdrop: 'https://image.tmdb.org/t/p/original/xg270y.jpg',
     logo: 'https://image.tmdb.org/t/p/original/logo_insideout2.png',
     trailer: 'https://www.youtube.com/watch?v=LEjhY15eCx0',
-    cast: [
+    cast: ['Amy Poehler'],
+    cast_details: [
       { name: 'Amy Poehler', character: 'Joy', photo: null }
     ],
     dubbing_cast: [
@@ -139,7 +142,8 @@ const initialLatinoCatalog: MediaItem[] = [
     backdrop: 'https://image.tmdb.org/t/p/original/yDHYT.jpg',
     logo: 'https://image.tmdb.org/t/p/original/logo_deadpool.png',
     trailer: 'https://www.youtube.com/watch?v=73_14844654',
-    cast: [
+    cast: ['Ryan Reynolds', 'Hugh Jackman'],
+    cast_details: [
       { name: 'Ryan Reynolds', character: 'Wade Wilson / Deadpool', photo: null },
       { name: 'Hugh Jackman', character: 'Logan / Wolverine', photo: null }
     ],

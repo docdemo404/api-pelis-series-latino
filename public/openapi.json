@@ -224,6 +224,11 @@
           "trailer": { "type": "string", "nullable": true, "description": "URL oficial de tráiler en YouTube (prioriza audio Latino)" },
           "cast": {
             "type": "array",
+            "items": { "type": "string" },
+            "description": "Lista de nombres simples de actores del reparto (evita [object Object] en clientes)"
+          },
+          "cast_details": {
+            "type": "array",
             "items": {
               "type": "object",
               "properties": {
@@ -232,7 +237,7 @@
                 "photo": { "type": "string", "nullable": true }
               }
             },
-            "description": "Lista de reparto principal enriquecida desde TMDB con fotos"
+            "description": "Lista detallada del reparto enriquecida desde TMDB con fotos y nombres de personaje"
           },
           "servers": { "type": "array", "items": { "$ref": "#/components/schemas/ServerOption" }, "description": "Presente únicamente cuando type = movie" },
           "total_seasons": { "type": "integer", "description": "Presente únicamente cuando type = tvseries" },
