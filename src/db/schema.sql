@@ -28,45 +28,25 @@ CREATE TABLE IF NOT EXISTS media_items (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 2. Tabla de Temporadas
-CREATE TABLE IF NOT EXISTS seasons (
-    id SERIAL PRIMARY KEY,
-    media_id VARCHAR(255) REFERENCES media_items(id) ON DELETE CASCADE,
-    season_number INT NOT NULL,
-    name VARCHAR(255),
-    episodes_count INT DEFAULT 0,
-    poster TEXT,
-    UNIQUE(media_id, season_number)
-);
+-- Desactivar RLS o permitir acceso de lectura/escritura público para la API
+ALTER TABLE media_items DISABLE ROW LEVEL SECURITY;
 
--- 3. Tabla de Episodios
-CREATE TABLE IF NOT EXISTS episodes (
-    id SERIAL PRIMARY KEY,
-    season_id INT REFERENCES seasons(id) ON DELETE CASCADE,
-    episode_number INT NOT NULL,
-    name VARCHAR(500),
-    original_name VARCHAR(500),
-    overview TEXT,
-    still_path TEXT,
-    air_date VARCHAR(50)
-);
-
--- 4. Tabla de Servidores de Video y Enlaces
+-- 2. Tabla de Servidores de Video y Enlaces
 CREATE TABLE IF NOT EXISTS video_servers (
     id VARCHAR(255) PRIMARY KEY,
     media_id VARCHAR(255) REFERENCES media_items(id) ON DELETE CASCADE,
-    episode_id INT REFERENCES episodes(id) ON DELETE CASCADE,
     name VARCHAR(100) NOT NULL,
-    quality VARCHAR(20) NOT NULL CHECK (quality IN ('4K', '1080p', '720p', '480p')),
-    language VARCHAR(50) NOT NULL CHECK (language IN ('latino', 'subtitulado', 'castellano')),
+    quality VARCHAR(20) NOT NULL,
+    language VARCHAR(50) NOT NULL,
     embed_url TEXT NOT NULL,
     direct_stream TEXT,
-    status VARCHAR(20) DEFAULT 'online' CHECK (status IN ('online', 'offline', 'checking')),
+    status VARCHAR(20) DEFAULT 'online',
     last_checked TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 5. Índices de Búsqueda Instantánea (< 10ms)
+ALTER TABLE video_servers DISABLE ROW LEVEL SECURITY;
+
+-- 3. Índices de Búsqueda Instantánea (< 10ms)
 CREATE INDEX IF NOT EXISTS idx_media_type ON media_items(type);
 CREATE INDEX IF NOT EXISTS idx_media_title ON media_items USING gin(to_tsvector('spanish', title));
 CREATE INDEX IF NOT EXISTS idx_media_aliases ON media_items USING gin(aliases);
-CREATE INDEX IF NOT EXISTS idx_servers_status ON video_servers(status);
