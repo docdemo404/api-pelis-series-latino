@@ -73,6 +73,26 @@ async function verifyEmbedStatus(embedUrl: string): Promise<'online' | 'offline'
       }
     }
 
+    // Inspeccionar iframe interno de nivel 2 si el reproductor está encapsulado (ej. waaw.to / netu)
+    const innerIframeMatch = html.match(/iframe[^>]+src=["']([^"']+)["']/i);
+    if (innerIframeMatch) {
+      const innerPath = innerIframeMatch[1];
+      const innerUrl = innerPath.startsWith('http') ? innerPath : `${new URL(embedUrl).origin}${innerPath}`;
+      try {
+        const innerRes = await axios.get(innerUrl, {
+          headers: { 'User-Agent': UA, 'Referer': embedUrl },
+          timeout: 3000,
+          validateStatus: () => true
+        });
+        const innerHtml = typeof innerRes.data === 'string' ? innerRes.data : '';
+        for (const pattern of SOFT_ERROR_PATTERNS) {
+          if (pattern.test(innerHtml)) {
+            return 'offline';
+          }
+        }
+      } catch {}
+    }
+
     // HTML extremadamente corto sin reproductores
     if (html.length < 250 && !html.includes('jwplayer') && !html.includes('video') && !html.includes('iframe') && !html.includes('source') && !html.includes('script')) {
       return 'offline';
