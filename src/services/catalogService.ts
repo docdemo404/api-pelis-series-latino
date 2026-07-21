@@ -153,18 +153,12 @@ export class CatalogService {
             const tvMatch = tvSearch.some(r => r.tmdb_id === tmdbNumericId || norm(r.title) === tvNorm);
             const movieMatch = movieSearch.some(r => r.tmdb_id === tmdbNumericId || norm(r.title) === movieNorm);
 
-            if (tvMatch && !movieMatch) {
-              tmdbData = tmdbTvData;
-              contentType = 'tvseries';
-            } else if (movieMatch && !tvMatch) {
+            if (movieMatch && !tvMatch) {
               tmdbData = tmdbMovieData;
               contentType = 'movie';
-            } else if (tmdbTvData.number_of_seasons > 0 || tmdbTvData.number_of_episodes > 0 || tvVotes > movieVotes) {
-              tmdbData = tmdbTvData;
-              contentType = 'tvseries';
             } else {
-              tmdbData = tmdbMovieData;
-              contentType = 'movie';
+              tmdbData = tmdbTvData;
+              contentType = 'tvseries';
             }
           }
         }
