@@ -39,7 +39,8 @@ const SOFT_ERROR_PATTERNS = [
   /got deleted by the owner/i,
   /removed due a copyright/i,
   /copyright violation/i,
-  /file you are looking for/i
+  /file you are looking for/i,
+  /too many requests/i
 ];
 
 /**
@@ -90,6 +91,34 @@ async function verifyEmbedStatus(embedUrl: string): Promise<'online' | 'offline'
     // Detectar mensajes de error en capa de aplicación (Soft Errors)
     for (const pattern of SOFT_ERROR_PATTERNS) {
       if (pattern.test(html)) {
+        return 'offline';
+      }
+    }
+
+    // Detectar redirecciones JS de window.location / document.location (ej. listeamed.net)
+    const jsLocationMatch = html.match(/window\.location\.(?:replace|href)\s*=\s*['"]([^'"]+)['"]/i) ||
+                            html.match(/document\.location\.(?:replace|href)\s*=\s*['"]([^'"]+)['"]/i);
+    if (jsLocationMatch) {
+      const redirectPath = jsLocationMatch[1];
+      const targetUrl = redirectPath.startsWith('http') ? redirectPath : `${new URL(embedUrl).origin}${redirectPath}`;
+      try {
+        const jsRes = await axios.get(targetUrl, {
+          headers: { 'User-Agent': UA, 'Referer': embedUrl },
+          timeout: 4000,
+          validateStatus: () => true
+        });
+
+        if (jsRes.status >= 400 || jsRes.status === 429 || jsRes.status === 410) {
+          return 'offline';
+        }
+
+        const jsHtml = typeof jsRes.data === 'string' ? jsRes.data : '';
+        for (const pattern of SOFT_ERROR_PATTERNS) {
+          if (pattern.test(jsHtml)) {
+            return 'offline';
+          }
+        }
+      } catch {
         return 'offline';
       }
     }
