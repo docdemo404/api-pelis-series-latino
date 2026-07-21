@@ -193,7 +193,7 @@ export class RealScraperService {
       const $ = cheerio.load(res.data);
 
       // === METADATOS ===
-      const h1 = $('h1.slugh1').first().text().trim() || $('h1').first().text().trim();
+      const h1 = $('h1.slugh1').first().text().trim() || $('h1').first().text().trim() || $('h2').first().text().trim() || $('title').text().trim();
       if (!h1) return null;
 
       const yearMatch = h1.match(/\((\d{4})\)/);
