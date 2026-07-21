@@ -397,6 +397,9 @@ export class RealScraperService {
    * Cada token data-server se resuelve a una URL de iframe real (vidhideplus, streamwish, etc).
    */
   static async scrapeDetail(tioplusUrl: string): Promise<MediaItem | null> {
+    if (tioplusUrl.includes('fuegocine.com')) {
+      return this.scrapeFuegocineDetail(tioplusUrl);
+    }
     try {
       const res = await httpGet(tioplusUrl);
       const $ = cheerio.load(res.data);
@@ -763,7 +766,140 @@ export class RealScraperService {
       }
     }
 
+    const fuegocineItems = await this.scrapeFuegocine(q);
+    if (fuegocineItems.length > 0) {
+      for (const item of fuegocineItems) {
+        if (!results.some(r => r.title.toLowerCase() === item.title.toLowerCase())) {
+          results.push(item);
+        }
+      }
+    }
+
     return results;
+  }
+
+  /**
+   * Scrapea los metadatos y servidores de un post en FuegoCine (fuegocine.com)
+   */
+  static async scrapeFuegocineDetail(fuegocineUrl: string): Promise<MediaItem | null> {
+    try {
+      const res = await axios.get(fuegocineUrl, { headers: { 'User-Agent': UA }, timeout: 5000 });
+      const html = typeof res.data === 'string' ? res.data : '';
+      const $ = cheerio.load(html);
+
+      const titleRaw = $('h1.post-title, h1, .entry-title').first().text().trim();
+      if (!titleRaw) return null;
+
+      const slug = fuegocineUrl.replace(/^https?:\/\/[^\/]+/, '').replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase();
+      const poster = $('meta[property="og:image"]').attr('content') || $('img').first().attr('src') || null;
+      const overview = $('.post-body, .entry-content').text().trim().substring(0, 300);
+      const isMovie = !titleRaw.toLowerCase().includes('temporada') && !/\d+x\d+/.test(titleRaw);
+
+      const servers: ServerOption[] = [];
+      const svMatch = html.match(/const\s+_SV_LINKS\s*=\s*(\[[\s\S]*?\]);/);
+      if (svMatch) {
+        const arrayText = svMatch[1];
+        const objectRegex = /lang:\s*["']([^"']+)["'][\s\S]*?name:\s*["']([^"']+)["'][\s\S]*?quality:\s*["']([^"']+)["'][\s\S]*?url:\s*["']([^"']+)["']/g;
+        let m;
+        let idx = 1;
+        while ((m = objectRegex.exec(arrayText)) !== null) {
+          const lang = m[1];
+          const rawName = m[2].replace(/&#9989;/g, ' (Verificado)').trim();
+          const quality = m[3] || '1080p';
+          const embedUrl = m[4];
+
+          if (embedUrl) {
+            const status = await verifyEmbedStatus(embedUrl);
+            servers.push({
+              id: `srv_fc_${slug}_${idx++}`,
+              name: `FuegoCine - ${rawName}`,
+              quality: '1080p',
+              language: lang.includes('sub') ? 'subtitulado' : lang.includes('cas') ? 'castellano' : 'latino',
+              embed_url: embedUrl,
+              status,
+              last_checked: new Date().toISOString()
+            });
+          }
+        }
+      }
+
+      return {
+        id: slug,
+        tmdb_id: 0,
+        imdb_id: null,
+        type: isMovie ? 'movie' as const : 'tvseries' as const,
+        title: titleRaw,
+        original_title: titleRaw,
+        aliases: [titleRaw],
+        overview: overview || `Ver ${titleRaw} online gratis en FuegoCine con audio Latino.`,
+        rating: 0,
+        content_rating: 'PG-13',
+        release_date: '',
+        genres: [],
+        subcategories: ['Latino HD', 'FuegoCine'],
+        poster,
+        backdrop: poster,
+        logo: null,
+        trailer: null,
+        cast: [],
+        dubbing_cast: [],
+        primary_stream: servers[0] || undefined,
+        servers: servers.length > 0 ? servers : undefined,
+        _tioplus_url: fuegocineUrl
+      } as any;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Busca contenido en FuegoCine usando su Feed JSON de Blogger
+   */
+  static async scrapeFuegocine(query: string): Promise<MediaItem[]> {
+    try {
+      const feedUrl = `https://www.fuegocine.com/feeds/posts/summary?q=${encodeURIComponent(query)}&alt=json&max-results=10`;
+      const res = await axios.get(feedUrl, { headers: { 'User-Agent': UA }, timeout: 4000 });
+      const entries = res.data?.feed?.entry || [];
+      const items: MediaItem[] = [];
+
+      for (const e of entries) {
+        const titleRaw = e.title?.$t || '';
+        const link = e.link?.find((l: any) => l.rel === 'alternate')?.href || '';
+        if (!titleRaw || !link) continue;
+
+        const slug = link.replace(/^https?:\/\/[^\/]+/, '').replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase();
+        const poster = e.media$thumbnail?.url ? e.media$thumbnail.url.replace(/\/s\d+(-c)?\//, '/s500/') : null;
+        const yearMatch = titleRaw.match(/\((\d{4})\)/);
+        const year = yearMatch ? yearMatch[1] : '';
+        const cleanTitle = titleRaw.replace(/\s*\(\d{4}\)\s*$/, '').trim();
+        const isTv = titleRaw.toLowerCase().includes('temporada') || titleRaw.toLowerCase().includes('serie') || /\d+x\d+/.test(titleRaw);
+
+        items.push({
+          id: slug,
+          tmdb_id: 0,
+          imdb_id: null,
+          type: isTv ? 'tvseries' as const : 'movie' as const,
+          title: cleanTitle,
+          original_title: cleanTitle,
+          aliases: [cleanTitle],
+          overview: `Ver ${cleanTitle} online gratis en FuegoCine con audio Latino.`,
+          rating: 0,
+          release_date: year,
+          genres: [],
+          subcategories: ['Latino HD', 'FuegoCine'],
+          poster,
+          backdrop: poster,
+          logo: null,
+          trailer: null,
+          cast: [],
+          dubbing_cast: [],
+          _tioplus_url: link
+        } as any);
+      }
+      return items;
+    } catch {
+      return [];
+    }
   }
 
   /**
