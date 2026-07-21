@@ -188,11 +188,16 @@ export class CatalogService {
       }
     }
 
-    // 3. Buscar por texto o TMDB ID de forma inteligente con unificación profunda
+    // 3. Buscar por texto o TMDB ID de forma inteligente con filtro estricto de título / slug / alias
     if (!result) {
       const scraped = await this.search(q);
       if (scraped.length > 0) {
-        result = scraped[0];
+        const norm = (t: string) => t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "").trim();
+        const targetNorm = norm(q);
+        const match = scraped.find(r => r.id === q || String(r.tmdb_id) === q || norm(r.title) === targetNorm || (r.aliases && r.aliases.some(a => norm(a) === targetNorm)));
+        if (match) {
+          result = match;
+        }
       }
     }
 
