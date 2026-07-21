@@ -253,6 +253,19 @@ export class CatalogService {
       }
     }
 
+    // 6. Garantía de Temporadas: Si es una serie (tvseries) y sus temporadas están vacías, poblar desde TMDB
+    if (result && (result.type === 'tvseries' || (result.total_seasons && result.total_seasons > 0))) {
+      if (!result.seasons || result.seasons.length === 0) {
+        const numSeasons = result.total_seasons || 1;
+        const tmdbId = result.tmdb_id || Number(result.id);
+        if (tmdbId > 0) {
+          try {
+            result.seasons = await TmdbService.getTmdbSeasons(tmdbId, numSeasons, result.poster, result.servers || []);
+          } catch {}
+        }
+      }
+    }
+
     // ÚNICAMENTE almacenar en caché si se encontraron servidores o temporadas válidas
     if (result && ((result.servers && result.servers.length > 0) || (result.seasons && result.seasons.length > 0))) {
       getByIdCache.set(q, { timestamp: Date.now(), data: result });

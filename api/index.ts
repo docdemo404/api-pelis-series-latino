@@ -18,6 +18,10 @@ app.use((req: Request, res: Response, next: NextFunction) => {
     if (req.path.includes('/panel') || req.path.includes('/stream/resolve') || req.path.includes('/revalidate') || req.path.includes('/cache')) {
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+    } else if (req.path.includes('/media/') || req.path.includes('/series/')) {
+      res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=3600');
+      res.setHeader('CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=3600');
+      res.setHeader('Vercel-CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=3600');
     } else {
       res.setHeader('Cache-Control', 'public, max-age=3600, s-maxage=86400, stale-while-revalidate=604800');
       res.setHeader('CDN-Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
