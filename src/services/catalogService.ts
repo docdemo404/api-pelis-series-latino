@@ -124,12 +124,15 @@ export class CatalogService {
           // Búsqueda con timeout estricto de 1.5s para no congelar la respuesta del cliente
           const timeoutPromise = new Promise<MediaItem[]>((resolve) => setTimeout(() => resolve([]), 1500));
           const searchResults = await Promise.race([this.search(title), timeoutPromise]);
-          const match = searchResults.find(r => r.tmdb_id === tmdbNumericId) || searchResults[0];
+
+          const getCanonicalKey = (t: string) => t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "").trim();
+          const targetKey = getCanonicalKey(title);
+          const match = searchResults.find(r => r.tmdb_id === tmdbNumericId || getCanonicalKey(r.title) === targetKey);
 
           if (match) {
             result = await TmdbService.enrichMediaItem(match);
           } else {
-            // Construcción directa e instantánea desde metadatos TMDB
+            // Construcción directa e instantánea desde metadatos TMDB (preservando ID y título exactos)
             result = await TmdbService.enrichMediaItem({
               id: String(tmdbData.id),
               tmdb_id: tmdbData.id,
@@ -242,7 +245,9 @@ export class CatalogService {
 
       if (!result.servers || result.servers.length === 0) {
         const searchResults = await this.search(result.title);
-        const match = searchResults.find(r => r.servers && r.servers.length > 0) || searchResults[0];
+        const normTitle = (t: string) => t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "").trim();
+        const targetTitleKey = normTitle(result.title);
+        const match = searchResults.find(r => (r.tmdb_id === result.tmdb_id || normTitle(r.title) === targetTitleKey) && r.servers && r.servers.length > 0);
         if (match && match.servers && match.servers.length > 0) {
           result.servers = match.servers;
           result.primary_stream = match.primary_stream || match.servers[0];
