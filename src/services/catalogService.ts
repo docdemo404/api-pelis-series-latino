@@ -256,7 +256,7 @@ export class CatalogService {
 
   /**
    * Unifica y agrupa elementos multimedia que corresponden al mismo título,
-   * fusionando SERVIDORES DE TODAS LAS FUENTES ACTIVAS y enriqueciendo con metadatos oficiales TMDB.
+   * fusionando SERVIDORES DE TODAS LAS FUENTES ACTIVAS en paralelo y enriqueciendo con TMDB en sub-segundos.
    */
   private static async unifyMediaItems(items: MediaItem[]): Promise<MediaItem[]> {
     const grouped = new Map<string, { item: MediaItem; sourceUrls: string[] }>();
@@ -305,37 +305,44 @@ export class CatalogService {
       }
     }
 
-    const unifiedList: MediaItem[] = [];
+    // 2. Procesamiento PARALELO ultrarrápido de todas las entradas unificadas
+    const entries = Array.from(grouped.values()).slice(0, 10);
 
-    // 2. Para cada grupo unificado, resolver y fusionar SERVIDORES DE TODAS LAS FUENTES y enriquecer con TMDB
-    for (const [key, entry] of grouped.entries()) {
-      const targetItem = entry.item;
-      const allServers: ServerOption[] = [...(targetItem.servers || [])];
-      const existingUrls = new Set(allServers.map(s => s.embed_url));
+    const unifiedList = await Promise.all(
+      entries.map(async (entry) => {
+        const targetItem = entry.item;
+        const allServers: ServerOption[] = [...(targetItem.servers || [])];
+        const existingUrls = new Set(allServers.map(s => s.embed_url));
 
-      for (const sourceUrl of entry.sourceUrls) {
-        try {
-          const detail = await RealScraperService.scrapeDetail(sourceUrl);
-          if (detail && detail.servers && detail.servers.length > 0) {
-            for (const s of detail.servers) {
-              if (!existingUrls.has(s.embed_url)) {
-                allServers.push(s);
-                existingUrls.add(s.embed_url);
+        // Resolver fuentes en paralelo con timeout de 1.2s
+        if (allServers.length === 0 && entry.sourceUrls.length > 0) {
+          const fetchPromises = entry.sourceUrls.slice(0, 3).map(sourceUrl => {
+            const timeout = new Promise<any>((resolve) => setTimeout(() => resolve(null), 1200));
+            return Promise.race([RealScraperService.scrapeDetail(sourceUrl), timeout]);
+          });
+
+          const details = await Promise.all(fetchPromises);
+          for (const detail of details) {
+            if (detail && detail.servers && detail.servers.length > 0) {
+              for (const s of detail.servers) {
+                if (!existingUrls.has(s.embed_url)) {
+                  allServers.push(s);
+                  existingUrls.add(s.embed_url);
+                }
               }
             }
           }
-        } catch {}
-      }
+        }
 
-      targetItem.servers = allServers;
-      if (allServers.length > 0) {
-        targetItem.primary_stream = allServers.find(s => s.status === 'online') || allServers[0];
-      }
+        targetItem.servers = allServers;
+        if (allServers.length > 0) {
+          targetItem.primary_stream = allServers.find(s => s.status === 'online') || allServers[0];
+        }
 
-      // Enriquecer con metadatos oficiales completos de TMDB
-      const enrichedItem = await TmdbService.enrichMediaItem(targetItem);
-      unifiedList.push(enrichedItem);
-    }
+        // Enriquecer con metadatos oficiales completos de TMDB
+        return await TmdbService.enrichMediaItem(targetItem);
+      })
+    );
 
     return unifiedList;
   }

@@ -235,6 +235,24 @@
         "summary": "Invalidar y revalidar la caché de borde y memoria",
         "responses": { "200": { "description": "Caché invalidado con éxito" } }
       }
+    },
+    "/api/v1/stream/proxy": {
+      "get": {
+        "summary": "Proxy de Streaming de Video con soporte nativo HTTP Range Requests (206 Partial Content)",
+        "parameters": [
+          {
+            "name": "url",
+            "in": "query",
+            "required": true,
+            "description": "URL directa de video (MP4 o M3U8 HLS)",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "206": { "description": "Respuesta parcial de flujo de video (Range Request Seek)" },
+          "200": { "description": "Flujo de video completo" }
+        }
+      }
     }
   },
   "components": {

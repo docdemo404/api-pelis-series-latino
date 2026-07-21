@@ -1,6 +1,7 @@
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import path from 'path';
+import axios from 'axios';
 import { CatalogService } from '../src/services/catalogService';
 import { FeedService } from '../src/services/feedService';
 import { ResolverService } from '../src/services/resolverService';
@@ -565,6 +566,45 @@ app.get('/api/v1/stream/resolve', async (req: Request, res: Response, next: Next
 
     const resolved = await ResolverService.resolveStreamToken(id, originalUrl);
     res.json({ status: 'success', data: resolved });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Proxy de Streaming con soporte nativo de HTTP Range Requests (206 Partial Content) para Seek instantáneo
+app.get('/api/v1/stream/proxy', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const videoUrl = req.query.url as string;
+    if (!videoUrl) {
+      return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'El parámetro ?url= es requerido');
+    }
+
+    const range = req.headers.range;
+    const originHeaders: Record<string, string> = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+      'Referer': new URL(videoUrl).origin + '/',
+      ...(range ? { 'Range': range } : {})
+    };
+
+    const response = await axios.get(videoUrl, {
+      headers: originHeaders,
+      responseType: 'stream',
+      validateStatus: (status) => status >= 200 && status < 400
+    });
+
+    res.status(response.status);
+    const cr = response.headers['content-range'];
+    if (cr) res.setHeader('Content-Range', String(cr));
+    const ar = response.headers['accept-ranges'];
+    if (ar) res.setHeader('Accept-Ranges', String(ar));
+    else res.setHeader('Accept-Ranges', 'bytes');
+    const cl = response.headers['content-length'];
+    if (cl) res.setHeader('Content-Length', String(cl));
+    const ct = response.headers['content-type'];
+    if (ct) res.setHeader('Content-Type', String(ct));
+    else res.setHeader('Content-Type', videoUrl.includes('.m3u8') ? 'application/x-mpegURL' : 'video/mp4');
+
+    response.data.pipe(res);
   } catch (err) {
     next(err);
   }
