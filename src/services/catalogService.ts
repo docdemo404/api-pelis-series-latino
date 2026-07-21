@@ -86,9 +86,10 @@ export class CatalogService {
    */
   static async getById(id: string, typeHint?: ContentType): Promise<MediaItem | null> {
     const q = id.toLowerCase().trim();
+    const cacheKey = typeHint ? `${q}:${typeHint}` : q;
 
     // Verificación de caché en memoria
-    const cached = getByIdCache.get(q);
+    const cached = getByIdCache.get(cacheKey);
     if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
       return cached.data;
     }
@@ -324,8 +325,9 @@ export class CatalogService {
 
     // ÚNICAMENTE almacenar en caché si se encontraron servidores o temporadas válidas
     if (result && ((result.servers && result.servers.length > 0) || (result.seasons && result.seasons.length > 0))) {
-      getByIdCache.set(q, { timestamp: Date.now(), data: result });
+      getByIdCache.set(cacheKey, { timestamp: Date.now(), data: result });
       getByIdCache.set(result.id, { timestamp: Date.now(), data: result });
+      getByIdCache.set(`${result.id}:${result.type}`, { timestamp: Date.now(), data: result });
     }
 
     return result;
