@@ -89,24 +89,6 @@ app.get('/api/v1/movies/search', async (req: Request, res: Response) => {
   });
 });
 
-// Detalle por ID o Slug
-app.get('/api/v1/media/:id', async (req: Request, res: Response) => {
-  const item = await CatalogService.getById(req.params.id);
-  if (!item) {
-    return res.status(404).json({ status: 'error', message: 'Contenido no encontrado' });
-  }
-  res.json({ status: 'success', data: item });
-});
-
-// Detalle específico para Series
-app.get('/api/v1/series/:id', async (req: Request, res: Response) => {
-  const item = await CatalogService.getById(req.params.id);
-  if (!item) {
-    return res.status(404).json({ status: 'error', message: 'Serie no encontrada' });
-  }
-  res.json({ status: 'success', data: item });
-});
-
 // Detalle de Episodio específico (Servidores de reproducción del episodio)
 app.get('/api/v1/series/:id/season/:season/episode/:episode', async (req: Request, res: Response) => {
   const { id, season, episode } = req.params;
@@ -115,6 +97,34 @@ app.get('/api/v1/series/:id/season/:season/episode/:episode', async (req: Reques
     return res.status(404).json({ status: 'error', message: 'Episodio no encontrado' });
   }
   res.json({ status: 'success', data: epDetail });
+});
+
+// Detalle específico para Series
+app.get('/api/v1/series/:id', async (req: Request, res: Response) => {
+  const { season, episode } = req.query;
+  if (season && episode) {
+    const epDetail = await RealScraperService.scrapeEpisodeDetail(req.params.id, parseInt(season as string), parseInt(episode as string));
+    if (epDetail) return res.json({ status: 'success', data: epDetail });
+  }
+  const item = await CatalogService.getById(req.params.id);
+  if (!item) {
+    return res.status(404).json({ status: 'error', message: 'Serie no encontrada' });
+  }
+  res.json({ status: 'success', data: item });
+});
+
+// Detalle por ID o Slug (Películas o Series con soporte de ?season=1&episode=1)
+app.get('/api/v1/media/:id', async (req: Request, res: Response) => {
+  const { season, episode } = req.query;
+  if (season && episode) {
+    const epDetail = await RealScraperService.scrapeEpisodeDetail(req.params.id, parseInt(season as string), parseInt(episode as string));
+    if (epDetail) return res.json({ status: 'success', data: epDetail });
+  }
+  const item = await CatalogService.getById(req.params.id);
+  if (!item) {
+    return res.status(404).json({ status: 'error', message: 'Contenido no encontrado' });
+  }
+  res.json({ status: 'success', data: item });
 });
 
 // Resolver Token Dinámico de Stream
