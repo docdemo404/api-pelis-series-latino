@@ -487,6 +487,36 @@ export class RealScraperService {
       });
     }
 
+    // 2b. Si es una búsqueda sin espacios (ej. "breakingbad", "betterman", "scarymovie", "badboys") y devolvió 0 resultados
+    if (results.length === 0 && !q.includes(' ') && q.length >= 5) {
+      const candidates: MediaItem[] = [];
+      const lowerQ = q.toLowerCase();
+
+      for (let i = 3; i <= lowerQ.length - 3; i++) {
+        const part1 = lowerQ.substring(0, i);
+        const part2 = lowerQ.substring(i);
+
+        const items1 = await fetchSearchHtml(part1);
+        const matched = items1.filter(item => {
+          const titleLower = item.title.toLowerCase();
+          return titleLower.includes(part2);
+        });
+
+        if (matched.length > 0) {
+          candidates.push(...matched);
+          break;
+        }
+      }
+
+      // Eliminar duplicados
+      const seen = new Set<string>();
+      results = candidates.filter(item => {
+        if (seen.has(item.id)) return false;
+        seen.add(item.id);
+        return true;
+      });
+    }
+
     // 3. Resolver servidores del primer resultado si existe
     if (results.length > 0) {
       const firstUrl = (results[0] as any)._tioplus_url;
