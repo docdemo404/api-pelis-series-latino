@@ -4,6 +4,7 @@ import path from 'path';
 import { CatalogService } from '../src/services/catalogService';
 import { FeedService } from '../src/services/feedService';
 import { ResolverService } from '../src/services/resolverService';
+import { RealScraperService } from '../src/services/realScraperService';
 
 const app = express();
 app.use(cors());
@@ -104,6 +105,16 @@ app.get('/api/v1/series/:id', async (req: Request, res: Response) => {
     return res.status(404).json({ status: 'error', message: 'Serie no encontrada' });
   }
   res.json({ status: 'success', data: item });
+});
+
+// Detalle de Episodio específico (Servidores de reproducción del episodio)
+app.get('/api/v1/series/:id/season/:season/episode/:episode', async (req: Request, res: Response) => {
+  const { id, season, episode } = req.params;
+  const epDetail = await RealScraperService.scrapeEpisodeDetail(id, parseInt(season), parseInt(episode));
+  if (!epDetail) {
+    return res.status(404).json({ status: 'error', message: 'Episodio no encontrado' });
+  }
+  res.json({ status: 'success', data: epDetail });
 });
 
 // Resolver Token Dinámico de Stream

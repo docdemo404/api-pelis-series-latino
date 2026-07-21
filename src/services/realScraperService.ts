@@ -284,6 +284,42 @@ export class RealScraperService {
         : activeTab.includes('castellano') ? 'castellano' : 'latino';
       servers.forEach(s => { s.language = language as any; });
 
+      // === TEMPORADAS Y EPISODIOS PARA SERIES ===
+      let seasons: any[] = [];
+      let totalSeasons = 0;
+      let totalEpisodes = 0;
+
+      if (!isMovie) {
+        const rawHtml = typeof res.data === 'string' ? res.data : '';
+        const seasonsMatch = rawHtml.match(/const\s+seasonsJson\s*=\s*(\{[\s\S]*?\});/);
+        if (seasonsMatch) {
+          try {
+            const rawSeasons = JSON.parse(seasonsMatch[1]);
+            const seasonKeys = Object.keys(rawSeasons);
+            totalSeasons = seasonKeys.length;
+
+            seasons = seasonKeys.map(sNum => {
+              const epsRaw = rawSeasons[sNum] || [];
+              totalEpisodes += epsRaw.length;
+              return {
+                season_number: parseInt(sNum),
+                name: `Temporada ${sNum}`,
+                episodes_count: epsRaw.length,
+                poster: null,
+                episodes: epsRaw.map((e: any) => ({
+                  episode_number: e.episode,
+                  name: e.title || `Episodio ${e.episode}`,
+                  overview: '',
+                  still_path: e.image ? `https://image.tmdb.org/t/p/w500${e.image}` : null,
+                  air_date: null,
+                  servers: []
+                }))
+              };
+            });
+          } catch (e) {}
+        }
+      }
+
       return {
         id: slug,
         tmdb_id: 0,
@@ -306,12 +342,31 @@ export class RealScraperService {
         cast,
         dubbing_cast: [],
         primary_stream: servers[0] || undefined,
-        servers,
+        servers: isMovie ? servers : (servers.length > 0 ? servers : undefined),
+        total_seasons: totalSeasons || undefined,
+        total_episodes: totalEpisodes || undefined,
+        seasons: seasons.length > 0 ? seasons : undefined,
       };
     } catch (err: any) {
       console.error('[TioPlus] Error scrapeando detalle:', err.message);
       return null;
     }
+  }
+
+  /**
+   * Scrapea los servidores reales de un episodio específico de una serie
+   */
+  static async scrapeEpisodeDetail(seriesSlug: string, season: number, episode: number) {
+    const episodeUrl = `${BASE_URL}/serie/${seriesSlug}/season/${season}/episode/${episode}`;
+    const detail = await this.scrapeDetail(episodeUrl);
+    if (!detail) return null;
+    return {
+      series_id: seriesSlug,
+      season_number: season,
+      episode_number: episode,
+      primary_stream: detail.primary_stream,
+      servers: detail.servers || []
+    };
   }
 
   /**

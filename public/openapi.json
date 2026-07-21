@@ -15,40 +15,13 @@
     "/api/v1/search": {
       "get": {
         "summary": "Búsqueda general en tiempo real",
-        "description": "Busca películas, series, animes y doramas por título u alias. Devuelve el listado de resultados con metadatos y enlaces reproductores embed resueltos.",
+        "description": "Busca películas, series, animes y doramas por título u alias. Si es una película (`type: movie`), incluye sus servidores embed. Si es una serie (`type: tvseries`), incluye `seasons` con la estructura de temporadas y episodios.",
         "parameters": [
           {
             "name": "q",
             "in": "query",
             "required": true,
-            "description": "Término de búsqueda (ej. avatar, dragon ball, scary movie)",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Búsqueda exitosa",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SearchResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/movies/search": {
-      "get": {
-        "summary": "Alias de búsqueda inteligente",
-        "parameters": [
-          {
-            "name": "q",
-            "in": "query",
-            "required": true,
+            "description": "Término de búsqueda (ej. avatar, dragon ball, la casa del dragon)",
             "schema": {
               "type": "string"
             }
@@ -76,7 +49,7 @@
             "name": "id",
             "in": "path",
             "required": true,
-            "description": "Slug o ID del contenido (ej. scary-movie-6, avatar)",
+            "description": "Slug o ID del contenido (ej. scary-movie-6, la-casa-del-dragon)",
             "schema": {
               "type": "string"
             }
@@ -96,6 +69,47 @@
         }
       }
     },
+    "/api/v1/series/{id}/season/{season}/episode/{episode}": {
+      "get": {
+        "summary": "Obtener servidores de streaming para un episodio específico de una serie",
+        "description": "Devuelve los reproductores de video embed reales (VidHide, Netu, UPFAST, etc.) para la temporada y episodio indicados de la serie.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Slug de la serie (ej. la-casa-del-dragon)",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "season",
+            "in": "path",
+            "required": true,
+            "description": "Número de temporada (ej. 1)",
+            "schema": { "type": "integer" }
+          },
+          {
+            "name": "episode",
+            "in": "path",
+            "required": true,
+            "description": "Número de episodio (ej. 1)",
+            "schema": { "type": "integer" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Servidores del episodio obtenidos con éxito",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EpisodeDetailResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/feeds/home": {
       "get": {
         "summary": "Obtener feed principal estilo Netflix",
@@ -104,54 +118,10 @@
             "name": "country",
             "in": "query",
             "required": false,
-            "description": "Código ISO de país (ej. CL, MX, AR)",
-            "schema": {
-              "type": "string",
-              "default": "CL"
-            }
+            "schema": { "type": "string", "default": "CL" }
           }
         ],
-        "responses": {
-          "200": {
-            "description": "Feed obtenido con éxito"
-          }
-        }
-      }
-    },
-    "/api/v1/discover": {
-      "get": {
-        "summary": "Descubrimiento y paginación infinita",
-        "parameters": [
-          {
-            "name": "page",
-            "in": "query",
-            "schema": {
-              "type": "integer",
-              "default": 1
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "schema": {
-              "type": "integer",
-              "default": 20
-            }
-          },
-          {
-            "name": "type",
-            "in": "query",
-            "description": "movie o tvseries",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Resultados paginados"
-          }
-        }
+        "responses": { "200": { "description": "Feed obtenido con éxito" } }
       }
     }
   },
@@ -169,12 +139,30 @@
           "last_checked": { "type": "string", "format": "date-time" }
         }
       },
+      "Episode": {
+        "type": "object",
+        "properties": {
+          "episode_number": { "type": "integer", "example": 1 },
+          "name": { "type": "string", "example": "Los herederos del Dragón" },
+          "still_path": { "type": "string", "nullable": true },
+          "servers": { "type": "array", "items": { "$ref": "#/components/schemas/ServerOption" } }
+        }
+      },
+      "Season": {
+        "type": "object",
+        "properties": {
+          "season_number": { "type": "integer", "example": 1 },
+          "name": { "type": "string", "example": "Temporada 1" },
+          "episodes_count": { "type": "integer", "example": 10 },
+          "episodes": { "type": "array", "items": { "$ref": "#/components/schemas/Episode" } }
+        }
+      },
       "MediaItem": {
         "type": "object",
         "properties": {
-          "id": { "type": "string", "example": "avatar" },
+          "id": { "type": "string", "example": "la-casa-del-dragon" },
           "tmdb_id": { "type": "integer" },
-          "type": { "type": "string", "enum": ["movie", "tvseries"] },
+          "type": { "type": "string", "enum": ["movie", "tvseries"], "description": "Determina si el contenido es película o serie. Para 'movie', consultar `servers`. Para 'tvseries', consultar `seasons` o la ruta de episodios." },
           "title": { "type": "string" },
           "original_title": { "type": "string" },
           "overview": { "type": "string" },
@@ -183,7 +171,10 @@
           "genres": { "type": "array", "items": { "type": "string" } },
           "poster": { "type": "string", "nullable": true },
           "backdrop": { "type": "string", "nullable": true },
-          "servers": { "type": "array", "items": { "$ref": "#/components/schemas/ServerOption" } }
+          "servers": { "type": "array", "items": { "$ref": "#/components/schemas/ServerOption" }, "description": "Presente únicamente cuando type = movie" },
+          "total_seasons": { "type": "integer", "description": "Presente únicamente cuando type = tvseries" },
+          "total_episodes": { "type": "integer", "description": "Presente únicamente cuando type = tvseries" },
+          "seasons": { "type": "array", "items": { "$ref": "#/components/schemas/Season" }, "description": "Lista de temporadas y episodios. Presente únicamente cuando type = tvseries" }
         }
       },
       "SearchResponse": {
@@ -200,6 +191,21 @@
         "properties": {
           "status": { "type": "string", "example": "success" },
           "data": { "$ref": "#/components/schemas/MediaItem" }
+        }
+      },
+      "EpisodeDetailResponse": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string", "example": "success" },
+          "data": {
+            "type": "object",
+            "properties": {
+              "series_id": { "type": "string" },
+              "season_number": { "type": "integer" },
+              "episode_number": { "type": "integer" },
+              "servers": { "type": "array", "items": { "$ref": "#/components/schemas/ServerOption" } }
+            }
+          }
         }
       }
     }
