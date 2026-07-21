@@ -9,6 +9,7 @@
     "start": "node dist/api/index.js"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.43.5",
     "axios": "^1.7.2",
     "cheerio": "^1.0.0-rc.12",
     "cors": "^2.8.5",
