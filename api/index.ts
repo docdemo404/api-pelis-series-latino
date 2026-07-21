@@ -507,7 +507,33 @@ app.get(['/api/v1/search', '/api/v1/movies/search'], async (req: Request, res: R
 app.get('/api/v1/series/:id/season/:season/episode/:episode', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id, season, episode } = req.params;
-    const epDetail = await RealScraperService.scrapeEpisodeDetail(id, parseInt(season), parseInt(episode));
+    const sNum = parseInt(season);
+    const epNum = parseInt(episode);
+
+    let epDetail = await RealScraperService.scrapeEpisodeDetail(id, sNum, epNum);
+
+    // Fallback inteligente: Buscar la serie por ID/Slug en el catálogo y resolver el episodio solicitado
+    if (!epDetail) {
+      const seriesItem = await CatalogService.getById(id);
+      if (seriesItem && seriesItem.seasons) {
+        const targetSeason = seriesItem.seasons.find((s: any) => s.season_number === sNum);
+        if (targetSeason) {
+          const targetEp = targetSeason.episodes.find((e: any) => e.episode_number === epNum);
+          if (targetEp) {
+            epDetail = {
+              ...targetEp,
+              series_id: seriesItem.id,
+              series_title: seriesItem.title,
+              season_number: sNum,
+              poster: targetEp.still_path || seriesItem.poster,
+              backdrop: seriesItem.backdrop,
+              servers: targetEp.servers?.length > 0 ? targetEp.servers : seriesItem.servers
+            } as any;
+          }
+        }
+      }
+    }
+
     if (!epDetail) {
       return sendErrorResponse(res, 404, 'RESOURCE_NOT_FOUND', 'El episodio solicitado no existe o no está disponible.');
     }

@@ -206,7 +206,55 @@ export class CatalogService {
       } catch (err) {}
     }
 
-    if (result) {
+    // 5. Garantía de Servidores: Si result existe pero sus servidores están vacíos, resolver servidores activamente de las fuentes
+    if (result && (!result.servers || result.servers.length === 0)) {
+      const sourceUrl = (result as any)._tioplus_url;
+      if (sourceUrl) {
+        try {
+          const detail = await RealScraperService.scrapeDetail(sourceUrl);
+          if (detail && detail.servers && detail.servers.length > 0) {
+            result.servers = detail.servers;
+            result.primary_stream = detail.servers.find(s => s.status === 'online') || detail.servers[0];
+            if (detail.seasons && detail.seasons.length > 0) {
+              result.seasons = detail.seasons;
+            }
+          }
+        } catch {}
+      }
+
+      if (!result.servers || result.servers.length === 0) {
+        const searchSlug = (result.id || result.title).toLowerCase().replace(/[^a-z0-9]+/g, '-');
+        const categories = ['pelicula', 'serie', 'anime', 'dorama'];
+        for (const cat of categories) {
+          try {
+            const detail = await RealScraperService.scrapeDetail(`https://tioplus.app/${cat}/${searchSlug}`);
+            if (detail && detail.servers && detail.servers.length > 0) {
+              result.servers = detail.servers;
+              result.primary_stream = detail.servers.find(s => s.status === 'online') || detail.servers[0];
+              if (detail.seasons && detail.seasons.length > 0) {
+                result.seasons = detail.seasons;
+              }
+              break;
+            }
+          } catch {}
+        }
+      }
+
+      if (!result.servers || result.servers.length === 0) {
+        const searchResults = await this.search(result.title);
+        const match = searchResults.find(r => r.servers && r.servers.length > 0) || searchResults[0];
+        if (match && match.servers && match.servers.length > 0) {
+          result.servers = match.servers;
+          result.primary_stream = match.primary_stream || match.servers[0];
+          if (match.seasons && match.seasons.length > 0) {
+            result.seasons = match.seasons;
+          }
+        }
+      }
+    }
+
+    // ÚNICAMENTE almacenar en caché si se encontraron servidores o temporadas válidas
+    if (result && ((result.servers && result.servers.length > 0) || (result.seasons && result.seasons.length > 0))) {
       getByIdCache.set(q, { timestamp: Date.now(), data: result });
       getByIdCache.set(result.id, { timestamp: Date.now(), data: result });
     }
