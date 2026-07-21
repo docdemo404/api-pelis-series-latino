@@ -221,9 +221,11 @@ export class TmdbService {
         seasons = await this.getTmdbSeasons(tmdbData.id, tmdbData.number_of_seasons, tmdbData.poster_path ? `https://image.tmdb.org/t/p/w500${tmdbData.poster_path}` : item.poster, item.servers || []);
       }
 
+      const canonicalId = (item.id && isNaN(Number(item.id))) ? item.id : String(tmdbData.id);
+
       return {
         ...item,
-        id: String(tmdbData.id),
+        id: canonicalId,
         tmdb_id: tmdbData.id,
         type: contentType,
         title: tmdbData.title || tmdbData.name || item.title,

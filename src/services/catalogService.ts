@@ -328,6 +328,10 @@ export class CatalogService {
       getByIdCache.set(cacheKey, { timestamp: Date.now(), data: result });
       getByIdCache.set(result.id, { timestamp: Date.now(), data: result });
       getByIdCache.set(`${result.id}:${result.type}`, { timestamp: Date.now(), data: result });
+      if (result.tmdb_id) {
+        getByIdCache.set(String(result.tmdb_id), { timestamp: Date.now(), data: result });
+        getByIdCache.set(`${result.tmdb_id}:${result.type}`, { timestamp: Date.now(), data: result });
+      }
     }
 
     return result;
