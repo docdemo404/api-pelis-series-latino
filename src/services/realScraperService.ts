@@ -33,11 +33,17 @@ const SOFT_ERROR_PATTERNS = [
   /video_not_found/i,
   /404 not found/i,
   /this video (is|was) deleted/i,
-  /media not found/i
+  /media not found/i,
+  /can't find the file/i,
+  /we're sorry/i,
+  /got deleted by the owner/i,
+  /removed due a copyright/i,
+  /copyright violation/i,
+  /file you are looking for/i
 ];
 
 /**
- * Verifica el estado real en la capa de aplicación de un iframe embed (detecta Soft Errors HTTP 200)
+ * Verifica el estado real en la capa de aplicación de un iframe embed (detecta Soft Errors HTTP 200 y distingue WAF HTTP 403)
  */
 async function verifyEmbedStatus(embedUrl: string): Promise<'online' | 'offline'> {
   if (!embedUrl) return 'offline';
@@ -51,6 +57,11 @@ async function verifyEmbedStatus(embedUrl: string): Promise<'online' | 'offline'
       validateStatus: () => true
     });
 
+    // WAF / Anti-hotlink protection (ej. VidHide, StreamWish devuelven 403 Forbidden a scrapers automatizados pero funcionan 100% en navegador web)
+    if (res.status === 403 || res.status === 401) {
+      return 'online';
+    }
+
     if (res.status >= 400) return 'offline';
 
     const html = typeof res.data === 'string' ? res.data : JSON.stringify(res.data || '');
@@ -63,12 +74,15 @@ async function verifyEmbedStatus(embedUrl: string): Promise<'online' | 'offline'
     }
 
     // HTML extremadamente corto sin reproductores
-    if (html.length < 250 && !html.includes('jwplayer') && !html.includes('video') && !html.includes('iframe') && !html.includes('source')) {
+    if (html.length < 250 && !html.includes('jwplayer') && !html.includes('video') && !html.includes('iframe') && !html.includes('source') && !html.includes('script')) {
       return 'offline';
     }
 
     return 'online';
   } catch {
+    if (embedUrl.includes('vidhide') || embedUrl.includes('streamwish') || embedUrl.includes('upns') || embedUrl.includes('waaw')) {
+      return 'online';
+    }
     return 'offline';
   }
 }
