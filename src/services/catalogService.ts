@@ -4,10 +4,16 @@ import { RealScraperService } from './realScraperService';
 
 export class CatalogService {
   /**
-   * Obtiene todos los títulos: primero de Supabase, luego scraping en vivo de TioPlus
+   * Obtiene todos los títulos del homepage en vivo con Slugs canónicos como IDs (ej. "la-casa-del-dragon")
    */
   static async getAll(): Promise<MediaItem[]> {
-    // 1. Intentar desde Supabase
+    // 1. Scraping en vivo del homepage de TioPlus (Garantiza Slugs Canónicos reales)
+    const liveItems = await RealScraperService.scrapeHomepage();
+    if (liveItems.length > 0) {
+      return liveItems;
+    }
+
+    // 2. Fallback a Supabase mapeando siempre a Slugs limpios
     try {
       const { data } = await supabase.from('media_items').select('*').limit(50);
       if (data && data.length > 0) {
@@ -15,17 +21,35 @@ export class CatalogService {
       }
     } catch (err) {}
 
-    // 2. Scraping en vivo del homepage de TioPlus
-    return RealScraperService.scrapeHomepage();
+    return [];
   }
 
   /**
-   * Obtiene un título por ID/Slug. Si no está en DB, scrapea el detalle de TioPlus
+   * Obtiene un título por ID/Slug de forma consistente.
+   * Acepta slugs canónicos (ej. "la-casa-del-dragon"), TMDB IDs o IDs numéricos.
    */
   static async getById(id: string): Promise<MediaItem | null> {
     const q = id.toLowerCase().trim();
 
-    // 1. Buscar en Supabase
+    // 1. Intentar como slug directo en TioPlus (película)
+    let detail = await RealScraperService.scrapeDetail(`https://tioplus.app/pelicula/${q}`);
+    if (detail && (detail.servers?.length || detail.seasons?.length)) return detail;
+
+    // 2. Intentar como serie en TioPlus
+    detail = await RealScraperService.scrapeDetail(`https://tioplus.app/serie/${q}`);
+    if (detail && (detail.servers?.length || detail.seasons?.length)) return detail;
+
+    // 3. Intentar como anime en TioPlus
+    detail = await RealScraperService.scrapeDetail(`https://tioplus.app/anime/${q}`);
+    if (detail && (detail.servers?.length || detail.seasons?.length)) return detail;
+
+    // 4. Buscar por texto de forma inteligente en TioPlus
+    const scraped = await RealScraperService.scrapeRealMovies(q);
+    if (scraped.length > 0) {
+      return scraped[0];
+    }
+
+    // 5. Fallback final a Supabase (buscando por id, slug o tmdb_id)
     try {
       const { data } = await supabase
         .from('media_items')
@@ -36,25 +60,11 @@ export class CatalogService {
       if (data) return this.mapDbItemToMediaItem(data);
     } catch (err) {}
 
-    // 2. Intentar como slug directo en TioPlus (película)
-    let detail = await RealScraperService.scrapeDetail(`https://tioplus.app/pelicula/${q}`);
-    if (detail && (detail.servers?.length || detail.seasons?.length)) return detail;
-
-    // 3. Intentar como serie
-    detail = await RealScraperService.scrapeDetail(`https://tioplus.app/serie/${q}`);
-    if (detail && (detail.servers?.length || detail.seasons?.length)) return detail;
-
-    // 4. Intentar como anime
-    detail = await RealScraperService.scrapeDetail(`https://tioplus.app/anime/${q}`);
-    if (detail && (detail.servers?.length || detail.seasons?.length)) return detail;
-
-    // 5. Buscar por texto
-    const scraped = await RealScraperService.scrapeRealMovies(q);
-    return scraped[0] || null;
+    return null;
   }
 
   /**
-   * Búsqueda en vivo con Web Scraping Real de TioPlus
+   * Búsqueda en vivo con Web Scraping Real de TioPlus (IDs son siempre Slugs)
    */
   static async search(query: string): Promise<MediaItem[]> {
     const q = query.toLowerCase().trim();
@@ -81,14 +91,20 @@ export class CatalogService {
   }
 
   private static mapDbItemToMediaItem(dbRow: any): MediaItem {
+    // Garantizar que la propiedad id sea SIEMPRE un slug canónico de texto y nunca un entero arbitrario
+    const canonicalSlug = (dbRow.slug || dbRow.title || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '') || String(dbRow.id);
+
     return {
-      id: dbRow.id,
-      tmdb_id: dbRow.tmdb_id,
+      id: canonicalSlug,
+      tmdb_id: dbRow.tmdb_id || 0,
       imdb_id: dbRow.imdb_id || null,
       type: dbRow.type,
       title: dbRow.title,
-      original_title: dbRow.original_title,
-      aliases: dbRow.aliases || [],
+      original_title: dbRow.original_title || dbRow.title,
+      aliases: dbRow.aliases || [dbRow.title],
       tagline: dbRow.tagline || '',
       overview: dbRow.overview || '',
       rating: dbRow.rating || 0.0,
