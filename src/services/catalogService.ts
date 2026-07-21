@@ -82,7 +82,7 @@ export class CatalogService {
     const realScraped = await RealScraperService.scrapeRealMovies(q);
     
     // 2. Unificar catálogo para eliminar títulos duplicados y fusionar servidores
-    const unified = this.unifyMediaItems(realScraped);
+    const unified = await this.unifyMediaItems(realScraped);
     if (unified.length > 0) {
       return unified;
     }
@@ -96,7 +96,7 @@ export class CatalogService {
 
       if (data && data.length > 0) {
         const dbItems = data.map(this.mapDbItemToMediaItem);
-        return this.unifyMediaItems(dbItems);
+        return await this.unifyMediaItems(dbItems);
       }
     } catch (err) {}
 
@@ -107,21 +107,33 @@ export class CatalogService {
    * Unifica y agrupa elementos multimedia que corresponden al mismo título,
    * fusionando sus servidores y respetando el orden de prioridad de las fuentes activas.
    */
-  private static unifyMediaItems(items: MediaItem[]): MediaItem[] {
+  private static async unifyMediaItems(items: MediaItem[]): Promise<MediaItem[]> {
     const grouped = new Map<string, MediaItem>();
 
-    const normalizeTitle = (t: string) => {
-      return t
+    const getCanonicalKey = (t: string) => {
+      let norm = t
         .toLowerCase()
         .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
         .replace(/\s*\(\d{4}\)\s*$/, "")
+        .replace(/[^a-z0-9\s]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+      return norm
+        .replace(/\b(la pelicula|pelicula|the movie|hd)\b/g, "")
         .replace(/\bspiderman\b/g, "spider man")
-        .replace(/[^a-z0-9]+/g, " ")
+        .replace(/\bspider man 1\b/g, "spider man")
+        .replace(/sin camino a casa/g, "no way home")
+        .replace(/lejos de casa/g, "far from home")
+        .replace(/de regreso a casa/g, "homecoming")
+        .replace(/un nuevo universo/g, "into the spider verse")
+        .replace(/traves del spider verso/g, "across the spider verse")
+        .replace(/\s+/g, " ")
         .trim();
     };
 
     for (const item of items) {
-      const key = normalizeTitle(item.title);
+      const key = getCanonicalKey(item.title);
       if (!grouped.has(key)) {
         grouped.set(key, { ...item, servers: [...(item.servers || [])] });
       } else {
@@ -130,11 +142,20 @@ export class CatalogService {
         existing.poster = existing.poster || item.poster;
         existing.backdrop = existing.backdrop || item.backdrop;
 
+        // Si el elemento entrante no tiene servidores pero tiene URL de detalle, resolver sus servidores
+        let itemServers = item.servers || [];
+        if (itemServers.length === 0 && (item as any)._tioplus_url) {
+          const detailed = await RealScraperService.scrapeDetail((item as any)._tioplus_url);
+          if (detailed && detailed.servers) {
+            itemServers = detailed.servers;
+          }
+        }
+
         // Fusionar servidores evitando URLs de reproductor duplicadas
         const existingUrls = new Set(existing.servers?.map(s => s.embed_url));
-        if (item.servers && item.servers.length > 0) {
+        if (itemServers.length > 0) {
           existing.servers = existing.servers || [];
-          for (const s of item.servers) {
+          for (const s of itemServers) {
             if (!existingUrls.has(s.embed_url)) {
               existing.servers.push(s);
               existingUrls.add(s.embed_url);
@@ -146,7 +167,7 @@ export class CatalogService {
         existing.subcategories = Array.from(new Set([...(existing.subcategories || []), ...(item.subcategories || [])]));
         
         // Recalcular primary_stream
-        if (!existing.primary_stream && existing.servers && existing.servers.length > 0) {
+        if (existing.servers && existing.servers.length > 0) {
           existing.primary_stream = existing.servers.find(s => s.status === 'online') || existing.servers[0];
         }
       }
