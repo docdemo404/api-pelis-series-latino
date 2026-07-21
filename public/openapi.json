@@ -155,6 +155,12 @@
         }
       }
     },
+    "/api/v1/home": {
+      "get": {
+        "summary": "Obtener feed principal estilo Netflix (Alias)",
+        "responses": { "200": { "description": "Feed obtenido con éxito" } }
+      }
+    },
     "/api/v1/feeds/home": {
       "get": {
         "summary": "Obtener feed principal estilo Netflix",
@@ -167,6 +173,40 @@
           }
         ],
         "responses": { "200": { "description": "Feed obtenido con éxito" } }
+      }
+    },
+    "/api/v1/movies": {
+      "get": {
+        "summary": "Obtener catálogo de películas con paginación",
+        "parameters": [
+          { "name": "page", "in": "query", "schema": { "type": "integer", "default": 1 } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 20 } },
+          { "name": "genre", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Lista de películas obtenida con éxito" } }
+      }
+    },
+    "/api/v1/series": {
+      "get": {
+        "summary": "Obtener catálogo de series con paginación",
+        "parameters": [
+          { "name": "page", "in": "query", "schema": { "type": "integer", "default": 1 } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 20 } },
+          { "name": "genre", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Lista de series obtenida con éxito" } }
+      }
+    },
+    "/api/v1/media": {
+      "get": {
+        "summary": "Obtener catálogo general (películas + series)",
+        "parameters": [
+          { "name": "page", "in": "query", "schema": { "type": "integer", "default": 1 } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 20 } },
+          { "name": "type", "in": "query", "schema": { "type": "string" } },
+          { "name": "genre", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Catálogo devuelto con éxito" } }
       }
     },
     "/api/v1/media/batch": {

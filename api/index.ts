@@ -385,12 +385,52 @@ app.all(['/api/v1/revalidate', '/api/v1/cache/clear'], (req: Request, res: Respo
   });
 });
 
-// Feeds Estilo Netflix
-app.get('/api/v1/feeds/home', async (req: Request, res: Response, next: NextFunction) => {
+// Alias Estándar para Feed Home (/home y /feeds/home)
+app.get(['/api/v1/home', '/api/v1/feeds/home'], async (req: Request, res: Response, next: NextFunction) => {
   try {
     const country = (req.query.country as string) || 'CL';
     const feed = await FeedService.getHomeFeed(country);
     res.json({ status: 'success', data: feed });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Endpoint Estándar para Películas (/movies)
+app.get('/api/v1/movies', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 20;
+    const genre = req.query.genre as string;
+    const result = await FeedService.getDiscover(page, limit, 'movie', genre);
+    res.json({ status: 'success', data: result });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Endpoint Estándar para Series (/series)
+app.get('/api/v1/series', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 20;
+    const genre = req.query.genre as string;
+    const result = await FeedService.getDiscover(page, limit, 'tvseries', genre);
+    res.json({ status: 'success', data: result });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Endpoint Estándar Catálogo General (/media)
+app.get('/api/v1/media', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 20;
+    const type = req.query.type as string;
+    const genre = req.query.genre as string;
+    const result = await FeedService.getDiscover(page, limit, type, genre);
+    res.json({ status: 'success', data: result });
   } catch (err) {
     next(err);
   }

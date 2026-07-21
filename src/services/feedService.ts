@@ -9,30 +9,30 @@ export class FeedService {
     const all = await CatalogService.getAll();
     const featured = all.find(i => i.backdrop) || all[0] || null;
 
-    const trendingChile = all.slice(0, 10);
-    const popularSeries = all.filter(i => i.type === 'tvseries');
-    const recentMovies = all.filter(i => i.type === 'movie');
+    const trendingChile = all.slice(0, 10).map(CatalogService.toCompactItem as any);
+    const popularSeries = all.filter(i => i.type === 'tvseries').slice(0, 10).map(CatalogService.toCompactItem as any);
+    const recentMovies = all.filter(i => i.type === 'movie').slice(0, 10).map(CatalogService.toCompactItem as any);
 
     return {
-      featured,
+      featured: featured ? (CatalogService.toCompactItem(featured) as any) : null,
       rows: [
         {
           id: `trending_${country.toLowerCase()}`,
           title: `Lo más popular en ${country.toUpperCase()} hoy`,
           type: 'carousel',
-          items: trendingChile
+          items: trendingChile as any
         },
         {
           id: 'popular_series',
           title: 'Series aclamadas en Español Latino',
           type: 'carousel',
-          items: popularSeries
+          items: popularSeries as any
         },
         {
           id: 'recent_movies',
           title: 'Películas agregadas recientemente (100% Funcionales)',
           type: 'carousel',
-          items: recentMovies
+          items: recentMovies as any
         }
       ]
     };

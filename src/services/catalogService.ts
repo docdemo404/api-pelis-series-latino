@@ -95,19 +95,68 @@ export class CatalogService {
 
     let result: MediaItem | null = null;
 
-    // 0. Si el ID es numérico (ID oficial de TMDB), obtener metadatos de TMDB y resolver servidores
+    // 0. Si el ID es numérico (ID oficial de TMDB), consultar primero DB/Caché y luego TMDB
     if (!isNaN(Number(q))) {
       const tmdbNumericId = Number(q);
-      const tmdbMovieData = await TmdbService.getTmdbDetails(tmdbNumericId, 'movie');
-      const tmdbTvData = tmdbMovieData ? null : await TmdbService.getTmdbDetails(tmdbNumericId, 'tvseries');
-      const tmdbData = tmdbMovieData || tmdbTvData;
 
-      if (tmdbData) {
-        const title = tmdbData.title || tmdbData.name;
-        const searchResults = await this.search(title);
-        const match = searchResults.find(r => r.tmdb_id === tmdbNumericId) || searchResults[0];
-        if (match) {
-          result = await TmdbService.enrichMediaItem(match);
+      // Verificación directa en Supabase DB (ultra rápido sub-30ms)
+      try {
+        const { data: dbData } = await supabase
+          .from('media_items')
+          .select('*')
+          .or(`tmdb_id.eq.${tmdbNumericId},id.eq.${q}`)
+          .single();
+
+        if (dbData) {
+          result = await TmdbService.enrichMediaItem(this.mapDbItemToMediaItem(dbData));
+        }
+      } catch (err) {}
+
+      if (!result) {
+        const tmdbMovieData = await TmdbService.getTmdbDetails(tmdbNumericId, 'movie');
+        const tmdbTvData = tmdbMovieData ? null : await TmdbService.getTmdbDetails(tmdbNumericId, 'tvseries');
+        const tmdbData = tmdbMovieData || tmdbTvData;
+
+        if (tmdbData) {
+          const title = tmdbData.title || tmdbData.name;
+          const contentType = tmdbMovieData ? 'movie' : 'tvseries';
+
+          // Búsqueda con timeout estricto de 1.5s para no congelar la respuesta del cliente
+          const timeoutPromise = new Promise<MediaItem[]>((resolve) => setTimeout(() => resolve([]), 1500));
+          const searchResults = await Promise.race([this.search(title), timeoutPromise]);
+          const match = searchResults.find(r => r.tmdb_id === tmdbNumericId) || searchResults[0];
+
+          if (match) {
+            result = await TmdbService.enrichMediaItem(match);
+          } else {
+            // Construcción directa e instantánea desde metadatos TMDB
+            result = await TmdbService.enrichMediaItem({
+              id: String(tmdbData.id),
+              tmdb_id: tmdbData.id,
+              imdb_id: null,
+              type: contentType,
+              title: tmdbData.title || tmdbData.name,
+              original_title: tmdbData.original_title || tmdbData.original_name,
+              aliases: [tmdbData.title || tmdbData.name],
+              tagline: tmdbData.tagline || '',
+              overview: tmdbData.overview || '',
+              rating: tmdbData.vote_average ? Number(tmdbData.vote_average.toFixed(1)) : 0,
+              content_rating: 'PG-13',
+              release_date: tmdbData.release_date || tmdbData.first_air_date || '',
+              genres: tmdbData.genres?.map((g: any) => g.name) || [],
+              subcategories: ['Latino HD'],
+              poster: tmdbData.poster_path ? `https://image.tmdb.org/t/p/w500${tmdbData.poster_path}` : null,
+              backdrop: tmdbData.backdrop_path ? `https://image.tmdb.org/t/p/w1280${tmdbData.backdrop_path}` : null,
+              logo: null,
+              trailer: null,
+              cast: [],
+              dubbing_cast: [],
+              servers: []
+            });
+
+            // Disparar resolución de servidores en segundo plano sin bloquear la API
+            this.search(title).catch(() => {});
+          }
         }
       }
     }
