@@ -18,13 +18,19 @@
   <div class="hero text-center">
     <div class="container">
       <h1 class="fw-bold text-white mb-2">🎬 API Películas & Series Latino</h1>
-      <p class="lead text-indigo-200 mb-0">Documentación oficial para desarrolladores. Integra catálogos estilo Netflix, super metadatos y enlaces de streaming 100% verificados en vivo.</p>
+      <p class="lead text-indigo-200 mb-3">Documentación oficial humana y machine-readable para desarrolladores y Agentes de IA (LLMs).</p>
+      <a href="/api/v1/openapi.json" target="_blank" class="btn btn-warning fw-bold">🤖 Especificación OpenAPI 3.0 (JSON)</a>
     </div>
   </div>
 
   <div class="container my-5">
     <div class="row">
       <div class="col-lg-8 offset-lg-2">
+
+        <!-- Banner Machine Readable -->
+        <div class="alert alert-info bg-dark text-info border-info mb-4" role="alert">
+          <strong>🤖 Machine-Readable API:</strong> Esta API incluye autodocumentación en formato OpenAPI 3.0 para consumo automático por asistentes AI, GPTs y clientes automatizados en <a href="/api/v1/openapi.json" class="alert-link text-warning">/api/v1/openapi.json</a>.
+        </div>
 
         <h3 class="mb-4 text-warning">📌 Endpoints Principales</h3>
 
@@ -34,10 +40,19 @@
             <span class="badge bg-primary badge-method me-3">GET</span>
             <code class="fs-5 text-white">/api/v1/search?q=avatar</code>
           </div>
-          <p class="text-secondary"><strong>Búsqueda General:</strong> Busca en tiempo real todo tipo de contenidos (Películas, Series, Animes y Doramas) en una sola consulta. Extrae reproductores embeds funcionales.</p>
+          <p class="text-secondary"><strong>Búsqueda General:</strong> Busca en tiempo real todo tipo de contenidos (Películas, Series, Animes y Doramas) en una sola consulta. Extrae reproductores embeds funcionales resueltos.</p>
         </div>
 
-        <!-- Endpoint 1 -->
+        <!-- Endpoint OpenAPI Spec -->
+        <div class="card card-api p-4 border-info">
+          <div class="d-flex align-items-center mb-3">
+            <span class="badge bg-info text-dark badge-method me-3">GET</span>
+            <code class="fs-5 text-white">/api/v1/openapi.json</code>
+          </div>
+          <p class="text-secondary">Especificación completa OpenAPI 3.0.3 en formato JSON para lectura de máquinas, validación de esquemas y generación de clientes.</p>
+        </div>
+
+        <!-- Endpoint Feed Home -->
         <div class="card card-api p-4">
           <div class="d-flex align-items-center mb-3">
             <span class="badge bg-success badge-method me-3">GET</span>
@@ -46,16 +61,7 @@
           <p class="text-secondary">Obtiene el Feed principal de inicio con carruseles horizontales estilo Netflix y banners destacados.</p>
         </div>
 
-        <!-- Endpoint 2 -->
-        <div class="card card-api p-4">
-          <div class="d-flex align-items-center mb-3">
-            <span class="badge bg-success badge-method me-3">GET</span>
-            <code class="fs-5 text-white">/api/v1/movies/search?q=solo+en+casa</code>
-          </div>
-          <p class="text-secondary">Alias de búsqueda para compatibilidad con clientes legacy.</p>
-        </div>
-
-        <!-- Endpoint 3 -->
+        <!-- Endpoint Detalle Media -->
         <div class="card card-api p-4">
           <div class="d-flex align-items-center mb-3">
             <span class="badge bg-success badge-method me-3">GET</span>

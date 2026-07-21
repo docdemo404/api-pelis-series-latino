@@ -1,0 +1,207 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "API Películas & Series Latino",
+    "version": "1.0.0",
+    "description": "API REST en vivo para consultar catálogos estilo Netflix, metadatos y reproductores embeds verificados de películas, series, animes y doramas en audio Latino."
+  },
+  "servers": [
+    {
+      "url": "https://api-pelis-series-latino.vercel.app",
+      "description": "Servidor de Producción Vercel"
+    }
+  ],
+  "paths": {
+    "/api/v1/search": {
+      "get": {
+        "summary": "Búsqueda general en tiempo real",
+        "description": "Busca películas, series, animes y doramas por título u alias. Devuelve el listado de resultados con metadatos y enlaces reproductores embed resueltos.",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "description": "Término de búsqueda (ej. avatar, dragon ball, scary movie)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Búsqueda exitosa",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/movies/search": {
+      "get": {
+        "summary": "Alias de búsqueda inteligente",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Búsqueda exitosa",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/media/{id}": {
+      "get": {
+        "summary": "Obtener detalle por Slug o ID",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Slug o ID del contenido (ej. scary-movie-6, avatar)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Detalle obtenido con éxito",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MediaItemResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/feeds/home": {
+      "get": {
+        "summary": "Obtener feed principal estilo Netflix",
+        "parameters": [
+          {
+            "name": "country",
+            "in": "query",
+            "required": false,
+            "description": "Código ISO de país (ej. CL, MX, AR)",
+            "schema": {
+              "type": "string",
+              "default": "CL"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Feed obtenido con éxito"
+          }
+        }
+      }
+    },
+    "/api/v1/discover": {
+      "get": {
+        "summary": "Descubrimiento y paginación infinita",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 20
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "description": "movie o tvseries",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resultados paginados"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ServerOption": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "quality": { "type": "string", "example": "1080p" },
+          "language": { "type": "string", "example": "latino" },
+          "embed_url": { "type": "string", "example": "https://vidhideplus.com/v/f1kgebbi5bly" },
+          "status": { "type": "string", "example": "online" },
+          "last_checked": { "type": "string", "format": "date-time" }
+        }
+      },
+      "MediaItem": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "example": "avatar" },
+          "tmdb_id": { "type": "integer" },
+          "type": { "type": "string", "enum": ["movie", "tvseries"] },
+          "title": { "type": "string" },
+          "original_title": { "type": "string" },
+          "overview": { "type": "string" },
+          "rating": { "type": "number" },
+          "release_date": { "type": "string" },
+          "genres": { "type": "array", "items": { "type": "string" } },
+          "poster": { "type": "string", "nullable": true },
+          "backdrop": { "type": "string", "nullable": true },
+          "servers": { "type": "array", "items": { "$ref": "#/components/schemas/ServerOption" } }
+        }
+      },
+      "SearchResponse": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string", "example": "success" },
+          "query": { "type": "string" },
+          "count": { "type": "integer" },
+          "results": { "type": "array", "items": { "$ref": "#/components/schemas/MediaItem" } }
+        }
+      },
+      "MediaItemResponse": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string", "example": "success" },
+          "data": { "$ref": "#/components/schemas/MediaItem" }
+        }
+      }
+    }
+  }
+}

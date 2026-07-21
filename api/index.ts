@@ -12,19 +12,26 @@ app.use(express.json());
 // Servir portal de documentación
 app.use('/docs', express.static(path.join(__dirname, '../public')));
 
-// Root Endpoint
+// Especificación OpenAPI 3.0 para Agentes de IA y Clientes Automatizados
+app.get('/api/v1/openapi.json', (req: Request, res: Response) => {
+  res.sendFile(path.join(__dirname, '../public/openapi.json'));
+});
+
+// Root Endpoint (Self-describing for Machine Reading)
 app.get('/api/v1', (req: Request, res: Response) => {
   res.json({
     status: 'online',
     name: 'API Películas & Series Latino',
     version: '1.0.0',
     documentation: '/docs',
+    openapi_spec: '/api/v1/openapi.json',
+    machine_readable: true,
     endpoints: [
       '/api/v1/search?q=avatar',
+      '/api/v1/openapi.json',
       '/api/v1/feeds/home?country=CL',
       '/api/v1/discover?page=1&limit=20',
-      '/api/v1/movies/search?q=solo+en+casa',
-      '/api/v1/series/los-simpson',
+      '/api/v1/media/scary-movie-6',
       '/api/v1/stream/resolve?id=srv_101',
       '/api/v1/links/report'
     ]
