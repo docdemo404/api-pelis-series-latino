@@ -1,4 +1,4 @@
-import { MediaItem, ServerOption } from '../types';
+import { MediaItem, ServerOption, ContentType } from '../types';
 import { supabase } from './supabaseService';
 import { RealScraperService } from './realScraperService';
 import { TmdbService } from './tmdbService';
@@ -84,7 +84,7 @@ export class CatalogService {
   /**
    * Obtiene un título por ID/Slug de forma consistente (Caché ultrarrápida en sub-10ms).
    */
-  static async getById(id: string): Promise<MediaItem | null> {
+  static async getById(id: string, typeHint?: ContentType): Promise<MediaItem | null> {
     const q = id.toLowerCase().trim();
 
     // Verificación de caché en memoria
@@ -113,13 +113,36 @@ export class CatalogService {
       } catch (err) {}
 
       if (!result) {
-        const tmdbMovieData = await TmdbService.getTmdbDetails(tmdbNumericId, 'movie');
-        const tmdbTvData = tmdbMovieData ? null : await TmdbService.getTmdbDetails(tmdbNumericId, 'tvseries');
-        const tmdbData = tmdbMovieData || tmdbTvData;
+        const [tmdbMovieData, tmdbTvData] = await Promise.all([
+          TmdbService.getTmdbDetails(tmdbNumericId, 'movie'),
+          TmdbService.getTmdbDetails(tmdbNumericId, 'tvseries')
+        ]);
+
+        let tmdbData: any = null;
+        let contentType: ContentType = 'movie';
+
+        if (tmdbMovieData && !tmdbTvData) {
+          tmdbData = tmdbMovieData;
+          contentType = 'movie';
+        } else if (!tmdbMovieData && tmdbTvData) {
+          tmdbData = tmdbTvData;
+          contentType = 'tvseries';
+        } else if (tmdbMovieData && tmdbTvData) {
+          const movieVotes = tmdbMovieData.vote_count || 0;
+          const tvVotes = tmdbTvData.vote_count || 0;
+
+          // Si la ruta o pista indica 'tvseries', o si las votaciones de la serie de TV son mayores
+          if (typeHint === 'tvseries' || (typeHint !== 'movie' && tvVotes > movieVotes)) {
+            tmdbData = tmdbTvData;
+            contentType = 'tvseries';
+          } else {
+            tmdbData = tmdbMovieData;
+            contentType = 'movie';
+          }
+        }
 
         if (tmdbData) {
           const title = tmdbData.title || tmdbData.name;
-          const contentType = tmdbMovieData ? 'movie' : 'tvseries';
 
           // Búsqueda con timeout estricto de 1.5s para no congelar la respuesta del cliente
           const timeoutPromise = new Promise<MediaItem[]>((resolve) => setTimeout(() => resolve([]), 1500));

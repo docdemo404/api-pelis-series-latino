@@ -555,7 +555,7 @@ app.get('/api/v1/series/:id', async (req: Request, res: Response, next: NextFunc
       const epDetail = await RealScraperService.scrapeEpisodeDetail(req.params.id, parseInt(season as string), parseInt(episode as string));
       if (epDetail) return res.json({ status: 'success', data: epDetail });
     }
-    const item = await CatalogService.getById(req.params.id);
+    const item = await CatalogService.getById(req.params.id, 'tvseries');
     if (!item) {
       return sendErrorResponse(res, 404, 'RESOURCE_NOT_FOUND', 'La serie solicitada no existe o no está disponible.');
     }
