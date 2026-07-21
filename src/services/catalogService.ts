@@ -159,7 +159,7 @@ export class CatalogService {
             } else if (movieMatch && !tvMatch) {
               tmdbData = tmdbMovieData;
               contentType = 'movie';
-            } else if (tvVotes > movieVotes) {
+            } else if (tmdbTvData.number_of_seasons > 0 || tmdbTvData.number_of_episodes > 0 || tvVotes > movieVotes) {
               tmdbData = tmdbTvData;
               contentType = 'tvseries';
             } else {
