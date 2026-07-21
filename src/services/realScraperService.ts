@@ -18,6 +18,61 @@ function httpGet(url: string) {
   });
 }
 
+const SOFT_ERROR_PATTERNS = [
+  /file is no longer available/i,
+  /expired or has been deleted/i,
+  /player_blank\.jpg/i,
+  /file not found/i,
+  /file deleted/i,
+  /video (has been|was) (deleted|removed)/i,
+  /disabled due to copyright/i,
+  /content removed/i,
+  /video no disponible/i,
+  /archivo (eliminado|no encontrado)/i,
+  /file_deleted/i,
+  /video_not_found/i,
+  /404 not found/i,
+  /this video (is|was) deleted/i,
+  /media not found/i
+];
+
+/**
+ * Verifica el estado real en la capa de aplicación de un iframe embed (detecta Soft Errors HTTP 200)
+ */
+async function verifyEmbedStatus(embedUrl: string): Promise<'online' | 'offline'> {
+  if (!embedUrl) return 'offline';
+  try {
+    const res = await axios.get(embedUrl, {
+      headers: {
+        'User-Agent': UA,
+        'Referer': BASE_URL,
+      },
+      timeout: 4000,
+      validateStatus: () => true
+    });
+
+    if (res.status >= 400) return 'offline';
+
+    const html = typeof res.data === 'string' ? res.data : JSON.stringify(res.data || '');
+
+    // Detectar mensajes de error en capa de aplicación (Soft Errors)
+    for (const pattern of SOFT_ERROR_PATTERNS) {
+      if (pattern.test(html)) {
+        return 'offline';
+      }
+    }
+
+    // HTML extremadamente corto sin reproductores
+    if (html.length < 250 && !html.includes('jwplayer') && !html.includes('video') && !html.includes('iframe') && !html.includes('source')) {
+      return 'offline';
+    }
+
+    return 'online';
+  } catch {
+    return 'offline';
+  }
+}
+
 /**
  * Resuelve un token data-server en la URL real del iframe embed.
  * Flujo: data-server -> btoa(token) -> /player/ENCODED -> HTML con iframe src
@@ -294,24 +349,31 @@ export class RealScraperService {
         if (playerTr) serverTokens.push({ token: playerTr, label: 'Reproductor Principal' });
       }
 
-      // Resolver los tokens en paralelo (max 3 para no saturar)
+      // Resolver los tokens y verificar su salud en la capa de aplicación (Soft Errors / 200 OK falsos)
       const tokensToResolve = serverTokens.slice(0, 5);
       const resolvedUrls = await Promise.allSettled(
         tokensToResolve.map(t => resolvePlayerUrl(t.token, tioplusUrl))
       );
 
-      resolvedUrls.forEach((result, i) => {
-        const embedUrl = result.status === 'fulfilled' ? result.value : null;
-        const label = tokensToResolve[i].label;
+      const serverVerifications = await Promise.allSettled(
+        resolvedUrls.map(async (result, i) => {
+          const embedUrl = result.status === 'fulfilled' ? result.value : null;
+          if (!embedUrl) return null;
+          const status = await verifyEmbedStatus(embedUrl);
+          return { embedUrl, status, label: tokensToResolve[i].label };
+        })
+      );
 
-        if (embedUrl) {
+      serverVerifications.forEach((res, i) => {
+        if (res.status === 'fulfilled' && res.value && res.value.embedUrl) {
+          const { embedUrl, status, label } = res.value;
           servers.push({
             id: `srv_tio_${slug}_${i + 1}`,
             name: `${getServerName(embedUrl, '')} - ${label}`,
             quality: '1080p',
             language: 'latino',
             embed_url: embedUrl,
-            status: 'online',
+            status: status,
             last_checked: new Date().toISOString(),
           });
         }
