@@ -524,12 +524,12 @@ export class RealScraperService {
       }
     }
 
-    // 2b. Si es una búsqueda sin espacios (ej. "breakingbad", "betterman", "scarymovie", "badboys") y devolvió 0 resultados
-    if (results.length === 0 && !q.includes(' ') && q.length >= 5) {
+    // 2b. Si es una búsqueda sin espacios (ej. "betterma", "breakingba", "scarymovie", "badboys") y devolvió 0 resultados
+    if (results.length === 0 && !q.includes(' ') && q.length >= 4) {
       const candidates: MediaItem[] = [];
       const lowerQ = q.toLowerCase();
 
-      for (let i = 3; i <= lowerQ.length - 3; i++) {
+      for (let i = 3; i <= lowerQ.length - 1; i++) {
         const part1 = lowerQ.substring(0, i);
         const part2 = lowerQ.substring(i);
 
