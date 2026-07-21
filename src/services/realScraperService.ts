@@ -19,112 +19,62 @@ function httpGet(url: string) {
 }
 
 /**
- * Decodifica el token Base64 de data-server para obtener la URL del iframe embed.
- * TioPlus codifica en Base64 (a veces doble) las URLs de los reproductores.
+ * Resuelve un token data-server en la URL real del iframe embed.
+ * Flujo: data-server -> btoa(token) -> /player/ENCODED -> HTML con iframe src
  */
-function decodeServerToken(encoded: string): string | null {
+async function resolvePlayerUrl(dataServerToken: string, referer: string): Promise<string | null> {
   try {
-    let decoded = Buffer.from(encoded, 'base64').toString('utf-8');
-    // A veces es doble Base64
-    if (/^[A-Za-z0-9+/=]+$/.test(decoded) && decoded.length > 20) {
-      decoded = Buffer.from(decoded, 'base64').toString('utf-8');
+    // El JS del sitio hace: /player/ + btoa(dataServerToken)
+    const encodedForUrl = Buffer.from(dataServerToken).toString('base64');
+    const playerPageUrl = `${BASE_URL}/player/${encodedForUrl}`;
+
+    const res = await httpGet(playerPageUrl);
+    const html = typeof res.data === 'string' ? res.data : '';
+
+    // Buscar iframe src en la respuesta
+    const $ = cheerio.load(html);
+    const iframeSrc = $('iframe').attr('src') || $('iframe').attr('data-src');
+    if (iframeSrc) {
+      return iframeSrc.startsWith('//') ? `https:${iframeSrc}` : iframeSrc;
     }
-    // Buscar URL dentro del decoded string
-    const urlMatch = decoded.match(/https?:\/\/[^\s"'<>]+/);
-    if (urlMatch) return urlMatch[0];
-    // Si el decoded string parece una URL sin protocolo
-    if (decoded.includes('.') && decoded.includes('/')) {
-      return decoded.startsWith('//') ? `https:${decoded}` : decoded;
-    }
-    return decoded.trim() || null;
+
+    // Buscar URLs de embed en el HTML raw (excluir las propias del sitio)
+    const urlMatches = html.match(/https?:\/\/[^\s"'<>]+/g) || [];
+    const embedUrl = urlMatches.find((u: string) =>
+      !u.includes('tioplus') && !u.includes('cloudflare') && !u.includes('tmdb') &&
+      !u.includes('google') && !u.includes('facebook') && !u.includes('fonts.googleapis') &&
+      !u.includes('disqus') && !u.includes('llvpn') && !u.includes('amung')
+    );
+    return embedUrl || null;
   } catch {
     return null;
   }
 }
 
 /**
- * Extrae el nombre del servidor embed a partir de su URL
+ * Extrae el nombre del servidor embed a partir de su URL o label
  */
 function getServerName(url: string, label?: string): string {
   if (label) return label.trim();
-  if (url.includes('streamwish')) return 'Streamwish';
-  if (url.includes('filelions')) return 'FileLions';
-  if (url.includes('voe')) return 'Voe';
-  if (url.includes('doodstream') || url.includes('dood')) return 'DoodStream';
-  if (url.includes('upstream')) return 'Upstream';
-  if (url.includes('mp4upload')) return 'MP4Upload';
-  if (url.includes('embed')) return 'EmbedPlayer';
-  if (url.includes('upfast') || url.includes('upf')) return 'UPFAST';
-  if (url.includes('earnvids')) return 'Earnvids';
-  if (url.includes('tioplus')) return 'TioPlus';
-  if (url.includes('p2p')) return 'P2P';
+  const host = url.toLowerCase();
+  if (host.includes('vidhide')) return 'VidHide';
+  if (host.includes('streamwish')) return 'Streamwish';
+  if (host.includes('filelions')) return 'FileLions';
+  if (host.includes('voe')) return 'Voe';
+  if (host.includes('doodstream') || host.includes('dood')) return 'DoodStream';
+  if (host.includes('upstream')) return 'Upstream';
+  if (host.includes('mp4upload')) return 'MP4Upload';
+  if (host.includes('upfast') || host.includes('upf')) return 'UPFAST';
+  if (host.includes('earnvids')) return 'Earnvids';
+  if (host.includes('p2p')) return 'P2P';
+  if (host.includes('mixdrop')) return 'MixDrop';
+  if (host.includes('lulustream')) return 'LuluStream';
   return 'Servidor Latino';
 }
 
 export class RealScraperService {
   /**
-   * Scrapea la homepage de TioPlus para obtener las últimas películas y series REALES
-   */
-  static async scrapeLatest(type: 'peliculas' | 'series' | 'animes' = 'peliculas', limit = 20): Promise<MediaItem[]> {
-    try {
-      const url = type === 'peliculas' ? `${BASE_URL}/peliculas` : `${BASE_URL}/${type}`;
-      const res = await httpGet(url);
-      const $ = cheerio.load(res.data);
-      const items: MediaItem[] = [];
-
-      $('article.item').each((i, el) => {
-        if (items.length >= limit) return false;
-
-        const $el = $(el);
-        const linkEl = $el.find('a.itemA').first();
-        const href = linkEl.attr('href') || '';
-        const imgEl = $el.find('img').first();
-        const poster = imgEl.attr('data-src') || imgEl.attr('src') || null;
-        const titleText = $el.find('.title_over span').first().text().trim();
-
-        if (!href || !titleText) return;
-
-        // Extraer año del título "Scary Movie 6 (2026)"
-        const yearMatch = titleText.match(/\((\d{4})\)/);
-        const year = yearMatch ? yearMatch[1] : '';
-        const cleanTitle = titleText.replace(/\s*\(\d{4}\)\s*$/, '').trim();
-        const slug = href.split('/').filter(Boolean).pop() || cleanTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-
-        const contentType = href.includes('/serie/') || href.includes('/anime/') ? 'tvseries' as const : 'movie' as const;
-
-        items.push({
-          id: slug,
-          tmdb_id: 0,
-          imdb_id: null,
-          type: contentType,
-          title: cleanTitle,
-          original_title: cleanTitle,
-          aliases: [cleanTitle],
-          overview: `Ver ${cleanTitle} online gratis en HD con audio Latino.`,
-          rating: 0,
-          release_date: year,
-          genres: [],
-          subcategories: ['Latino HD'],
-          poster: poster && !poster.includes('placeholder') ? poster : null,
-          backdrop: null,
-          logo: null,
-          trailer: null,
-          cast: [],
-          dubbing_cast: [],
-          servers: [],
-          _tioplus_url: href,
-        } as MediaItem & { _tioplus_url: string });
-      });
-
-      return items;
-    } catch (err: any) {
-      console.error(`[TioPlus] Error scrapeando ${type}:`, err.message);
-      return [];
-    }
-  }
-
-  /**
-   * Scrapea el homepage completo de TioPlus (slider + todas las secciones)
+   * Scrapea el homepage completo de TioPlus (slider + secciones)
    */
   static async scrapeHomepage(): Promise<MediaItem[]> {
     try {
@@ -133,7 +83,7 @@ export class RealScraperService {
       const items: MediaItem[] = [];
       const seenSlugs = new Set<string>();
 
-      // 1. Slider principal (las películas destacadas)
+      // 1. Slider principal (películas destacadas)
       $('.swiper-slide article, .home__slider_index .swiper-slide').each((i, el) => {
         const $el = $(el);
         const linkEl = $el.find('a.itemA').first();
@@ -154,7 +104,8 @@ export class RealScraperService {
         if (seenSlugs.has(slug)) return;
         seenSlugs.add(slug);
 
-        const contentType = href.includes('/serie/') || href.includes('/anime/') ? 'tvseries' as const : 'movie' as const;
+        const contentType = href.includes('/serie/') || href.includes('/anime/')
+          ? 'tvseries' as const : 'movie' as const;
 
         items.push({
           id: slug,
@@ -177,10 +128,10 @@ export class RealScraperService {
           dubbing_cast: [],
           servers: [],
           _tioplus_url: href,
-        } as MediaItem & { _tioplus_url: string });
+        } as any);
       });
 
-      // 2. Secciones del homepage (articles normales)
+      // 2. Secciones normales (articles)
       $('article.item').each((i, el) => {
         const $el = $(el);
         const linkEl = $el.find('a.itemA').first();
@@ -222,7 +173,7 @@ export class RealScraperService {
           dubbing_cast: [],
           servers: [],
           _tioplus_url: href,
-        } as MediaItem & { _tioplus_url: string });
+        } as any);
       });
 
       return items;
@@ -233,8 +184,8 @@ export class RealScraperService {
   }
 
   /**
-   * Scrapea el detalle completo de una película/serie desde TioPlus.
-   * Extrae metadatos reales + servidores de streaming con tokens Base64.
+   * Scrapea el detalle de una película/serie y resuelve los servidores embed REALES.
+   * Cada token data-server se resuelve a una URL de iframe real (vidhideplus, streamwish, etc).
    */
   static async scrapeDetail(tioplusUrl: string): Promise<MediaItem | null> {
     try {
@@ -243,13 +194,17 @@ export class RealScraperService {
 
       // === METADATOS ===
       const h1 = $('h1.slugh1').first().text().trim() || $('h1').first().text().trim();
+      if (!h1) return null;
+
       const yearMatch = h1.match(/\((\d{4})\)/);
       const year = yearMatch ? yearMatch[1] : '';
       const title = h1.replace(/\s*\(\d{4}\)\s*$/, '').trim();
       const slug = tioplusUrl.split('/').filter(Boolean).pop() || title.toLowerCase().replace(/[^a-z0-9]+/g, '-');
 
       const overview = $('.description p').first().text().trim();
-      const originalTitle = $('.genres:has(b:contains("Titulo Original")) h2').text().trim() || title;
+      const originalTitle = $('h2').filter((_, el) => {
+        return $(el).parent().find('b').text().includes('Titulo Original');
+      }).text().trim() || title;
 
       // Rating
       const ratingText = $('span:contains("Rating:")').text();
@@ -258,93 +213,85 @@ export class RealScraperService {
 
       // Géneros
       const genres: string[] = [];
-      $('.genres:has(b:contains("Generos")) a').each((_, el) => {
-        genres.push($(el).text().trim());
+      $('a[href*="/genero/"]').each((_, el) => {
+        const g = $(el).text().trim();
+        if (g && !genres.includes(g)) genres.push(g);
       });
 
-      // Poster (og:image fallback)
+      // Poster & Backdrop
       const ogImage = $('meta[property="og:image"]').attr('content') || null;
       const posterUrl = ogImage ? ogImage.replace('/original/', '/w342/') : null;
-      const backdropUrl = ogImage ? ogImage.replace('/w342/', '/w1280/').replace('/original/', '/w1280/') : null;
-
-      // Background del slider
       const bgStyle = $('.bg').first().attr('style') || '';
       const bgMatch = bgStyle.match(/url\("?([^"')]+)"?\)/);
-      const backdrop = bgMatch ? bgMatch[1] : backdropUrl;
+      const backdrop = bgMatch ? bgMatch[1] : (ogImage || null);
 
-      // Cast/Actores
+      // Cast
       const cast: CastMember[] = [];
-      $('.genres:has(b:contains("Actores")) a').each((_, el) => {
-        cast.push({
-          name: $(el).text().trim(),
-          character: '',
-          photo: null,
-        });
+      $('a[href*="/actor/"]').each((_, el) => {
+        cast.push({ name: $(el).text().trim(), character: '', photo: null });
       });
 
       // Director
-      const director = $('.genres:has(b:contains("Director")) p').first().text().trim();
+      const directorEl = $('b:contains("Director")').parent().parent();
+      const director = directorEl.find('p').first().text().trim();
 
       // Tipo
       const isMovie = tioplusUrl.includes('/pelicula/');
       const contentType = isMovie ? 'movie' as const : 'tvseries' as const;
 
-      // === SERVIDORES DE STREAMING (datos REALES) ===
+      // === SERVIDORES DE STREAMING REALES ===
       const servers: ServerOption[] = [];
-      let serverCount = 0;
+      const serverTokens: Array<{ token: string; label: string }> = [];
 
-      // Los servidores están en <li data-server="BASE64_TOKEN">
       $('li[data-server]').each((_, el) => {
-        const $li = $(el);
-        const encodedToken = $li.attr('data-server') || '';
-        if (!encodedToken) return;
-
-        const labelSpan = $li.find('span').first().text().trim();
-        const decodedUrl = decodeServerToken(encodedToken);
-
-        serverCount++;
-        servers.push({
-          id: `srv_tio_${slug}_${serverCount}`,
-          name: labelSpan || `Servidor ${serverCount}`,
-          quality: '1080p',
-          language: 'latino',
-          embed_url: decodedUrl || `${BASE_URL}/player/${encodedToken}`,
-          status: 'online',
-          last_checked: new Date().toISOString(),
-        });
+        const token = $(el).attr('data-server') || '';
+        const label = $(el).find('span').first().text().trim();
+        if (token) serverTokens.push({ token, label });
       });
 
-      // También extraer el data-tr del player principal
-      const playerTr = $('[data-tr]').first().attr('data-tr');
-      if (playerTr && servers.length === 0) {
-        const decodedUrl = decodeServerToken(playerTr);
-        servers.push({
-          id: `srv_tio_${slug}_main`,
-          name: 'Reproductor Principal',
-          quality: '1080p',
-          language: 'latino',
-          embed_url: decodedUrl || `${BASE_URL}/player/${playerTr}`,
-          status: 'online',
-          last_checked: new Date().toISOString(),
-        });
+      // También el data-tr del player principal si no hay li[data-server]
+      if (serverTokens.length === 0) {
+        const playerTr = $('[data-tr]').first().attr('data-tr');
+        if (playerTr) serverTokens.push({ token: playerTr, label: 'Reproductor Principal' });
       }
+
+      // Resolver los tokens en paralelo (max 3 para no saturar)
+      const tokensToResolve = serverTokens.slice(0, 5);
+      const resolvedUrls = await Promise.allSettled(
+        tokensToResolve.map(t => resolvePlayerUrl(t.token, tioplusUrl))
+      );
+
+      resolvedUrls.forEach((result, i) => {
+        const embedUrl = result.status === 'fulfilled' ? result.value : null;
+        const label = tokensToResolve[i].label;
+
+        if (embedUrl) {
+          servers.push({
+            id: `srv_tio_${slug}_${i + 1}`,
+            name: `${getServerName(embedUrl, '')} - ${label}`,
+            quality: '1080p',
+            language: 'latino',
+            embed_url: embedUrl,
+            status: 'online',
+            last_checked: new Date().toISOString(),
+          });
+        }
+      });
 
       // Detectar idioma del tab activo
       const activeTab = $('button.active.button').text().trim().toLowerCase();
       const language = activeTab.includes('subtitulado') ? 'subtitulado'
         : activeTab.includes('castellano') ? 'castellano' : 'latino';
-
-      // Actualizar idioma de los servidores
       servers.forEach(s => { s.language = language as any; });
 
-      const item: MediaItem = {
+      return {
         id: slug,
         tmdb_id: 0,
         imdb_id: null,
         type: contentType,
         title,
         original_title: originalTitle,
-        aliases: [title, originalTitle].filter(Boolean),
+        aliases: [title, originalTitle].filter((v, i, a) => a.indexOf(v) === i),
         tagline: director ? `Dirigida por ${director}` : '',
         overview: overview || `Ver ${title} online gratis en HD con audio Latino.`,
         rating,
@@ -361,8 +308,6 @@ export class RealScraperService {
         primary_stream: servers[0] || undefined,
         servers,
       };
-
-      return item;
     } catch (err: any) {
       console.error('[TioPlus] Error scrapeando detalle:', err.message);
       return null;
@@ -370,39 +315,46 @@ export class RealScraperService {
   }
 
   /**
-   * Busca películas/series en TioPlus por título.
-   * Scrapea el listado y devuelve resultados REALES.
+   * Busca en TioPlus usando su API interna /api/search/QUERY
+   * Devuelve resultados REALES. El primer resultado incluye servidores resueltos.
    */
   static async scrapeRealMovies(query: string): Promise<MediaItem[]> {
     const q = query.trim();
     if (!q) return [];
 
     try {
-      // TioPlus usa /search?s=QUERY para búsquedas
-      const searchUrl = `${BASE_URL}/search?s=${encodeURIComponent(q)}`;
+      // TioPlus tiene API interna: /api/search/QUERY que devuelve HTML de resultados
+      const searchUrl = `${BASE_URL}/api/search/${encodeURIComponent(q)}`;
       const res = await httpGet(searchUrl);
       const $ = cheerio.load(res.data);
       const results: MediaItem[] = [];
 
-      $('article.item').each((i, el) => {
+      // Los resultados pueden venir como articles o como links directos
+      $('article.item, .search-result, a[href*="/pelicula/"], a[href*="/serie/"], a[href*="/anime/"]').each((i, el) => {
         if (results.length >= 10) return false;
 
         const $el = $(el);
-        const linkEl = $el.find('a.itemA').first();
-        const href = linkEl.attr('href') || '';
+        let href = $el.attr('href') || $el.find('a').first().attr('href') || '';
+        if (!href || (!href.includes('/pelicula/') && !href.includes('/serie/') && !href.includes('/anime/'))) return;
+
+        // Evitar duplicados
+        const slug = href.split('/').filter(Boolean).pop() || '';
+        if (results.some(r => r.id === slug)) return;
+
         const imgEl = $el.find('img').first();
         const poster = imgEl.attr('data-src') || imgEl.attr('src') || null;
-        const titleText = $el.find('.title_over span').first().text().trim()
+        let titleText = $el.find('.title_over span, h2, h3, .title').first().text().trim()
           || imgEl.attr('alt')?.replace(/^Ver\s+/, '') || '';
-
-        if (!href || !titleText) return;
+        
+        // Si no hay título, usar el texto del elemento
+        if (!titleText) titleText = $el.text().trim().split('\n')[0];
+        if (!titleText) return;
 
         const yearMatch = titleText.match(/\((\d{4})\)/);
         const year = yearMatch ? yearMatch[1] : '';
         const cleanTitle = titleText.replace(/\s*\(\d{4}\)\s*$/, '').trim();
-        const slug = href.split('/').filter(Boolean).pop() || '';
 
-        const contentType = href.includes('/serie/') || href.includes('/anime/') || href.includes('/dorama/')
+        const contentType = href.includes('/serie/') || href.includes('/anime/')
           ? 'tvseries' as const : 'movie' as const;
 
         results.push({
@@ -426,10 +378,10 @@ export class RealScraperService {
           dubbing_cast: [],
           servers: [],
           _tioplus_url: href,
-        } as MediaItem & { _tioplus_url: string });
+        } as any);
       });
 
-      // Si hay un resultado exacto, traer sus servidores de detalle
+      // Resolver servidores del primer resultado
       if (results.length > 0) {
         const firstUrl = (results[0] as any)._tioplus_url;
         if (firstUrl) {
@@ -443,6 +395,113 @@ export class RealScraperService {
       return results;
     } catch (err: any) {
       console.error('[TioPlus] Error buscando:', err.message);
+
+      // Fallback: buscar via /search/QUERY
+      try {
+        const fallbackUrl = `${BASE_URL}/search/${encodeURIComponent(q)}`;
+        const res = await httpGet(fallbackUrl);
+        const $ = cheerio.load(res.data);
+        const results: MediaItem[] = [];
+
+        $('article.item').each((i, el) => {
+          if (results.length >= 10) return false;
+          const $el = $(el);
+          const href = $el.find('a').first().attr('href') || '';
+          const title = $el.find('.title_over span, img').first().text().trim()
+            || $el.find('img').attr('alt') || '';
+          const poster = $el.find('img').attr('data-src') || null;
+          const slug = href.split('/').filter(Boolean).pop() || '';
+
+          if (!href || !slug) return;
+
+          const contentType = href.includes('/serie/') || href.includes('/anime/')
+            ? 'tvseries' as const : 'movie' as const;
+
+          results.push({
+            id: slug,
+            tmdb_id: 0,
+            imdb_id: null,
+            type: contentType,
+            title: title.replace(/\s*\(\d{4}\)\s*$/, '').trim() || slug,
+            original_title: title || slug,
+            aliases: [title],
+            overview: `Ver ${title} online gratis en HD.`,
+            rating: 0,
+            genres: [],
+            subcategories: ['Latino HD'],
+            poster: poster && !poster.includes('placeholder') ? poster : null,
+            backdrop: null,
+            logo: null,
+            trailer: null,
+            cast: [],
+            dubbing_cast: [],
+            servers: [],
+          });
+        });
+
+        return results;
+      } catch {
+        return [];
+      }
+    }
+  }
+
+  /**
+   * Scrapea el listado de películas, series o animes
+   */
+  static async scrapeLatest(type: 'peliculas' | 'series' | 'animes' = 'peliculas', limit = 20): Promise<MediaItem[]> {
+    try {
+      const url = `${BASE_URL}/${type}`;
+      const res = await httpGet(url);
+      const $ = cheerio.load(res.data);
+      const items: MediaItem[] = [];
+
+      $('article.item').each((i, el) => {
+        if (items.length >= limit) return false;
+
+        const $el = $(el);
+        const linkEl = $el.find('a.itemA').first();
+        const href = linkEl.attr('href') || '';
+        const imgEl = $el.find('img').first();
+        const poster = imgEl.attr('data-src') || imgEl.attr('src') || null;
+        const titleText = $el.find('.title_over span').first().text().trim();
+
+        if (!href || !titleText) return;
+
+        const yearMatch = titleText.match(/\((\d{4})\)/);
+        const year = yearMatch ? yearMatch[1] : '';
+        const cleanTitle = titleText.replace(/\s*\(\d{4}\)\s*$/, '').trim();
+        const slug = href.split('/').filter(Boolean).pop() || '';
+
+        const contentType = type === 'peliculas' ? 'movie' as const : 'tvseries' as const;
+
+        items.push({
+          id: slug,
+          tmdb_id: 0,
+          imdb_id: null,
+          type: contentType,
+          title: cleanTitle,
+          original_title: cleanTitle,
+          aliases: [cleanTitle],
+          overview: `Ver ${cleanTitle} online gratis en HD con audio Latino.`,
+          rating: 0,
+          release_date: year,
+          genres: [],
+          subcategories: ['Latino HD'],
+          poster: poster && !poster.includes('placeholder') ? poster : null,
+          backdrop: null,
+          logo: null,
+          trailer: null,
+          cast: [],
+          dubbing_cast: [],
+          servers: [],
+          _tioplus_url: href,
+        } as any);
+      });
+
+      return items;
+    } catch (err: any) {
+      console.error(`[TioPlus] Error scrapeando ${type}:`, err.message);
       return [];
     }
   }
