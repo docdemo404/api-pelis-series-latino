@@ -31,6 +31,14 @@ export class CatalogService {
   static async getById(id: string): Promise<MediaItem | null> {
     const q = id.toLowerCase().trim();
 
+    // 0. Intentar si es un slug de FuegoCine (ej. 2025-04-spiderman-lejos-de-casa-2019-html)
+    const fuegocineMatch = q.match(/^(\d{4})-(\d{2})-(.+)-html$/);
+    if (fuegocineMatch) {
+      const fuegocineUrl = `https://www.fuegocine.com/${fuegocineMatch[1]}/${fuegocineMatch[2]}/${fuegocineMatch[3]}.html`;
+      const fcDetail = await RealScraperService.scrapeFuegocineDetail(fuegocineUrl);
+      if (fcDetail) return fcDetail;
+    }
+
     // 1. Intentar por categorías directas en TioPlus (película, serie, anime, dorama)
     const categories = ['pelicula', 'serie', 'anime', 'dorama'];
     for (const cat of categories) {
@@ -38,9 +46,15 @@ export class CatalogService {
       if (detail && (detail.servers?.length || detail.seasons?.length)) return detail;
     }
 
-    // 4. Buscar por texto de forma inteligente en TioPlus
+    // 2. Buscar por texto de forma inteligente en TioPlus & FuegoCine
     const scraped = await RealScraperService.scrapeRealMovies(q);
     if (scraped.length > 0) {
+      // Si el primer resultado es de fuegocine, obtener sus detalles completos
+      const rawUrl = (scraped[0] as any)._tioplus_url || '';
+      if (rawUrl.includes('fuegocine.com')) {
+        const fcDetail = await RealScraperService.scrapeFuegocineDetail(rawUrl);
+        if (fcDetail) return fcDetail;
+      }
       return scraped[0];
     }
 
