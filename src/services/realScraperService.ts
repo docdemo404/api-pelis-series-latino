@@ -73,6 +73,32 @@ async function verifyEmbedStatus(embedUrl: string): Promise<'online' | 'offline'
       }
     }
 
+    // Detectar redirección de huella JS de Vudeo (var redirect_link = '...') y seguir la redirección final
+    const vudeoMatch = html.match(/var\s+redirect_link\s*=\s*['"]([^'"]+)['"]/i);
+    if (vudeoMatch) {
+      const targetUrl = vudeoMatch[1] + 'fp=-7';
+      try {
+        const vudeoRes = await axios.get(targetUrl, {
+          headers: { 'User-Agent': UA, 'Referer': embedUrl },
+          timeout: 4000,
+          validateStatus: () => true
+        });
+
+        if (vudeoRes.status >= 400 || vudeoRes.status === 410) {
+          return 'offline';
+        }
+
+        const vudeoHtml = typeof vudeoRes.data === 'string' ? vudeoRes.data : '';
+        for (const pattern of SOFT_ERROR_PATTERNS) {
+          if (pattern.test(vudeoHtml)) {
+            return 'offline';
+          }
+        }
+      } catch {
+        return 'offline';
+      }
+    }
+
     // Inspeccionar iframe interno de nivel 2 si el reproductor está encapsulado (ej. waaw.to / netu)
     const innerIframeMatch = html.match(/iframe[^>]+src=["']([^"']+)["']/i);
     if (innerIframeMatch) {
@@ -84,6 +110,11 @@ async function verifyEmbedStatus(embedUrl: string): Promise<'online' | 'offline'
           timeout: 3000,
           validateStatus: () => true
         });
+
+        if (innerRes.status >= 400 || innerRes.status === 410) {
+          return 'offline';
+        }
+
         const innerHtml = typeof innerRes.data === 'string' ? innerRes.data : '';
         for (const pattern of SOFT_ERROR_PATTERNS) {
           if (pattern.test(innerHtml)) {
