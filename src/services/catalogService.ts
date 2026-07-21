@@ -4,23 +4,28 @@ import { RealScraperService } from './realScraperService';
 
 export class CatalogService {
   /**
-   * Obtiene todos los títulos
+   * Obtiene todos los títulos: primero de Supabase, luego scraping en vivo de TioPlus
    */
   static async getAll(): Promise<MediaItem[]> {
+    // 1. Intentar desde Supabase
     try {
       const { data } = await supabase.from('media_items').select('*').limit(50);
       if (data && data.length > 0) {
         return data.map(this.mapDbItemToMediaItem);
       }
     } catch (err) {}
-    return [];
+
+    // 2. Scraping en vivo del homepage de TioPlus
+    return RealScraperService.scrapeHomepage();
   }
 
   /**
-   * Obtiene un título por ID o Slug
+   * Obtiene un título por ID/Slug. Si no está en DB, scrapea el detalle de TioPlus
    */
   static async getById(id: string): Promise<MediaItem | null> {
     const q = id.toLowerCase().trim();
+
+    // 1. Buscar en Supabase
     try {
       const { data } = await supabase
         .from('media_items')
@@ -31,24 +36,36 @@ export class CatalogService {
       if (data) return this.mapDbItemToMediaItem(data);
     } catch (err) {}
 
-    // Intentar Web Scraping Real si no está en DB
+    // 2. Intentar como slug directo en TioPlus (película)
+    let detail = await RealScraperService.scrapeDetail(`https://tioplus.app/pelicula/${q}`);
+    if (detail && detail.servers && detail.servers.length > 0) return detail;
+
+    // 3. Intentar como serie
+    detail = await RealScraperService.scrapeDetail(`https://tioplus.app/serie/${q}`);
+    if (detail && detail.servers && detail.servers.length > 0) return detail;
+
+    // 4. Intentar como anime
+    detail = await RealScraperService.scrapeDetail(`https://tioplus.app/anime/${q}`);
+    if (detail && detail.servers && detail.servers.length > 0) return detail;
+
+    // 5. Buscar por texto
     const scraped = await RealScraperService.scrapeRealMovies(q);
     return scraped[0] || null;
   }
 
   /**
-   * Búsqueda por texto con Web Scraping Real en Vivo
+   * Búsqueda en vivo con Web Scraping Real de TioPlus
    */
   static async search(query: string): Promise<MediaItem[]> {
     const q = query.toLowerCase().trim();
 
-    // 1. Ejecutar Web Scraping Real en vivo a los portales
+    // 1. Scraping en vivo de TioPlus
     const realScraped = await RealScraperService.scrapeRealMovies(q);
     if (realScraped.length > 0) {
       return realScraped;
     }
 
-    // 2. Consultar Supabase
+    // 2. Fallback a Supabase
     try {
       const { data } = await supabase
         .from('media_items')
@@ -87,17 +104,8 @@ export class CatalogService {
       dubbing_cast: dbRow.dubbing_cast_data || [],
       total_seasons: dbRow.total_seasons || 0,
       total_episodes: dbRow.total_episodes || 0,
-      primary_stream: {
-        id: `srv_${dbRow.id}_1`,
-        name: 'Streamwish',
-        quality: '1080p',
-        language: 'latino',
-        embed_url: `https://streamwish.to/e/${dbRow.id}`,
-        direct_stream: `https://streamwish.to/hls/${dbRow.id}.m3u8`,
-        status: 'online',
-        last_checked: new Date().toISOString()
-      }
+      primary_stream: dbRow.servers?.[0] || undefined,
+      servers: dbRow.servers || [],
     };
   }
 }
-

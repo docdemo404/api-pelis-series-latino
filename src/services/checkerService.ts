@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { dbService } from './catalogService';
+import { CatalogService } from './catalogService';
 import { ServerOption } from '../types';
 
 export class CheckerService {
@@ -8,13 +8,12 @@ export class CheckerService {
    */
   static async checkLinkHealth(server: ServerOption): Promise<'online' | 'offline'> {
     try {
-      // Hacer petición HEAD o GET con timeout de 5 segundos
       const response = await axios.get(server.embed_url, {
         timeout: 5000,
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         },
-        validateStatus: () => true // Aceptar cualquier status para inspeccionar contenido
+        validateStatus: () => true
       });
 
       if (response.status >= 400) {
@@ -23,7 +22,6 @@ export class CheckerService {
 
       const html = typeof response.data === 'string' ? response.data.toLowerCase() : '';
 
-      // Firmas comunes de archivos borrados / servidores caídos
       const deadSignatures = [
         'file removed',
         'file deleted',
@@ -41,11 +39,11 @@ export class CheckerService {
   }
 
   /**
-   * Escanea y actualiza la salud de todo el catálogo en segundo plano
+   * Escanea y actualiza la salud del catálogo (scrapea en vivo de TioPlus)
    */
   static async runFullHealthCheck() {
     console.log(`[HealthChecker] 🔄 Iniciando verificación automática de enlaces: ${new Date().toISOString()}`);
-    const items = dbService.getAll();
+    const items = await CatalogService.getAll();
     let checkedCount = 0;
     let onlineCount = 0;
     let offlineCount = 0;
