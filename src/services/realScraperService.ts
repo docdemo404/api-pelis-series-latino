@@ -389,117 +389,54 @@ export class RealScraperService {
 
   /**
    * Busca en TioPlus usando su API interna /api/search/QUERY
-   * Devuelve resultados REALES. El primer resultado incluye servidores resueltos.
+   * Devuelve resultados REALES con soporte de filtrado inteligente multi-palabra (evita colisiones de lematización y prefijos)
    */
   static async scrapeRealMovies(query: string): Promise<MediaItem[]> {
     const q = query.trim();
     if (!q) return [];
 
-    try {
-      // TioPlus tiene API interna: /api/search/QUERY que devuelve HTML de resultados
-      const searchUrl = `${BASE_URL}/api/search/${encodeURIComponent(q)}`;
-      const res = await httpGet(searchUrl);
-      const $ = cheerio.load(res.data);
-      const results: MediaItem[] = [];
-
-      // Los resultados pueden venir como articles o como links directos
-      $('article.item, .search-result, a[href*="/pelicula/"], a[href*="/serie/"], a[href*="/anime/"]').each((i, el) => {
-        if (results.length >= 10) return false;
-
-        const $el = $(el);
-        let href = $el.attr('href') || $el.find('a').first().attr('href') || '';
-        if (!href || (!href.includes('/pelicula/') && !href.includes('/serie/') && !href.includes('/anime/'))) return;
-
-        // Evitar duplicados
-        const slug = extractCanonicalSlug(href);
-        if (!slug || results.some(r => r.id === slug)) return;
-
-        const imgEl = $el.find('img').first();
-        const poster = imgEl.attr('data-src') || imgEl.attr('src') || null;
-        let titleText = $el.find('.title_over span, h2, h3, .title').first().text().trim()
-          || imgEl.attr('alt')?.replace(/^Ver\s+/, '') || '';
-        
-        // Si no hay título, usar el texto del elemento
-        if (!titleText) titleText = $el.text().trim().split('\n')[0];
-        if (!titleText) return;
-
-        const yearMatch = titleText.match(/\((\d{4})\)/);
-        const year = yearMatch ? yearMatch[1] : '';
-        const cleanTitle = titleText.replace(/\s*\(\d{4}\)\s*$/, '').trim();
-
-        const contentType = href.includes('/serie/') || href.includes('/anime/')
-          ? 'tvseries' as const : 'movie' as const;
-
-        results.push({
-          id: slug,
-          tmdb_id: 0,
-          imdb_id: null,
-          type: contentType,
-          title: cleanTitle,
-          original_title: cleanTitle,
-          aliases: [cleanTitle],
-          overview: `Ver ${cleanTitle} online gratis en HD con audio Latino.`,
-          rating: 0,
-          release_date: year,
-          genres: [],
-          subcategories: ['Latino HD'],
-          poster: poster && !poster.includes('placeholder') ? poster : null,
-          backdrop: null,
-          logo: null,
-          trailer: null,
-          cast: [],
-          dubbing_cast: [],
-          servers: [],
-          _tioplus_url: href,
-        } as any);
-      });
-
-      // Resolver servidores del primer resultado
-      if (results.length > 0) {
-        const firstUrl = (results[0] as any)._tioplus_url;
-        if (firstUrl) {
-          const detailed = await this.scrapeDetail(firstUrl);
-          if (detailed) {
-            results[0] = { ...results[0], ...detailed };
-          }
-        }
-      }
-
-      return results;
-    } catch (err: any) {
-      console.error('[TioPlus] Error buscando:', err.message);
-
-      // Fallback: buscar via /search/QUERY
+    // Helper interno para buscar una palabra en TioPlus
+    const fetchSearchHtml = async (searchTerm: string): Promise<MediaItem[]> => {
       try {
-        const fallbackUrl = `${BASE_URL}/search/${encodeURIComponent(q)}`;
-        const res = await httpGet(fallbackUrl);
+        const searchUrl = `${BASE_URL}/api/search/${encodeURIComponent(searchTerm)}`;
+        const res = await httpGet(searchUrl);
         const $ = cheerio.load(res.data);
-        const results: MediaItem[] = [];
+        const items: MediaItem[] = [];
 
-        $('article.item').each((i, el) => {
-          if (results.length >= 10) return false;
+        $('article.item, .search-result, a[href*="/pelicula/"], a[href*="/serie/"], a[href*="/anime/"]').each((_, el) => {
+          if (items.length >= 10) return false;
           const $el = $(el);
-          const href = $el.find('a').first().attr('href') || '';
-          const title = $el.find('.title_over span, img').first().text().trim()
-            || $el.find('img').attr('alt') || '';
-          const poster = $el.find('img').attr('data-src') || null;
-          const slug = href.split('/').filter(Boolean).pop() || '';
+          let href = $el.attr('href') || $el.find('a').first().attr('href') || '';
+          if (!href || (!href.includes('/pelicula/') && !href.includes('/serie/') && !href.includes('/anime/'))) return;
 
-          if (!href || !slug) return;
+          const slug = extractCanonicalSlug(href);
+          if (!slug || items.some(r => r.id === slug)) return;
 
+          const imgEl = $el.find('img').first();
+          const poster = imgEl.attr('data-src') || imgEl.attr('src') || null;
+          let titleText = $el.find('.title_over span, h2, h3, .title').first().text().trim()
+            || imgEl.attr('alt')?.replace(/^Ver\s+/, '') || '';
+
+          if (!titleText) titleText = $el.text().trim().split('\n')[0];
+          if (!titleText) return;
+
+          const yearMatch = titleText.match(/\((\d{4})\)/);
+          const year = yearMatch ? yearMatch[1] : '';
+          const cleanTitle = titleText.replace(/\s*\(\d{4}\)\s*$/, '').trim();
           const contentType = href.includes('/serie/') || href.includes('/anime/')
             ? 'tvseries' as const : 'movie' as const;
 
-          results.push({
+          items.push({
             id: slug,
             tmdb_id: 0,
             imdb_id: null,
             type: contentType,
-            title: title.replace(/\s*\(\d{4}\)\s*$/, '').trim() || slug,
-            original_title: title || slug,
-            aliases: [title],
-            overview: `Ver ${title} online gratis en HD.`,
+            title: cleanTitle,
+            original_title: cleanTitle,
+            aliases: [cleanTitle],
+            overview: `Ver ${cleanTitle} online gratis en HD con audio Latino.`,
             rating: 0,
+            release_date: year,
             genres: [],
             subcategories: ['Latino HD'],
             poster: poster && !poster.includes('placeholder') ? poster : null,
@@ -509,14 +446,59 @@ export class RealScraperService {
             cast: [],
             dubbing_cast: [],
             servers: [],
-          });
+            _tioplus_url: href,
+          } as any);
         });
 
-        return results;
+        return items;
       } catch {
         return [];
       }
+    };
+
+    // 1. Intentar búsqueda directa completa
+    let results = await fetchSearchHtml(q);
+
+    // 2. Si es una búsqueda multi-palabra y devolvió 0 resultados (debido a lematización/prefijos/stopwords)
+    if (results.length === 0 && q.includes(' ')) {
+      const STOPWORDS = new Set(['de', 'el', 'la', 'los', 'las', 'un', 'una', 'y', 'en', 'del', 'a', 'of', 'the', 'in', 'and']);
+      const tokens = q.toLowerCase().split(/\s+/).filter(t => t.length > 0);
+      const significantTokens = tokens.filter(t => !STOPWORDS.has(t) && t.length > 1);
+      const searchCandidates = significantTokens.length > 0 ? significantTokens : tokens;
+
+      const candidates: MediaItem[] = [];
+      for (const token of searchCandidates) {
+        const items = await fetchSearchHtml(token);
+        candidates.push(...items);
+      }
+
+      // Post-filtrado estricto local: Cada token significativo DEBE estar presente en el título
+      const filtered = candidates.filter(item => {
+        const titleLower = item.title.toLowerCase();
+        return searchCandidates.every(token => titleLower.includes(token));
+      });
+
+      // Eliminar duplicados
+      const seen = new Set<string>();
+      results = filtered.filter(item => {
+        if (seen.has(item.id)) return false;
+        seen.add(item.id);
+        return true;
+      });
     }
+
+    // 3. Resolver servidores del primer resultado si existe
+    if (results.length > 0) {
+      const firstUrl = (results[0] as any)._tioplus_url;
+      if (firstUrl) {
+        const detailed = await this.scrapeDetail(firstUrl);
+        if (detailed) {
+          results[0] = { ...results[0], ...detailed };
+        }
+      }
+    }
+
+    return results;
   }
 
   /**
