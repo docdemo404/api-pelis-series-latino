@@ -312,19 +312,26 @@ export class RealScraperService {
             seasons = seasonKeys.map(sNum => {
               const epsRaw = rawSeasons[sNum] || [];
               totalEpisodes += epsRaw.length;
+              const firstEpImage = epsRaw[0]?.image ? `https://image.tmdb.org/t/p/w500${epsRaw[0].image}` : posterUrl;
+
               return {
                 season_number: parseInt(sNum),
                 name: `Temporada ${sNum}`,
                 episodes_count: epsRaw.length,
-                poster: null,
-                episodes: epsRaw.map((e: any) => ({
-                  episode_number: e.episode,
-                  name: e.title || `Episodio ${e.episode}`,
-                  overview: '',
-                  still_path: e.image ? `https://image.tmdb.org/t/p/w500${e.image}` : null,
-                  air_date: null,
-                  servers: []
-                }))
+                poster: firstEpImage || posterUrl,
+                episodes: epsRaw.map((e: any) => {
+                  const epNum = e.episode;
+                  const epName = e.title || `Episodio ${epNum}`;
+                  const stillPath = e.image ? `https://image.tmdb.org/t/p/w500${e.image}` : (posterUrl || null);
+                  return {
+                    episode_number: epNum,
+                    name: epName,
+                    overview: `Episodio ${epNum}: "${epName}" de ${title}. Disponible en calidad HD con audio Español Latino.`,
+                    still_path: stillPath,
+                    air_date: year ? `${year}-01-01` : new Date().toISOString().split('T')[0],
+                    servers: []
+                  };
+                })
               };
             });
           } catch (e) {}
