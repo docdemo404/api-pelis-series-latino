@@ -18,7 +18,7 @@
   <div class="hero text-center">
     <div class="container">
       <h1 class="fw-bold text-white mb-2">🎬 API Películas & Series Latino</h1>
-      <p class="lead text-indigo-200 mb-0">Documentación oficial para desarrolladores. Integra catálogos estilo Netflix, super metadatos y enlaces de streaming 100% verificados.</p>
+      <p class="lead text-indigo-200 mb-0">Documentación oficial para desarrolladores. Integra catálogos estilo Netflix, super metadatos y enlaces de streaming 100% verificados en vivo.</p>
     </div>
   </div>
 
@@ -28,6 +28,15 @@
 
         <h3 class="mb-4 text-warning">📌 Endpoints Principales</h3>
 
+        <!-- Endpoint Búsqueda General -->
+        <div class="card card-api p-4 border-primary">
+          <div class="d-flex align-items-center mb-3">
+            <span class="badge bg-primary badge-method me-3">GET</span>
+            <code class="fs-5 text-white">/api/v1/search?q=avatar</code>
+          </div>
+          <p class="text-secondary"><strong>Búsqueda General:</strong> Busca en tiempo real todo tipo de contenidos (Películas, Series, Animes y Doramas) en una sola consulta. Extrae reproductores embeds funcionales.</p>
+        </div>
+
         <!-- Endpoint 1 -->
         <div class="card card-api p-4">
           <div class="d-flex align-items-center mb-3">
@@ -35,16 +44,6 @@
             <code class="fs-5 text-white">/api/v1/feeds/home?country=CL</code>
           </div>
           <p class="text-secondary">Obtiene el Feed principal de inicio con carruseles horizontales estilo Netflix y banners destacados.</p>
-          <h6>Ejemplo de Respuesta JSON:</h6>
-          <pre>{
-  "status": "success",
-  "data": {
-    "featured": { "title": "Mi pobre angelito", "logo": "...", "backdrop": "..." },
-    "rows": [
-      { "id": "trending_cl", "title": "Lo más popular en Chile hoy", "items": [...] }
-    ]
-  }
-}</pre>
         </div>
 
         <!-- Endpoint 2 -->
@@ -53,25 +52,16 @@
             <span class="badge bg-success badge-method me-3">GET</span>
             <code class="fs-5 text-white">/api/v1/movies/search?q=solo+en+casa</code>
           </div>
-          <p class="text-secondary">Búsqueda inteligente con normalización de alias (ej. 'solo en casa' devuelve 'Mi pobre angelito').</p>
+          <p class="text-secondary">Alias de búsqueda para compatibilidad con clientes legacy.</p>
         </div>
 
         <!-- Endpoint 3 -->
         <div class="card card-api p-4">
           <div class="d-flex align-items-center mb-3">
             <span class="badge bg-success badge-method me-3">GET</span>
-            <code class="fs-5 text-white">/api/v1/series/los-simpson</code>
+            <code class="fs-5 text-white">/api/v1/media/scary-movie-6</code>
           </div>
-          <p class="text-secondary">Obtiene los metadatos completos de una serie: temporadas, lista de episodios, enlaces activos y actores de doblaje latino.</p>
-        </div>
-
-        <!-- Endpoint 4 -->
-        <div class="card card-api p-4">
-          <div class="d-flex align-items-center mb-3">
-            <span class="badge bg-success badge-method me-3">GET</span>
-            <code class="fs-5 text-white">/api/v1/stream/resolve?id=srv_101</code>
-          </div>
-          <p class="text-secondary">Resuelve tokens dinámicos e inyecta los encabezados HTTP necesarios para reproductores nativos (m3u8).</p>
+          <p class="text-secondary">Obtiene los metadatos completos y reproductores de un título específico por su slug o ID.</p>
         </div>
 
       </div>

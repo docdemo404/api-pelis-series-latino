@@ -20,6 +20,7 @@ app.get('/api/v1', (req: Request, res: Response) => {
     version: '1.0.0',
     documentation: '/docs',
     endpoints: [
+      '/api/v1/search?q=avatar',
       '/api/v1/feeds/home?country=CL',
       '/api/v1/discover?page=1&limit=20',
       '/api/v1/movies/search?q=solo+en+casa',
