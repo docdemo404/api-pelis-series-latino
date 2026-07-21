@@ -545,19 +545,24 @@ export class RealScraperService {
   }
 
   /**
-   * Scrapea los servidores reales de un episodio específico de una serie
+   * Scrapea los servidores reales de un episodio específico (soporta serie, anime y dorama)
    */
   static async scrapeEpisodeDetail(seriesSlug: string, season: number, episode: number) {
-    const episodeUrl = `${BASE_URL}/serie/${seriesSlug}/season/${season}/episode/${episode}`;
-    const detail = await this.scrapeDetail(episodeUrl);
-    if (!detail) return null;
-    return {
-      series_id: seriesSlug,
-      season_number: season,
-      episode_number: episode,
-      primary_stream: detail.primary_stream,
-      servers: detail.servers || []
-    };
+    const categories = ['serie', 'anime', 'dorama'];
+    for (const cat of categories) {
+      const episodeUrl = `${BASE_URL}/${cat}/${seriesSlug}/season/${season}/episode/${episode}`;
+      const detail = await this.scrapeDetail(episodeUrl);
+      if (detail && detail.servers && detail.servers.length > 0) {
+        return {
+          series_id: seriesSlug,
+          season_number: season,
+          episode_number: episode,
+          primary_stream: detail.primary_stream,
+          servers: detail.servers || []
+        };
+      }
+    }
+    return null;
   }
 
   /**
