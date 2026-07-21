@@ -131,13 +131,41 @@ export class CatalogService {
           const movieVotes = tmdbMovieData.vote_count || 0;
           const tvVotes = tmdbTvData.vote_count || 0;
 
-          // Si la ruta o pista indica 'tvseries', o si las votaciones de la serie de TV son mayores
-          if (typeHint === 'tvseries' || (typeHint !== 'movie' && tvVotes > movieVotes)) {
+          const tvTitle = tmdbTvData.name || tmdbTvData.original_name || '';
+          const movieTitle = tmdbMovieData.title || tmdbMovieData.original_title || '';
+
+          if (typeHint === 'tvseries') {
             tmdbData = tmdbTvData;
             contentType = 'tvseries';
-          } else {
+          } else if (typeHint === 'movie') {
             tmdbData = tmdbMovieData;
             contentType = 'movie';
+          } else {
+            const norm = (t: string) => t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "").trim();
+            const tvNorm = norm(tvTitle);
+            const movieNorm = norm(movieTitle);
+
+            const [tvSearch, movieSearch] = await Promise.all([
+              this.search(tvTitle).catch(() => []),
+              this.search(movieTitle).catch(() => [])
+            ]);
+
+            const tvMatch = tvSearch.some(r => r.tmdb_id === tmdbNumericId || norm(r.title) === tvNorm);
+            const movieMatch = movieSearch.some(r => r.tmdb_id === tmdbNumericId || norm(r.title) === movieNorm);
+
+            if (tvMatch && !movieMatch) {
+              tmdbData = tmdbTvData;
+              contentType = 'tvseries';
+            } else if (movieMatch && !tvMatch) {
+              tmdbData = tmdbMovieData;
+              contentType = 'movie';
+            } else if (tvVotes > movieVotes) {
+              tmdbData = tmdbTvData;
+              contentType = 'tvseries';
+            } else {
+              tmdbData = tmdbMovieData;
+              contentType = 'movie';
+            }
           }
         }
 
