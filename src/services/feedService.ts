@@ -1,15 +1,15 @@
-import { HomeFeedResponse, MediaItem } from '../types';
-import { dbService } from './catalogService';
+import { HomeFeedResponse } from '../types';
+import { CatalogService } from './catalogService';
 
 export class FeedService {
   /**
    * Genera las filas horizontales y carruseles para la pantalla de inicio estilo Netflix
    */
-  static getHomeFeed(country: string = 'CL'): HomeFeedResponse {
-    const all = dbService.getAll();
-    const featured = all.find(i => i.backdrop && i.logo) || all[0] || null;
+  static async getHomeFeed(country: string = 'CL'): Promise<HomeFeedResponse> {
+    const all = await CatalogService.getAll();
+    const featured = all.find(i => i.backdrop) || all[0] || null;
 
-    const trendingChile = all.slice();
+    const trendingChile = all.slice(0, 10);
     const popularSeries = all.filter(i => i.type === 'tvseries');
     const recentMovies = all.filter(i => i.type === 'movie');
 
@@ -39,10 +39,10 @@ export class FeedService {
   }
 
   /**
-   * Paginación infinita (Infinite Scroll) para exploración de catálogo
+   * Paginación infinita (Infinite Scroll)
    */
-  static getDiscover(page: number = 1, limit: number = 20, type?: string, genre?: string) {
-    let items = dbService.getAll();
+  static async getDiscover(page: number = 1, limit: number = 20, type?: string, genre?: string) {
+    let items = await CatalogService.getAll();
 
     if (type) {
       items = items.filter(i => i.type === type);
