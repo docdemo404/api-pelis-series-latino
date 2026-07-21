@@ -5,20 +5,27 @@ import { TmdbService } from './tmdbService';
 
 export class CatalogService {
   /**
-   * Obtiene todos los títulos del homepage en vivo con Slugs canónicos como IDs (ej. "la-casa-del-dragon")
+   * Obtiene todos los títulos del homepage en vivo enriquecidos con TMDB
    */
   static async getAll(): Promise<MediaItem[]> {
-    // 1. Scraping en vivo del homepage de TioPlus (Garantiza Slugs Canónicos reales)
     const liveItems = await RealScraperService.scrapeHomepage();
     if (liveItems.length > 0) {
-      return liveItems;
+      const enrichedList: MediaItem[] = [];
+      for (const item of liveItems) {
+        enrichedList.push(await TmdbService.enrichMediaItem(item));
+      }
+      return enrichedList;
     }
 
-    // 2. Fallback a Supabase mapeando siempre a Slugs limpios
     try {
       const { data } = await supabase.from('media_items').select('*').limit(50);
       if (data && data.length > 0) {
-        return data.map(this.mapDbItemToMediaItem);
+        const dbItems = data.map(this.mapDbItemToMediaItem);
+        const enrichedList: MediaItem[] = [];
+        for (const item of dbItems) {
+          enrichedList.push(await TmdbService.enrichMediaItem(item));
+        }
+        return enrichedList;
       }
     } catch (err) {}
 
@@ -27,43 +34,54 @@ export class CatalogService {
 
   /**
    * Obtiene un título por ID/Slug de forma consistente.
-   * Acepta slugs canónicos (ej. "la-casa-del-dragon"), TMDB IDs o IDs numéricos.
+   * Acepta TMDB IDs numéricos o slugs.
    */
   static async getById(id: string): Promise<MediaItem | null> {
     const q = id.toLowerCase().trim();
 
-    // 0. Intentar si es un slug de FuegoCine (ej. 2025-04-spiderman-lejos-de-casa-2019-html)
+    // 0. Si el ID es numérico (ID oficial de TMDB), obtener metadatos de TMDB y resolver servidores
+    if (!isNaN(Number(q))) {
+      const tmdbNumericId = Number(q);
+      const tmdbMovieData = await TmdbService.getTmdbDetails(tmdbNumericId, 'movie');
+      const tmdbTvData = tmdbMovieData ? null : await TmdbService.getTmdbDetails(tmdbNumericId, 'tvseries');
+      const tmdbData = tmdbMovieData || tmdbTvData;
+
+      if (tmdbData) {
+        const title = tmdbData.title || tmdbData.name;
+        const searchResults = await this.search(title);
+        const match = searchResults.find(r => r.tmdb_id === tmdbNumericId) || searchResults[0];
+        if (match) {
+          return await TmdbService.enrichMediaItem(match);
+        }
+      }
+    }
+
+    // 1. Intentar si es un slug de FuegoCine (ej. 2025-04-spiderman-lejos-de-casa-2019-html)
     const fuegocineMatch = q.match(/^(\d{4})-(\d{2})-(.+)-html$/);
     if (fuegocineMatch) {
       const fuegocineUrl = `https://www.fuegocine.com/${fuegocineMatch[1]}/${fuegocineMatch[2]}/${fuegocineMatch[3]}.html`;
       const fcDetail = await RealScraperService.scrapeFuegocineDetail(fuegocineUrl);
       if (fcDetail) {
-        const tmdbId = await TmdbService.getTmdbId(fcDetail.title, fcDetail.type);
-        fcDetail.tmdb_id = tmdbId;
-        fcDetail.id = String(tmdbId);
-        return fcDetail;
+        return await TmdbService.enrichMediaItem(fcDetail);
       }
     }
 
-    // 1. Intentar por categorías directas en TioPlus (película, serie, anime, dorama)
+    // 2. Intentar por categorías directas en TioPlus (película, serie, anime, dorama)
     const categories = ['pelicula', 'serie', 'anime', 'dorama'];
     for (const cat of categories) {
       const detail = await RealScraperService.scrapeDetail(`https://tioplus.app/${cat}/${q}`);
       if (detail && (detail.servers?.length || detail.seasons?.length)) {
-        const tmdbId = await TmdbService.getTmdbId(detail.title, detail.type);
-        detail.tmdb_id = tmdbId;
-        detail.id = String(tmdbId);
-        return detail;
+        return await TmdbService.enrichMediaItem(detail);
       }
     }
 
-    // 2. Buscar por texto o TMDB ID de forma inteligente con unificación profunda
+    // 3. Buscar por texto o TMDB ID de forma inteligente con unificación profunda
     const scraped = await this.search(q);
     if (scraped.length > 0) {
       return scraped[0];
     }
 
-    // 3. Fallback final a Supabase
+    // 4. Fallback final a Supabase
     try {
       const { data } = await supabase
         .from('media_items')
@@ -71,7 +89,7 @@ export class CatalogService {
         .or(`id.eq.${q},tmdb_id.eq.${isNaN(Number(q)) ? -1 : Number(q)}`)
         .single();
 
-      if (data) return this.mapDbItemToMediaItem(data);
+      if (data) return await TmdbService.enrichMediaItem(this.mapDbItemToMediaItem(data));
     } catch (err) {}
 
     return null;
@@ -110,7 +128,7 @@ export class CatalogService {
 
   /**
    * Unifica y agrupa elementos multimedia que corresponden al mismo título,
-   * fusionando SERVIDORES DE TODAS LAS FUENTES ACTIVAS y asignando ID TMDB numérico real.
+   * fusionando SERVIDORES DE TODAS LAS FUENTES ACTIVAS y enriqueciendo con metadatos oficiales TMDB.
    */
   private static async unifyMediaItems(items: MediaItem[]): Promise<MediaItem[]> {
     const grouped = new Map<string, { item: MediaItem; sourceUrls: string[] }>();
@@ -161,7 +179,7 @@ export class CatalogService {
 
     const unifiedList: MediaItem[] = [];
 
-    // 2. Para cada grupo unificado, resolver y fusionar SERVIDORES DE TODAS LAS FUENTES y asignar ID TMDB
+    // 2. Para cada grupo unificado, resolver y fusionar SERVIDORES DE TODAS LAS FUENTES y enriquecer con TMDB
     for (const [key, entry] of grouped.entries()) {
       const targetItem = entry.item;
       const allServers: ServerOption[] = [...(targetItem.servers || [])];
@@ -181,24 +199,20 @@ export class CatalogService {
         } catch {}
       }
 
-      // Asignar ID TMDB numérico real
-      const tmdbId = targetItem.tmdb_id || await TmdbService.getTmdbId(targetItem.title, targetItem.type);
-      targetItem.tmdb_id = tmdbId;
-      targetItem.id = String(tmdbId);
-
       targetItem.servers = allServers;
       if (allServers.length > 0) {
         targetItem.primary_stream = allServers.find(s => s.status === 'online') || allServers[0];
       }
 
-      unifiedList.push(targetItem);
+      // Enriquecer con metadatos oficiales completos de TMDB
+      const enrichedItem = await TmdbService.enrichMediaItem(targetItem);
+      unifiedList.push(enrichedItem);
     }
 
     return unifiedList;
   }
 
   private static mapDbItemToMediaItem(dbRow: any): MediaItem {
-    // Garantizar que la propiedad id sea SIEMPRE un slug canónico de texto y nunca un entero arbitrario
     const canonicalSlug = (dbRow.slug || dbRow.title || '')
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')

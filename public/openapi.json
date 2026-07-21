@@ -220,6 +220,20 @@
           "genres": { "type": "array", "items": { "type": "string" } },
           "poster": { "type": "string", "nullable": true },
           "backdrop": { "type": "string", "nullable": true },
+          "tagline": { "type": "string", "description": "Lema o eslogan oficial de TMDB" },
+          "trailer": { "type": "string", "nullable": true, "description": "URL oficial de tráiler en YouTube (prioriza audio Latino)" },
+          "cast": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "character": { "type": "string" },
+                "photo": { "type": "string", "nullable": true }
+              }
+            },
+            "description": "Lista de reparto principal enriquecida desde TMDB con fotos"
+          },
           "servers": { "type": "array", "items": { "$ref": "#/components/schemas/ServerOption" }, "description": "Presente únicamente cuando type = movie" },
           "total_seasons": { "type": "integer", "description": "Presente únicamente cuando type = tvseries" },
           "total_episodes": { "type": "integer", "description": "Presente únicamente cuando type = tvseries" },
