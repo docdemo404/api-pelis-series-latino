@@ -402,13 +402,32 @@ export class RealScraperService {
     if (tioplusUrl.includes('fuegocine.com')) {
       return this.scrapeFuegocineDetail(tioplusUrl);
     }
+
+    // Evitar hacer peticiones con IDs numéricos directos a tioplus.app (TioPlus usa slugs de texto, no IDs de TMDB)
+    const urlSlug = tioplusUrl.split('/').filter(Boolean).pop() || '';
+    if (!isNaN(Number(urlSlug))) {
+      return null;
+    }
+
     try {
       const res = await httpGet(tioplusUrl);
-      const $ = cheerio.load(res.data);
+      const html = typeof res.data === 'string' ? res.data : '';
+
+      // Validación estricta de páginas de error 404
+      if (res.status === 404 || /404\s*not\s*found/i.test(html) || /página\s*no\s*encontrada/i.test(html)) {
+        return null;
+      }
+
+      const $ = cheerio.load(html);
+
+      // Detectar si la respuesta es un widget de recomendados de página 404
+      if ($('.error-404, .not-found, .error404, body.error404').length > 0) {
+        return null;
+      }
 
       // === METADATOS ===
-      const h1 = $('h1.slugh1').first().text().trim() || $('h1').first().text().trim() || $('h2').first().text().trim() || $('title').text().trim();
-      if (!h1) return null;
+      const h1 = $('h1.slugh1').first().text().trim() || $('.single-title, .title_over h1, h1').first().text().trim();
+      if (!h1 || h1.toLowerCase().includes('404') || h1.toLowerCase().includes('no encontrada')) return null;
 
       const yearMatch = h1.match(/\((\d{4})\)/);
       const year = yearMatch ? yearMatch[1] : '';

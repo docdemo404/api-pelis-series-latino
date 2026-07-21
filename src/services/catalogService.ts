@@ -216,11 +216,14 @@ export class CatalogService {
 
     // 5. Garantía de Servidores: Si result existe pero sus servidores están vacíos, resolver servidores activamente de las fuentes
     if (result && (!result.servers || result.servers.length === 0)) {
+      const normTitle = (t: string) => t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "").trim();
+      const targetTitleKey = normTitle(result.title);
+
       const sourceUrl = (result as any)._tioplus_url;
       if (sourceUrl) {
         try {
           const detail = await RealScraperService.scrapeDetail(sourceUrl);
-          if (detail && detail.servers && detail.servers.length > 0) {
+          if (detail && detail.servers && detail.servers.length > 0 && normTitle(detail.title) === targetTitleKey) {
             result.servers = detail.servers;
             result.primary_stream = detail.servers.find(s => s.status === 'online') || detail.servers[0];
             if (detail.seasons && detail.seasons.length > 0) {
@@ -231,12 +234,12 @@ export class CatalogService {
       }
 
       if (!result.servers || result.servers.length === 0) {
-        const searchSlug = (result.id || result.title).toLowerCase().replace(/[^a-z0-9]+/g, '-');
+        const searchSlug = targetTitleKey.replace(/[^a-z0-9]+/g, '-');
         const categories = ['pelicula', 'serie', 'anime', 'dorama'];
         for (const cat of categories) {
           try {
             const detail = await RealScraperService.scrapeDetail(`https://tioplus.app/${cat}/${searchSlug}`);
-            if (detail && detail.servers && detail.servers.length > 0) {
+            if (detail && detail.servers && detail.servers.length > 0 && normTitle(detail.title) === targetTitleKey) {
               result.servers = detail.servers;
               result.primary_stream = detail.servers.find(s => s.status === 'online') || detail.servers[0];
               if (detail.seasons && detail.seasons.length > 0) {
@@ -250,8 +253,6 @@ export class CatalogService {
 
       if (!result.servers || result.servers.length === 0) {
         const searchResults = await this.search(result.title);
-        const normTitle = (t: string) => t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "").trim();
-        const targetTitleKey = normTitle(result.title);
         const match = searchResults.find(r => (r.tmdb_id === result.tmdb_id || normTitle(r.title) === targetTitleKey) && r.servers && r.servers.length > 0);
         if (match && match.servers && match.servers.length > 0) {
           result.servers = match.servers;
