@@ -260,53 +260,35 @@ export class CatalogService {
       } catch (err) {}
     }
 
-    // 5. Garantía de Servidores: Si result existe pero sus servidores están vacíos, resolver servidores activamente de las fuentes
-    if (result && (!result.servers || result.servers.length === 0)) {
+    // 5. Garantía y Fusión Multifuente de Servidores (TioPlus + FuegoCine + Supabase DB)
+    if (result) {
       const normTitle = (t: string) => t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "").trim();
       const targetTitleKey = normTitle(result.title);
 
-      const sourceUrl = (result as any)._tioplus_url;
-      if (sourceUrl) {
-        try {
-          const detail = await RealScraperService.scrapeDetail(sourceUrl);
-          if (detail && detail.servers && detail.servers.length > 0 && normTitle(detail.title) === targetTitleKey) {
-            result.servers = detail.servers;
-            result.primary_stream = detail.servers.find(s => s.status === 'online') || detail.servers[0];
-            if (detail.seasons && detail.seasons.length > 0) {
-              result.seasons = detail.seasons;
-            }
-          }
-        } catch {}
-      }
+      const allServers: ServerOption[] = [...(result.servers || [])];
+      const existingUrls = new Set(allServers.map(s => s.embed_url));
 
-      if (!result.servers || result.servers.length === 0) {
-        const searchSlug = targetTitleKey.replace(/[^a-z0-9]+/g, '-');
-        const categories = ['pelicula', 'serie', 'anime', 'dorama'];
-        for (const cat of categories) {
-          try {
-            const detail = await RealScraperService.scrapeDetail(`https://tioplus.app/${cat}/${searchSlug}`);
-            if (detail && detail.servers && detail.servers.length > 0 && normTitle(detail.title) === targetTitleKey) {
-              result.servers = detail.servers;
-              result.primary_stream = detail.servers.find(s => s.status === 'online') || detail.servers[0];
-              if (detail.seasons && detail.seasons.length > 0) {
-                result.seasons = detail.seasons;
+      // Buscar servidores adicionales en paralelo de TioPlus y FuegoCine
+      const searchResults = await this.search(result.title).catch(() => []);
+      for (const item of searchResults) {
+        if (item.tmdb_id === result.tmdb_id || normTitle(item.title) === targetTitleKey) {
+          if (item.servers && item.servers.length > 0) {
+            for (const s of item.servers) {
+              if (!existingUrls.has(s.embed_url)) {
+                allServers.push(s);
+                existingUrls.add(s.embed_url);
               }
-              break;
             }
-          } catch {}
+          }
+          if (item.seasons && item.seasons.length > 0 && (!result.seasons || result.seasons.length === 0)) {
+            result.seasons = item.seasons;
+          }
         }
       }
 
-      if (!result.servers || result.servers.length === 0) {
-        const searchResults = await this.search(result.title);
-        const match = searchResults.find(r => (r.tmdb_id === result.tmdb_id || normTitle(r.title) === targetTitleKey) && r.servers && r.servers.length > 0);
-        if (match && match.servers && match.servers.length > 0) {
-          result.servers = match.servers;
-          result.primary_stream = match.primary_stream || match.servers[0];
-          if (match.seasons && match.seasons.length > 0) {
-            result.seasons = match.seasons;
-          }
-        }
+      result.servers = allServers;
+      if (allServers.length > 0) {
+        result.primary_stream = allServers.find(s => s.status === 'online') || allServers[0];
       }
     }
 
@@ -319,6 +301,20 @@ export class CatalogService {
           try {
             result.seasons = await TmdbService.getTmdbSeasons(tmdbId, numSeasons, result.poster, result.servers || []);
           } catch {}
+        }
+      }
+    }
+
+    // 7. Herencia e inyección de servidores a la jerarquía de episodios en Series
+    if (result && result.seasons && result.seasons.length > 0) {
+      const activeServers = result.servers || [];
+      for (const season of result.seasons) {
+        if (season.episodes) {
+          for (const ep of season.episodes) {
+            if (!ep.servers || ep.servers.length === 0) {
+              ep.servers = activeServers;
+            }
+          }
         }
       }
     }

@@ -13,7 +13,11 @@ export class TmdbService {
    * Obtiene el TMDB ID real numérico utilizando la API oficial de TMDB con fallback
    */
   static async getTmdbId(title: string, type: ContentType = 'movie', year?: string): Promise<number> {
-    const cleanTitle = title.replace(/\s*\(\d{4}\)\s*$/, '').trim();
+    // Normalización de título eliminando prefijos de scraping (ej. "gru 3 mi villano favorito" -> "Mi villano favorito 3")
+    let cleanTitle = title.replace(/\s*\(\d{4}\)\s*$/, '').trim();
+    cleanTitle = cleanTitle.replace(/^gru\s*(\d+)\s*/i, 'Mi villano favorito $1 ');
+    cleanTitle = cleanTitle.replace(/^ver\s+/i, '').trim();
+
     const cacheKey = `${type}:${cleanTitle.toLowerCase()}:${year || ''}`;
 
     if (tmdbIdCache.has(cacheKey)) {
@@ -21,6 +25,8 @@ export class TmdbService {
     }
 
     const endpoint = type === 'tvseries' ? 'tv' : 'movie';
+    const numMatch = cleanTitle.match(/\b(\d+)\b/);
+    const targetNum = numMatch ? numMatch[1] : null;
 
     // 1. Consulta a la API oficial de TMDB v3
     try {
@@ -34,8 +40,18 @@ export class TmdbService {
         timeout: 4000
       });
 
-      if (searchRes.data?.results?.length > 0) {
-        const tmdbId = searchRes.data.results[0].id;
+      const results = searchRes.data?.results || [];
+      if (results.length > 0) {
+        let bestMatch = results[0];
+        if (targetNum) {
+          const matchedResult = results.find((r: any) => {
+            const resTitle = (r.title || r.name || '').toLowerCase();
+            return resTitle.includes(` ${targetNum}`) || resTitle.includes(`:${targetNum}`) || resTitle.endsWith(` ${targetNum}`);
+          });
+          if (matchedResult) bestMatch = matchedResult;
+        }
+
+        const tmdbId = bestMatch.id;
         tmdbIdCache.set(cacheKey, tmdbId);
         return tmdbId;
       }
