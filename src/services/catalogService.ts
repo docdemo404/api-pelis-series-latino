@@ -397,77 +397,92 @@ export class CatalogService {
 
     return [];
   }
-
   /**
    * Calcula el score de relevancia para cada resultado y ordena por puntaje descendente
-   * Ponderación (Relevance Scoring):
-   *   - Peso 100: Coincidencia exacta en title u original_title (ej: "Genius" === "Genius")
-   *   - Peso 80: El título comienza con el término buscado (ej: "geni" -> "Genius: Einstein")
-   *   - Peso 70: Coincidencia exacta de palabra completa en original_title
-   *   - Peso 50: Contiene la palabra completa en title u original_title (ej: "Mad Genius")
-   *   - Peso 10: Coincidencia por prefijo (startswith)
+   * Ponderación (Relevance Scoring) - PRIORIDAD AL TÍTULO VISIBLE QUE COMIENZA CON EL TÉRMINO:
+   *   - Peso 200: El título visible (title) COMIENZA con la frase completa buscada (ej: "el c" -> "El Chavo", "El Calabozo")
+   *   - Peso 150: Coincidencia EXACTA completa en title (título completo igual al query)
+   *   - Peso 120: El título visible COMIENZA con la primera palabra del query
+   *   - Peso 100: El título original (original_title) COMIENZA con la frase completa
+   *   - Peso 80: Coincidencia exacta de palabra completa en original_title
+   *   - Peso 50: Contiene la palabra completa en title u original_title
+   *   - Peso 10: Coincidencia por prefijo débil
    *   - Peso 1: Coincidencia en overview/sinopsis o aliases
    */
   private static scoreAndSortResults(items: MediaItem[], query: string): MediaItem[] {
     const queryLower = query.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
     const queryWords = queryLower.split(/\s+/).filter(w => w.length > 0);
-    
+
     const scored = items.map(item => {
       let score = 0;
-      
+
       const titleLower = (item.title || '').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
       const originalTitleLower = (item.original_title || '').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
       const overviewLower = (item.overview || '').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
       const aliasesLower = (item.aliases || []).map(a => a.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""));
-      
+
+      // --- PRIORIDAD MÁXIMA: El título visible COMIENZA con la frase completa buscada ---
+      // Ej: Busca "el c" -> Match máximo para "El Chavo", "El Calabozo", "El Chavo Animado"
+      if (titleLower.startsWith(queryLower)) {
+        score = 200;
+      }
+      // --- PRIORIDAD MUY ALTA: Título visible comienza con la primera palabra del query ---
+      else if (queryWords.length > 0 && titleLower.startsWith(queryWords[0])) {
+        score = 120;
+      }
+      // --- PRIORIDAD ALTA: Coincidencia EXACTA completa en title ---
+      else if (titleLower === queryLower) {
+        score = 150;
+      }
+      // --- PRIORIDAD MEDIA-ALTA: Título original comienza con la frase completa ---
+      else if (originalTitleLower.startsWith(queryLower)) {
+        score = 100;
+      }
+      // --- PRIORIDAD MEDIA: Coincidencia exacta en original_title ---
+      else if (originalTitleLower === queryLower) {
+        score = 80;
+      }
+
+      // Si ya tiene score alto por prefix match, no necesitamos sumar más
+      if (score >= 100) {
+        // Bonus pequeño por rating como desempate
+        const popularityBonus = (item.rating || 0) / 1000;
+        return { item, score: score + popularityBonus };
+      }
+
+      // Para items sin prefix match fuerte, aplicamos scoring por palabras
       for (const word of queryWords) {
         if (word.length < 2) continue;
-        
-        // Patrón para coincidencia de palabra completa (evita matches parciales dentro de palabras)
-        const wholeWordRegexTitle = new RegExp(`(^|\\s)${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\s|$)`, 'i');
-        const wholeWordRegexOriginal = new RegExp(`(^|\\s)${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\s|$)`, 'i');
-        
-        // Peso 100: Coincidencia EXACTA en title (título completo igual al query)
-        if (titleLower === word) {
-          score += 100;
-        }
-        // Peso 100: Coincidencia EXACTA en original_title
-        else if (originalTitleLower === word) {
-          score += 100;
-        }
-        // Peso 80: El título COMIENZA con el término buscado (prefix match fuerte)
-        // Ej: "geni" -> "Genius: Einstein", "Genio"
-        else if (titleLower.startsWith(word)) {
+
+        // Patrón para coincidencia de palabra completa
+        const wholeWordRegexTitle = new RegExp(`(^|\\s)${word.replace(/[.*+?^${}()|[\\]\\/g, '\\$&')}(\\s|$)`, 'i');
+        const wholeWordRegexOriginal = new RegExp(`(^|\\s)${word.replace(/[.*+?^${}()|[\\]\\/g, '\\$&')}(\\s|$)`, 'i');
+
+        // Peso 80: Coincidencia de palabra completa en original_title (si no tiene score aún)
+        if (score < 80 && wholeWordRegexOriginal.test(originalTitleLower)) {
           score += 80;
         }
-        else if (originalTitleLower.startsWith(word)) {
-          score += 80;
-        }
-        // Peso 70: Coincidencia de palabra completa en original_title
-        else if (wholeWordRegexOriginal.test(originalTitleLower)) {
-          score += 70;
-        }
-        // Peso 50: Contiene la palabra completa en title (ej: "Mad Genius" para query "Genius")
-        else if (wholeWordRegexTitle.test(titleLower)) {
+        // Peso 50: Contiene la palabra completa en title
+        else if (score < 50 && wholeWordRegexTitle.test(titleLower)) {
           score += 50;
         }
-        // Peso 10: Coincidencia por prefijo más débil (substring al inicio)
-        else if (titleLower.includes(word) && titleLower.indexOf(word) === 0) {
+        // Peso 10: Prefijo débil (substring al inicio)
+        else if (score < 10 && (titleLower.includes(word) && titleLower.indexOf(word) === 0)) {
           score += 10;
         }
-        else if (originalTitleLower.includes(word) && originalTitleLower.indexOf(word) === 0) {
+        else if (score < 10 && (originalTitleLower.includes(word) && originalTitleLower.indexOf(word) === 0)) {
           score += 10;
         }
-        // Peso 5: Substring simple en title (coincidencia parcial)
-        else if (titleLower.includes(word)) {
+        // Peso 5: Substring simple en title
+        else if (score < 5 && titleLower.includes(word)) {
           score += 5;
         }
         // Peso 5: Substring simple en original_title
-        else if (originalTitleLower.includes(word)) {
+        else if (score < 5 && originalTitleLower.includes(word)) {
           score += 5;
         }
         // Peso 2: Coincidencia en aliases
-        else if (aliasesLower.some(alias => alias.includes(word))) {
+        else if (score < 2 && aliasesLower.some(alias => alias.includes(word))) {
           score += 2;
         }
         // Peso 1: Coincidencia en overview/sinopsis (menor prioridad)
@@ -475,20 +490,19 @@ export class CatalogService {
           score += 1;
         }
       }
-      
+
       // Bonus por rating/popularidad como desempate secundario (máximo 0.1 puntos)
-      const popularityBonus = (item.rating || 0) / 100;
-      
+      const popularityBonus = (item.rating || 0) / 1000;
+
       return { item, score: score + popularityBonus };
     });
-    
+
     // Ordenar por score descendente
     scored.sort((a, b) => b.score - a.score);
-    
+
     // Filtrar solo items con score > 0 (que tengan alguna relevancia)
     return scored.filter(s => s.score > 0).map(s => s.item);
   }
-
   /**
    * Unifica y agrupa elementos multimedia que corresponden al mismo título o TMDB ID,
    * fusionando SERVIDORES DE TODAS LAS FUENTES ACTIVAS en paralelo y enriqueciendo con TMDB en sub-segundos.
