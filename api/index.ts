@@ -812,6 +812,7 @@ app.get(['/api/v1/search', '/api/v1/movies/search'], async (req: Request, res: R
       limit,
       total_results: results.length,
       count: finalItems.length,
+      has_more: finalItems.length >= limit,
       results: finalItems
     });
   } catch (err) {
