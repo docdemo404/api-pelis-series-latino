@@ -9,6 +9,17 @@ const getByIdCache = new Map<string, { timestamp: number; data: MediaItem }>();
 const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutos de caché en memoria
 
 export class CatalogService {
+  private static dedupeById(items: MediaItem[]): MediaItem[] {
+    const seen = new Set<string>();
+    return items.filter(item => {
+      if (!item.id || seen.has(item.id)) {
+        return false;
+      }
+      seen.add(item.id);
+      return true;
+    });
+  }
+
   /**
    * Limpia toda la caché en memoria de la API
    */
@@ -56,7 +67,20 @@ export class CatalogService {
       return cached.data;
     }
 
-    const liveItems = await RealScraperService.scrapeHomepage();
+    const [homepageItems, latestMovies, latestSeries, latestAnimes] = await Promise.all([
+      RealScraperService.scrapeHomepage(),
+      RealScraperService.scrapeLatest('peliculas', 60),
+      RealScraperService.scrapeLatest('series', 60),
+      RealScraperService.scrapeLatest('animes', 60)
+    ]);
+
+    const liveItems = this.dedupeById([
+      ...homepageItems,
+      ...latestMovies,
+      ...latestSeries,
+      ...latestAnimes
+    ]);
+
     if (liveItems.length > 0) {
       const enrichedList: MediaItem[] = [];
       for (const item of liveItems) {
