@@ -379,21 +379,34 @@ export class CatalogService {
    * Búsqueda en vivo con Caché en Memoria, Web Scraping y Unificación
    * Implementa ponderación por título, búsqueda por prefijos y ordenamiento por relevancia
    */
-  static async search(query: string): Promise<MediaItem[]> {
+  static async search(query: string, maxResults: number = 25): Promise<MediaItem[]> {
     const q = query.toLowerCase().trim();
     if (!q) return [];
 
+    const normalizedMaxResults = Math.max(1, maxResults);
+    const cacheKey = `search:${q}:${normalizedMaxResults}`;
+
     // Verificación de caché en memoria
-    const cached = searchCache.get(q);
+    const cached = searchCache.get(cacheKey);
     if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
       return cached.data;
     }
 
     // 1. Scraping en vivo de fuentes activas
-    const realScraped = await RealScraperService.scrapeRealMovies(q);
-    
+    const realScraped = await RealScraperService.scrapeRealMovies(q, normalizedMaxResults);
+
+    if (realScraped.length < normalizedMaxResults) {
+      const catalogMatches = (await this.getAll()).filter(item => {
+        const haystack = [item.title, item.original_title, ...(item.aliases || [])]
+          .join(' ')
+          .toLowerCase();
+        return haystack.includes(q);
+      });
+      realScraped.push(...catalogMatches);
+    }
+
     // 2. Unificar catálogo para eliminar títulos duplicados y fusionar servidores
-    let unified = await this.unifyMediaItems(realScraped);
+    let unified = await this.unifyMediaItems(realScraped, normalizedMaxResults);
     
     // 3. Fallback a Supabase si no hay resultados del scraping
     if (unified.length === 0) {
@@ -407,7 +420,7 @@ export class CatalogService {
 
         if (data && data.length > 0) {
           const dbItems = data.map(this.mapDbItemToMediaItem);
-          unified = await this.unifyMediaItems(dbItems);
+          unified = await this.unifyMediaItems(dbItems, normalizedMaxResults);
         }
       } catch (err) {}
     }
@@ -415,8 +428,9 @@ export class CatalogService {
     // 4. Aplicar scoring y ordenamiento por relevancia
     if (unified.length > 0) {
       unified = this.scoreAndSortResults(unified, q);
-      searchCache.set(q, { timestamp: Date.now(), data: unified });
-      return unified;
+      const limited = unified.slice(0, normalizedMaxResults);
+      searchCache.set(cacheKey, { timestamp: Date.now(), data: limited });
+      return limited;
     }
 
     return [];
@@ -531,7 +545,7 @@ export class CatalogService {
    * Unifica y agrupa elementos multimedia que corresponden al mismo título o TMDB ID,
    * fusionando SERVIDORES DE TODAS LAS FUENTES ACTIVAS en paralelo y enriqueciendo con TMDB en sub-segundos.
    */
-  private static async unifyMediaItems(items: MediaItem[]): Promise<MediaItem[]> {
+  private static async unifyMediaItems(items: MediaItem[], maxResults: number = 25): Promise<MediaItem[]> {
     const grouped = new Map<string, { item: MediaItem; sourceUrls: string[] }>();
 
     const getCanonicalKey = (t: string) => {
@@ -599,7 +613,7 @@ export class CatalogService {
     }
 
     // 3. Procesamiento PARALELO ultrarrápido de todas las entradas unificadas
-    const entries = Array.from(grouped.values()).slice(0, 10);
+    const entries = Array.from(grouped.values()).slice(0, maxResults);
 
     const unifiedList = await Promise.all(
       entries.map(async (entry) => {

@@ -669,7 +669,7 @@ export class RealScraperService {
    * Busca en TioPlus usando su API interna /api/search/QUERY
    * Devuelve resultados REALES con soporte de filtrado inteligente multi-palabra (evita colisiones de lematización y prefijos)
    */
-  static async scrapeRealMovies(query: string): Promise<MediaItem[]> {
+  static async scrapeRealMovies(query: string, limit = 25): Promise<MediaItem[]> {
     const q = query.trim();
     if (!q) return [];
 
@@ -681,7 +681,7 @@ export class RealScraperService {
         const items: MediaItem[] = [];
 
         $('article.item, .search-result, a[href*="/pelicula/"], a[href*="/serie/"], a[href*="/anime/"]').each((_, el) => {
-          if (items.length >= 10) return false;
+          if (items.length >= limit) return false;
           const $el = $(el);
           let href = $el.attr('href') || $el.find('a').first().attr('href') || '';
           if (!href || (!href.includes('/pelicula/') && !href.includes('/serie/') && !href.includes('/anime/'))) return;
