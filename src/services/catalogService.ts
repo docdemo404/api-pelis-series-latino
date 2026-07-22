@@ -286,6 +286,22 @@ export class CatalogService {
         }
       }
 
+      // Si es una serie de TV y aún no tiene servidores cargados, resolver activamente los reproductores de S1:E1
+      if ((result.type === 'tvseries' || (result.total_seasons && result.total_seasons > 0)) && allServers.length === 0) {
+        try {
+          const titleSlug = (result.title || '').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+          const ep1Detail = await RealScraperService.scrapeEpisodeDetail(titleSlug, 1, 1);
+          if (ep1Detail && ep1Detail.servers && ep1Detail.servers.length > 0) {
+            for (const s of ep1Detail.servers) {
+              if (!existingUrls.has(s.embed_url)) {
+                allServers.push(s);
+                existingUrls.add(s.embed_url);
+              }
+            }
+          }
+        } catch {}
+      }
+
       result.servers = allServers;
       if (allServers.length > 0) {
         result.primary_stream = allServers.find(s => s.status === 'online') || allServers[0];
@@ -312,7 +328,7 @@ export class CatalogService {
         if (season.episodes) {
           for (const ep of season.episodes) {
             if (!ep.servers || ep.servers.length === 0) {
-              ep.servers = activeServers;
+              ep.servers = [...activeServers];
             }
           }
         }
@@ -374,7 +390,7 @@ export class CatalogService {
   }
 
   /**
-   * Unifica y agrupa elementos multimedia que corresponden al mismo título,
+   * Unifica y agrupa elementos multimedia que corresponden al mismo título o TMDB ID,
    * fusionando SERVIDORES DE TODAS LAS FUENTES ACTIVAS en paralelo y enriqueciendo con TMDB en sub-segundos.
    */
   private static async unifyMediaItems(items: MediaItem[]): Promise<MediaItem[]> {
@@ -402,9 +418,21 @@ export class CatalogService {
         .trim();
     };
 
-    // 1. Agrupar ítems por clave canónica y acumular sus URLs de fuentes
-    for (const item of items) {
-      const key = getCanonicalKey(item.title);
+    // 1. Resolver TMDB ID en paralelo para cada ítem scraped
+    const itemsWithTmdb = await Promise.all(
+      items.map(async (item) => {
+        const tmdbId = item.tmdb_id && item.tmdb_id > 0
+          ? item.tmdb_id
+          : await TmdbService.getTmdbId(item.title, item.type, item.release_date ? item.release_date.substring(0, 4) : undefined);
+        return { ...item, tmdb_id: tmdbId };
+      })
+    );
+
+    // 2. Agrupar por tmdb_id (si es > 0) o por clave canónica
+    for (const item of itemsWithTmdb) {
+      const key = (item.tmdb_id && item.tmdb_id > 0)
+        ? `${item.type}:${item.tmdb_id}`
+        : getCanonicalKey(item.title);
       const url = (item as any)._tioplus_url;
 
       if (!grouped.has(key)) {
@@ -418,13 +446,21 @@ export class CatalogService {
         entry.item.poster = entry.item.poster || item.poster;
         entry.item.backdrop = entry.item.backdrop || item.backdrop;
         entry.item.subcategories = Array.from(new Set([...(entry.item.subcategories || []), ...(item.subcategories || [])]));
+        if (item.servers && item.servers.length > 0) {
+          entry.item.servers = entry.item.servers || [];
+          for (const s of item.servers) {
+            if (!entry.item.servers.some(existing => existing.embed_url === s.embed_url)) {
+              entry.item.servers.push(s);
+            }
+          }
+        }
         if (url && !entry.sourceUrls.includes(url)) {
           entry.sourceUrls.push(url);
         }
       }
     }
 
-    // 2. Procesamiento PARALELO ultrarrápido de todas las entradas unificadas
+    // 3. Procesamiento PARALELO ultrarrápido de todas las entradas unificadas
     const entries = Array.from(grouped.values()).slice(0, 10);
 
     const unifiedList = await Promise.all(
@@ -433,8 +469,8 @@ export class CatalogService {
         const allServers: ServerOption[] = [...(targetItem.servers || [])];
         const existingUrls = new Set(allServers.map(s => s.embed_url));
 
-        // Resolver fuentes en paralelo con timeout de 1.2s
-        if (allServers.length === 0 && entry.sourceUrls.length > 0) {
+        // Resolver fuentes adicionales en paralelo con timeout de 1.2s
+        if (entry.sourceUrls.length > 0) {
           const fetchPromises = entry.sourceUrls.slice(0, 3).map(sourceUrl => {
             const timeout = new Promise<any>((resolve) => setTimeout(() => resolve(null), 1200));
             return Promise.race([RealScraperService.scrapeDetail(sourceUrl), timeout]);
@@ -459,7 +495,23 @@ export class CatalogService {
         }
 
         // Enriquecer con metadatos oficiales completos de TMDB
-        return await TmdbService.enrichMediaItem(targetItem);
+        const enriched = await TmdbService.enrichMediaItem(targetItem);
+
+        // Herencia e inyección de servidores a episodios si es una serie
+        if (enriched.seasons && enriched.seasons.length > 0) {
+          const activeServers = enriched.servers || [];
+          for (const season of enriched.seasons) {
+            if (season.episodes) {
+              for (const ep of season.episodes) {
+                if (!ep.servers || ep.servers.length === 0) {
+                  ep.servers = activeServers;
+                }
+              }
+            }
+          }
+        }
+
+        return enriched;
       })
     );
 

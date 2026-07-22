@@ -203,6 +203,13 @@ async function resolvePlayerUrl(dataServerToken: string, referer: string): Promi
     const res = await httpGet(playerPageUrl);
     const html = typeof res.data === 'string' ? res.data : '';
 
+    // Detectar redirección window.location.href en JS del reproductor
+    const jsRedirectMatch = html.match(/window\.location\.href\s*=\s*['"]([^'"]+)['"]/i) ||
+                            html.match(/location\.href\s*=\s*['"]([^'"]+)['"]/i);
+    if (jsRedirectMatch) {
+      return jsRedirectMatch[1];
+    }
+
     // Buscar iframe src en la respuesta
     const $ = cheerio.load(html);
     const iframeSrc = $('iframe').attr('src') || $('iframe').attr('data-src');
@@ -405,7 +412,7 @@ export class RealScraperService {
 
     // Evitar hacer peticiones con IDs numéricos directos a tioplus.app (TioPlus usa slugs de texto, no IDs de TMDB)
     const urlSlug = tioplusUrl.split('/').filter(Boolean).pop() || '';
-    if (!isNaN(Number(urlSlug))) {
+    if (!isNaN(Number(urlSlug)) && !tioplusUrl.includes('/episode/') && !tioplusUrl.includes('/season/')) {
       return null;
     }
 
@@ -426,7 +433,9 @@ export class RealScraperService {
       }
 
       // === METADATOS ===
-      const h1 = $('h1.slugh1').first().text().trim() || $('.single-title, .title_over h1, h1').first().text().trim();
+      const h1 = $('h1.slugh1').first().text().trim() 
+        || $('.single-title, .title_over h1, h1, h2').first().text().trim()
+        || $('title').text().replace(/^Ver\s+/i, '').replace(/\s*-.*$/, '').trim();
       if (!h1 || h1.toLowerCase().includes('404') || h1.toLowerCase().includes('no encontrada')) return null;
 
       const yearMatch = h1.match(/\((\d{4})\)/);
@@ -579,11 +588,23 @@ export class RealScraperService {
           const epUrl = `${BASE_URL}/${cat}/${slug}/season/${firstSeasonNum}/episode/${firstEpNum}`;
           const epDetail = await this.scrapeDetail(epUrl);
           if (epDetail && epDetail.servers && epDetail.servers.length > 0) {
-            seasons[0].episodes[0].servers = epDetail.servers;
             primaryStream = epDetail.servers[0];
             servers.push(...epDetail.servers);
           }
         } catch {}
+      }
+
+      // Inyectar los servidores activos a todos los episodios de todas las temporadas
+      if (!isMovie && servers.length > 0 && seasons.length > 0) {
+        for (const s of seasons) {
+          if (s.episodes) {
+            for (const ep of s.episodes) {
+              if (!ep.servers || ep.servers.length === 0) {
+                ep.servers = [...servers];
+              }
+            }
+          }
+        }
       }
 
       return {
