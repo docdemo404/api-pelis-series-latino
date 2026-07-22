@@ -44,6 +44,19 @@ function sendErrorResponse(res: Response, statusCode: number, code: string, mess
   });
 }
 
+const parsePositiveInteger = (value: unknown, fallback: number): number => {
+  const raw = Array.isArray(value) ? value[0] : value;
+  const parsed = parseInt(String(raw ?? ''), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+const getPaginationParams = (req: Request, defaultLimit: number = 20, maxLimit: number = 100) => {
+  const page = parsePositiveInteger(req.query.page, 1);
+  const requestedLimit = req.query.limit ?? req.query.size;
+  const limit = Math.min(parsePositiveInteger(requestedLimit, defaultLimit), maxLimit);
+  return { page, limit };
+};
+
 // Servir portal de documentación
 app.use('/docs', express.static(path.join(__dirname, '../public')));
 
@@ -711,8 +724,7 @@ app.get(['/api/v1/home', '/api/v1/feeds/home'], async (req: Request, res: Respon
 // Endpoint Estándar para Películas (/movies)
 app.get('/api/v1/movies', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const page = parseInt(req.query.page as string) || 1;
-    const limit = parseInt(req.query.limit as string) || 20;
+    const { page, limit } = getPaginationParams(req);
     const genre = req.query.genre as string;
     const result = await FeedService.getDiscover(page, limit, 'movie', genre);
     res.json({ status: 'success', data: result });
@@ -724,8 +736,7 @@ app.get('/api/v1/movies', async (req: Request, res: Response, next: NextFunction
 // Endpoint Estándar para Series (/series)
 app.get('/api/v1/series', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const page = parseInt(req.query.page as string) || 1;
-    const limit = parseInt(req.query.limit as string) || 20;
+    const { page, limit } = getPaginationParams(req);
     const genre = req.query.genre as string;
     const result = await FeedService.getDiscover(page, limit, 'tvseries', genre);
     res.json({ status: 'success', data: result });
@@ -737,8 +748,7 @@ app.get('/api/v1/series', async (req: Request, res: Response, next: NextFunction
 // Endpoint Estándar Catálogo General (/media)
 app.get('/api/v1/media', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const page = parseInt(req.query.page as string) || 1;
-    const limit = parseInt(req.query.limit as string) || 20;
+    const { page, limit } = getPaginationParams(req);
     const type = req.query.type as string;
     const genre = req.query.genre as string;
     const result = await FeedService.getDiscover(page, limit, type, genre);
@@ -751,8 +761,7 @@ app.get('/api/v1/media', async (req: Request, res: Response, next: NextFunction)
 // Descubrimiento Infinito
 app.get('/api/v1/discover', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const page = parseInt(req.query.page as string) || 1;
-    const limit = parseInt(req.query.limit as string) || 20;
+    const { page, limit } = getPaginationParams(req);
     const type = req.query.type as string;
     const genre = req.query.genre as string;
 
@@ -788,9 +797,7 @@ app.get(['/api/v1/search', '/api/v1/movies/search'], async (req: Request, res: R
       return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'El parámetro ?q= es requerido');
     }
 
-    const page = parseInt(req.query.page as string) || 1;
-    // Límite por defecto aumentado a 25 resultados para mejor UX, con máximo de 50
-    const limit = Math.min(parseInt(req.query.limit as string) || 25, 50);
+    const { page, limit } = getPaginationParams(req, 25, 100);
     const compact = req.query.compact === 'true';
 
     const results = await CatalogService.search(q);
