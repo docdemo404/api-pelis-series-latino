@@ -60,7 +60,7 @@
     "/api/v1/search": {
       "get": {
         "summary": "Búsqueda general en tiempo real",
-        "description": "Busca películas, series, animes y doramas por título u alias. Si es una película (`type: movie`), incluye sus servidores embed. Si es una serie (`type: tvseries`), incluye `seasons` con la estructura de temporadas y episodios.",
+        "description": "Busca películas, series, animes y doramas por título u alias. Si es una película (`type: movie`), incluye sus servidores embed. Si es una serie (`type: tvseries`), incluye `seasons` con la estructura de temporadas y episodios. Los resultados de FuegoCine agrupan automáticamente los episodios individuales (patrón SxE) bajo un único MediaItem de serie con sus temporadas y capítulos consolidados.",
         "parameters": [
           {
             "name": "q",

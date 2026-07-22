@@ -863,50 +863,144 @@ export class RealScraperService {
   }
 
   /**
-   * Busca contenido en FuegoCine usando su Feed JSON de Blogger
+   * Busca contenido en FuegoCine usando su Feed JSON de Blogger.
+   * Agrupa episodios (categoría "Episode" + id-XXXX + patrón SxE) bajo una sola serie,
+   * evitando que cada capítulo aparezca como un MediaItem individual.
    */
   static async scrapeFuegocine(query: string): Promise<MediaItem[]> {
     try {
-      const feedUrl = `https://www.fuegocine.com/feeds/posts/summary?q=${encodeURIComponent(query)}&alt=json&max-results=10`;
-      const res = await axios.get(feedUrl, { headers: { 'User-Agent': UA }, timeout: 4000 });
+      const feedUrl = `https://www.fuegocine.com/feeds/posts/summary?q=${encodeURIComponent(query)}&alt=json&max-results=30`;
+      const res = await axios.get(feedUrl, { headers: { 'User-Agent': UA }, timeout: 6000 });
       const entries = res.data?.feed?.entry || [];
-      const items: MediaItem[] = [];
+
+      const movieItems: MediaItem[] = [];
+      // Map: bloggerSeriesId -> { seriesName, episodes[] }
+      const seriesMap = new Map<string, {
+        seriesName: string;
+        poster: string | null;
+        episodes: Array<{ season: number; episode: number; title: string; link: string }>;
+      }>();
 
       for (const e of entries) {
         const titleRaw = e.title?.$t || '';
         const link = e.link?.find((l: any) => l.rel === 'alternate')?.href || '';
         if (!titleRaw || !link) continue;
 
-        const slug = link.replace(/^https?:\/\/[^\/]+/, '').replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase();
-        const poster = e.media$thumbnail?.url ? e.media$thumbnail.url.replace(/\/s\d+(-c)?\//, '/s500/') : null;
-        const yearMatch = titleRaw.match(/\((\d{4})\)/);
-        const year = yearMatch ? yearMatch[1] : '';
-        const cleanTitle = titleRaw.replace(/\s*\(\d{4}\)\s*$/, '').trim();
-        const isTv = titleRaw.toLowerCase().includes('temporada') || titleRaw.toLowerCase().includes('serie') || /\d+x\d+/.test(titleRaw);
+        const categories = (e.category || []).map((c: any) => c.term as string);
+        const isEpisode = categories.includes('Episode');
+        const bloggerIdCat = categories.find((c: string) => /^id-\d+$/.test(c));
+        const sxeMatch = titleRaw.match(/^(.+?)\s+(\d+)x(\d+)\s*$/i);
 
-        items.push({
-          id: slug,
+        if (isEpisode && bloggerIdCat && sxeMatch) {
+          // --- Es un episodio de serie ---
+          const seriesName = sxeMatch[1].trim();
+          const seasonNum = parseInt(sxeMatch[2], 10);
+          const episodeNum = parseInt(sxeMatch[3], 10);
+
+          let group = seriesMap.get(bloggerIdCat);
+          if (!group) {
+            const poster = e.media$thumbnail?.url ? e.media$thumbnail.url.replace(/\/s\d+(-c)?\//, '/s500/') : null;
+            group = { seriesName, poster, episodes: [] };
+            seriesMap.set(bloggerIdCat, group);
+          }
+          group.episodes.push({ season: seasonNum, episode: episodeNum, title: titleRaw, link });
+        } else {
+          // --- Es una película u otro contenido no-episódico ---
+          const slug = link.replace(/^https?:\/\/[^\/]+/, '').replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase();
+          const poster = e.media$thumbnail?.url ? e.media$thumbnail.url.replace(/\/s\d+(-c)?\//, '/s500/') : null;
+          const yearMatch = titleRaw.match(/\((\d{4})\)/);
+          const year = yearMatch ? yearMatch[1] : '';
+          const cleanTitle = titleRaw.replace(/\s*\(\d{4}\)\s*$/, '').trim();
+          const isTv = titleRaw.toLowerCase().includes('temporada') || titleRaw.toLowerCase().includes('serie');
+
+          movieItems.push({
+            id: slug,
+            tmdb_id: 0,
+            imdb_id: null,
+            type: isTv ? 'tvseries' as const : 'movie' as const,
+            title: cleanTitle,
+            original_title: cleanTitle,
+            aliases: [cleanTitle],
+            overview: `Ver ${cleanTitle} online gratis en FuegoCine con audio Latino.`,
+            rating: 0,
+            release_date: year,
+            genres: [],
+            subcategories: ['Latino HD', 'FuegoCine'],
+            poster,
+            backdrop: poster,
+            logo: null,
+            trailer: null,
+            cast: [],
+            dubbing_cast: [],
+            _tioplus_url: link
+          } as any);
+        }
+      }
+
+      // Convertir series agrupadas a MediaItems con estructura de temporadas/episodios
+      for (const [bloggerIdCat, group] of seriesMap) {
+        const seriesSlug = `fc-${group.seriesName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}`;
+
+        // Organizar episodios por temporada
+        const seasonMap = new Map<number, Array<{ episode: number; title: string; link: string }>>();
+        for (const ep of group.episodes) {
+          let seasonEps = seasonMap.get(ep.season);
+          if (!seasonEps) {
+            seasonEps = [];
+            seasonMap.set(ep.season, seasonEps);
+          }
+          seasonEps.push({ episode: ep.episode, title: ep.title, link: ep.link });
+        }
+
+        const seasons: import('../types').Season[] = [];
+        for (const [sNum, eps] of [...seasonMap.entries()].sort((a, b) => a[0] - b[0])) {
+          eps.sort((a, b) => a.episode - b.episode);
+          seasons.push({
+            season_number: sNum,
+            name: `Temporada ${sNum}`,
+            episodes_count: eps.length,
+            poster: group.poster,
+            episodes: eps.map(ep => ({
+              episode_number: ep.episode,
+              name: ep.title,
+              overview: `Ver ${ep.title} en FuegoCine con audio Latino.`,
+              still_path: null,
+              air_date: null,
+              servers: [],
+              _fuegocine_url: ep.link,
+            } as any)),
+          });
+        }
+
+        const totalEps = group.episodes.length;
+
+        movieItems.push({
+          id: seriesSlug,
           tmdb_id: 0,
           imdb_id: null,
-          type: isTv ? 'tvseries' as const : 'movie' as const,
-          title: cleanTitle,
-          original_title: cleanTitle,
-          aliases: [cleanTitle],
-          overview: `Ver ${cleanTitle} online gratis en FuegoCine con audio Latino.`,
+          type: 'tvseries' as const,
+          title: group.seriesName,
+          original_title: group.seriesName,
+          aliases: [group.seriesName],
+          overview: `Ver ${group.seriesName} online gratis en FuegoCine con audio Latino.`,
           rating: 0,
-          release_date: year,
+          release_date: '',
           genres: [],
           subcategories: ['Latino HD', 'FuegoCine'],
-          poster,
-          backdrop: poster,
+          poster: group.poster,
+          backdrop: group.poster,
           logo: null,
           trailer: null,
           cast: [],
           dubbing_cast: [],
-          _tioplus_url: link
+          total_seasons: seasons.length,
+          total_episodes: totalEps,
+          seasons,
+          _fuegocine_blogger_id: bloggerIdCat,
         } as any);
       }
-      return items;
+
+      return movieItems;
     } catch {
       return [];
     }
