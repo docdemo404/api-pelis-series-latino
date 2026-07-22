@@ -524,6 +524,7 @@ export class RealScraperService {
             embed_url: embedUrl,
             status: status,
             last_checked: new Date().toISOString(),
+            source_id: 'tioplus',
           });
         }
       });
@@ -828,7 +829,8 @@ export class RealScraperService {
               language: lang.includes('sub') ? 'subtitulado' : lang.includes('cas') ? 'castellano' : 'latino',
               embed_url: embedUrl,
               status,
-              last_checked: new Date().toISOString()
+              last_checked: new Date().toISOString(),
+              source_id: 'fuegocine'
             });
           }
         }

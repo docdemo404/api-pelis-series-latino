@@ -11,6 +11,8 @@ export interface ServerOption {
   headers?: Record<string, string>;
   status: LinkStatus;
   last_checked: string;
+  source_id?: string;
+  source_priority?: number;
 }
 
 export interface CastMember {

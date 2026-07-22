@@ -2,6 +2,7 @@ import { MediaItem, ServerOption, ContentType } from '../types';
 import { supabase } from './supabaseService';
 import { RealScraperService } from './realScraperService';
 import { TmdbService } from './tmdbService';
+import { sortServersBySourcePriority, getPrimaryStream } from './streamSorter';
 
 const searchCache = new Map<string, { timestamp: number; data: MediaItem[] }>();
 const getByIdCache = new Map<string, { timestamp: number; data: MediaItem }>();
@@ -302,9 +303,9 @@ export class CatalogService {
         } catch {}
       }
 
-      result.servers = allServers;
-      if (allServers.length > 0) {
-        result.primary_stream = allServers.find(s => s.status === 'online') || allServers[0];
+      result.servers = sortServersBySourcePriority(allServers);
+      if (result.servers.length > 0) {
+        result.primary_stream = getPrimaryStream(result.servers);
       }
     }
 
@@ -323,12 +324,13 @@ export class CatalogService {
 
     // 7. Herencia e inyección de servidores a la jerarquía de episodios en Series
     if (result && result.seasons && result.seasons.length > 0) {
-      const activeServers = result.servers || [];
+      const activeServers = sortServersBySourcePriority(result.servers || []);
       for (const season of result.seasons) {
         if (season.episodes) {
           for (const ep of season.episodes) {
-            if (!ep.servers || ep.servers.length === 0) {
-              ep.servers = [...activeServers];
+            ep.servers = sortServersBySourcePriority(ep.servers && ep.servers.length > 0 ? ep.servers : activeServers);
+            if (ep.servers.length > 0) {
+              ep.primary_stream = getPrimaryStream(ep.servers);
             }
           }
         }
@@ -489,9 +491,9 @@ export class CatalogService {
           }
         }
 
-        targetItem.servers = allServers;
-        if (allServers.length > 0) {
-          targetItem.primary_stream = allServers.find(s => s.status === 'online') || allServers[0];
+        targetItem.servers = sortServersBySourcePriority(allServers);
+        if (targetItem.servers.length > 0) {
+          targetItem.primary_stream = getPrimaryStream(targetItem.servers);
         }
 
         // Enriquecer con metadatos oficiales completos de TMDB
@@ -499,12 +501,13 @@ export class CatalogService {
 
         // Herencia e inyección de servidores a episodios si es una serie
         if (enriched.seasons && enriched.seasons.length > 0) {
-          const activeServers = enriched.servers || [];
+          const activeServers = sortServersBySourcePriority(enriched.servers || []);
           for (const season of enriched.seasons) {
             if (season.episodes) {
               for (const ep of season.episodes) {
-                if (!ep.servers || ep.servers.length === 0) {
-                  ep.servers = activeServers;
+                ep.servers = sortServersBySourcePriority(ep.servers && ep.servers.length > 0 ? ep.servers : activeServers);
+                if (ep.servers.length > 0) {
+                  ep.primary_stream = getPrimaryStream(ep.servers);
                 }
               }
             }
@@ -548,8 +551,8 @@ export class CatalogService {
       dubbing_cast: dbRow.dubbing_cast_data || [],
       total_seasons: dbRow.total_seasons || 0,
       total_episodes: dbRow.total_episodes || 0,
-      primary_stream: dbRow.servers?.[0] || undefined,
-      servers: dbRow.servers || [],
+      primary_stream: getPrimaryStream((dbRow.servers || []).map((s: any) => ({ ...s, source_id: s.source_id || 'supabase' }))),
+      servers: sortServersBySourcePriority((dbRow.servers || []).map((s: any) => ({ ...s, source_id: s.source_id || 'supabase' }))),
     };
   }
 }
