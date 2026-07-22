@@ -353,9 +353,11 @@ export class CatalogService {
 
   /**
    * Búsqueda en vivo con Caché en Memoria, Web Scraping y Unificación
+   * Implementa ponderación por título, búsqueda por prefijos y ordenamiento por relevancia
    */
   static async search(query: string): Promise<MediaItem[]> {
     const q = query.toLowerCase().trim();
+    if (!q) return [];
 
     // Verificación de caché en memoria
     const cached = searchCache.get(q);
@@ -367,28 +369,97 @@ export class CatalogService {
     const realScraped = await RealScraperService.scrapeRealMovies(q);
     
     // 2. Unificar catálogo para eliminar títulos duplicados y fusionar servidores
-    const unified = await this.unifyMediaItems(realScraped);
+    let unified = await this.unifyMediaItems(realScraped);
+    
+    // 3. Fallback a Supabase si no hay resultados del scraping
+    if (unified.length === 0) {
+      try {
+        // Búsqueda con prefijos en title y original_title (ILIKE 'query%')
+        // También incluye búsqueda por substring para coincidencias parciales
+        const { data } = await supabase
+          .from('media_items')
+          .select('*')
+          .or(`title.ilike.%${q}%,original_title.ilike.%${q}%,title.ilike.${q}%`);
+
+        if (data && data.length > 0) {
+          const dbItems = data.map(this.mapDbItemToMediaItem);
+          unified = await this.unifyMediaItems(dbItems);
+        }
+      } catch (err) {}
+    }
+
+    // 4. Aplicar scoring y ordenamiento por relevancia
     if (unified.length > 0) {
+      unified = this.scoreAndSortResults(unified, q);
       searchCache.set(q, { timestamp: Date.now(), data: unified });
       return unified;
     }
 
-    // 3. Fallback a Supabase
-    try {
-      const { data } = await supabase
-        .from('media_items')
-        .select('*')
-        .or(`title.ilike.%${q}%,original_title.ilike.%${q}%`);
-
-      if (data && data.length > 0) {
-        const dbItems = data.map(this.mapDbItemToMediaItem);
-        const res = await this.unifyMediaItems(dbItems);
-        searchCache.set(q, { timestamp: Date.now(), data: res });
-        return res;
-      }
-    } catch (err) {}
-
     return [];
+  }
+
+  /**
+   * Calcula el score de relevancia para cada resultado y ordena por puntaje descendente
+   * Ponderación:
+   *   - Peso 10: Coincidencia exacta o inicial en title o original_title
+   *   - Peso 5: Coincidencia parcial (substring) en title o original_title
+   *   - Peso 2: Coincidencia por prefijo en title o original_title
+   *   - Peso 1: Coincidencia en overview/sinopsis
+   */
+  private static scoreAndSortResults(items: MediaItem[], query: string): MediaItem[] {
+    const queryLower = query.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    const queryWords = queryLower.split(/\s+/).filter(w => w.length > 0);
+    
+    const scored = items.map(item => {
+      let score = 0;
+      
+      const titleLower = (item.title || '').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      const originalTitleLower = (item.original_title || '').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      const overviewLower = (item.overview || '').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      
+      for (const word of queryWords) {
+        if (word.length < 2) continue;
+        
+        // Peso 10: Coincidencia exacta en title
+        if (titleLower === word || titleLower.startsWith(word + ' ') || titleLower.endsWith(' ' + word) || titleLower.includes(' ' + word + ' ')) {
+          score += 10;
+        }
+        // Peso 10: Coincidencia exacta o inicial en original_title
+        else if (originalTitleLower === word || originalTitleLower.startsWith(word + ' ') || originalTitleLower.endsWith(' ' + word) || originalTitleLower.includes(' ' + word + ' ')) {
+          score += 10;
+        }
+        // Peso 8: Coincidencia por prefijo al inicio del título (ej: "geni" -> "genius")
+        else if (titleLower.startsWith(word)) {
+          score += 8;
+        }
+        else if (originalTitleLower.startsWith(word)) {
+          score += 8;
+        }
+        // Peso 5: Coincidencia parcial (substring) en title
+        else if (titleLower.includes(word)) {
+          score += 5;
+        }
+        // Peso 5: Coincidencia parcial (substring) en original_title
+        else if (originalTitleLower.includes(word)) {
+          score += 5;
+        }
+        // Peso 1: Coincidencia en overview
+        else if (overviewLower.includes(word)) {
+          score += 1;
+        }
+      }
+      
+      // Bonus por rating/popularidad como desempate secundario
+      const popularityBonus = (item.rating || 0) / 100;
+      
+      return { item, score: score + popularityBonus };
+    });
+    
+    // Ordenar por score descendente
+    scored.sort((a, b) => b.score - a.score);
+    
+    // Filtrar solo items con score > 0 (que tengan alguna relevancia)
+    return scored.filter(s => s.score > 0).map(s => s.item);
   }
 
   /**
