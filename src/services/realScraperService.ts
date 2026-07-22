@@ -669,7 +669,7 @@ export class RealScraperService {
    * Busca en TioPlus usando su API interna /api/search/QUERY
    * Devuelve resultados REALES con soporte de filtrado inteligente multi-palabra (evita colisiones de lematización y prefijos)
    */
-  static async scrapeRealMovies(query: string): Promise<MediaItem[]> {
+  static async scrapeRealMovies(query: string, limit = 25): Promise<MediaItem[]> {
     const q = query.trim();
     if (!q) return [];
 
@@ -681,7 +681,7 @@ export class RealScraperService {
         const items: MediaItem[] = [];
 
         $('article.item, .search-result, a[href*="/pelicula/"], a[href*="/serie/"], a[href*="/anime/"]').each((_, el) => {
-          if (items.length >= 10) return false;
+          if (items.length >= limit) return false;
           const $el = $(el);
           let href = $el.attr('href') || $el.find('a').first().attr('href') || '';
           if (!href || (!href.includes('/pelicula/') && !href.includes('/serie/') && !href.includes('/anime/'))) return;
@@ -1010,62 +1010,80 @@ export class RealScraperService {
   }
 
   /**
-   * Scrapea el listado de películas, series o animes
+   * Scrapea el listado de películas, series o animes recorriendo páginas reales del índice.
    */
   static async scrapeLatest(type: 'peliculas' | 'series' | 'animes' = 'peliculas', limit = 20): Promise<MediaItem[]> {
-    try {
-      const url = `${BASE_URL}/${type}`;
-      const res = await httpGet(url);
-      const $ = cheerio.load(res.data);
-      const items: MediaItem[] = [];
+    const items: MediaItem[] = [];
+    const seen = new Set<string>();
+    const maxPages = Math.max(1, Math.ceil(limit / 10) + 2);
 
-      $('article.item').each((i, el) => {
-        if (items.length >= limit) return false;
+    for (let page = 1; items.length < limit && page <= maxPages; page++) {
+      const url = page === 1 ? `${BASE_URL}/${type}` : `${BASE_URL}/${type}/page/${page}`;
 
-        const $el = $(el);
-        const linkEl = $el.find('a.itemA').first();
-        const href = linkEl.attr('href') || '';
-        const imgEl = $el.find('img').first();
-        const poster = imgEl.attr('data-src') || imgEl.attr('src') || null;
-        const titleText = $el.find('.title_over span').first().text().trim();
+      try {
+        const res = await httpGet(url);
+        const $ = cheerio.load(res.data);
+        const pageItems: MediaItem[] = [];
 
-        if (!href || !titleText) return;
+        $('article.item').each((i, el) => {
+          if (items.length + pageItems.length >= limit) return false;
 
-        const yearMatch = titleText.match(/\((\d{4})\)/);
-        const year = yearMatch ? yearMatch[1] : '';
-        const cleanTitle = titleText.replace(/\s*\(\d{4}\)\s*$/, '').trim();
-        const slug = href.split('/').filter(Boolean).pop() || '';
+          const $el = $(el);
+          const linkEl = $el.find('a.itemA').first();
+          const href = linkEl.attr('href') || '';
+          const imgEl = $el.find('img').first();
+          const poster = imgEl.attr('data-src') || imgEl.attr('src') || null;
+          const titleText = $el.find('.title_over span').first().text().trim();
 
-        const contentType = type === 'peliculas' ? 'movie' as const : 'tvseries' as const;
+          if (!href || !titleText) return;
 
-        items.push({
-          id: slug,
-          tmdb_id: 0,
-          imdb_id: null,
-          type: contentType,
-          title: cleanTitle,
-          original_title: cleanTitle,
-          aliases: [cleanTitle],
-          overview: `Ver ${cleanTitle} online gratis en HD con audio Latino.`,
-          rating: 0,
-          release_date: year,
-          genres: [],
-          subcategories: ['Latino HD'],
-          poster: poster && !poster.includes('placeholder') ? poster : null,
-          backdrop: null,
-          logo: null,
-          trailer: null,
-          cast: [],
-          dubbing_cast: [],
-          servers: [],
-          _tioplus_url: href,
-        } as any);
-      });
+          const yearMatch = titleText.match(/\((\d{4})\)/);
+          const year = yearMatch ? yearMatch[1] : '';
+          const cleanTitle = titleText.replace(/\s*\(\d{4}\)\s*$/, '').trim();
+          const slug = href.split('/').filter(Boolean).pop() || '';
 
-      return items;
-    } catch (err: any) {
-      console.error(`[TioPlus] Error scrapeando ${type}:`, err.message);
-      return [];
+          if (!slug || seen.has(slug)) return;
+          seen.add(slug);
+
+          const contentType = type === 'peliculas' ? 'movie' as const : 'tvseries' as const;
+
+          pageItems.push({
+            id: slug,
+            tmdb_id: 0,
+            imdb_id: null,
+            type: contentType,
+            title: cleanTitle,
+            original_title: cleanTitle,
+            aliases: [cleanTitle],
+            overview: `Ver ${cleanTitle} online gratis en HD con audio Latino.`,
+            rating: 0,
+            release_date: year,
+            genres: [],
+            subcategories: ['Latino HD'],
+            poster: poster && !poster.includes('placeholder') ? poster : null,
+            backdrop: null,
+            logo: null,
+            trailer: null,
+            cast: [],
+            dubbing_cast: [],
+            servers: [],
+            _tioplus_url: href,
+          } as any);
+        });
+
+        if (pageItems.length === 0) {
+          break;
+        }
+
+        items.push(...pageItems);
+      } catch (err: any) {
+        if (page === 1) {
+          console.error(`[TioPlus] Error scrapeando ${type}:`, err.message);
+        }
+        break;
+      }
     }
+
+    return items;
   }
 }
