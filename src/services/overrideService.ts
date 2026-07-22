@@ -1,5 +1,4 @@
-import fs from 'fs';
-import path from 'path';
+import { CloudStore } from './cloudStore';
 
 export interface MediaOverride {
   custom_poster?: string | null;
@@ -8,36 +7,24 @@ export interface MediaOverride {
   updated_at?: string;
 }
 
-const OVERRIDES_FILE = path.join(__dirname, '../data/overrides.json');
+let overridesCache: Record<string, MediaOverride> = {};
+let isInitialized = false;
 
-let overridesCache: Record<string, MediaOverride> = loadOverrides();
-
-function loadOverrides(): Record<string, MediaOverride> {
-  try {
-    if (fs.existsSync(OVERRIDES_FILE)) {
-      const content = fs.readFileSync(OVERRIDES_FILE, 'utf8');
-      return JSON.parse(content) || {};
-    }
-  } catch (err) {
-    console.warn('[OverrideService] Error leyendo overrides.json:', err);
+// Cargar overrides desde la nube en segundo plano
+CloudStore.getOverrides().then(ov => {
+  if (ov) {
+    overridesCache = ov;
+    isInitialized = true;
   }
-  return {};
-}
-
-function saveOverrides(data: Record<string, MediaOverride>) {
-  try {
-    const dir = path.dirname(OVERRIDES_FILE);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    fs.writeFileSync(OVERRIDES_FILE, JSON.stringify(data, null, 2), 'utf8');
-  } catch (err) {
-    console.warn('[OverrideService] Error guardando overrides.json:', err);
-  }
-}
+}).catch(() => {});
 
 export class OverrideService {
   static getOverride(key: string | number): MediaOverride | null {
+    if (!isInitialized) {
+      CloudStore.getOverrides().then(ov => {
+        if (ov) overridesCache = ov;
+      }).catch(() => {});
+    }
     const k = String(key).toLowerCase().trim();
     return overridesCache[k] || null;
   }
@@ -55,7 +42,12 @@ export class OverrideService {
       updated_at: new Date().toISOString()
     };
     overridesCache[k] = updated;
-    saveOverrides(overridesCache);
+
+    // Guardar en nube y disco local
+    CloudStore.saveOverride(k, updated).catch(err => {
+      console.warn('[OverrideService] Cloud save error:', err);
+    });
+
     return updated;
   }
 
@@ -63,7 +55,7 @@ export class OverrideService {
     const k = String(key).toLowerCase().trim();
     if (overridesCache[k]) {
       delete overridesCache[k];
-      saveOverrides(overridesCache);
+      CloudStore.deleteOverride(k).catch(() => {});
       return true;
     }
     return false;

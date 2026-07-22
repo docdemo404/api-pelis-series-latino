@@ -1,5 +1,4 @@
-import fs from 'fs';
-import path from 'path';
+import { CloudStore } from './cloudStore';
 
 export interface SourceConfig {
   id: string; // 'tioplus' | 'fuegocine' | 'supabase'
@@ -8,48 +7,34 @@ export interface SourceConfig {
   priority: number;
 }
 
-const SOURCES_FILE = path.join(__dirname, '../data/sources.json');
-
 const DEFAULT_SOURCES: SourceConfig[] = [
   { id: 'tioplus', name: 'TioPlus / PelisPlus Latino', enabled: true, priority: 1 },
   { id: 'fuegocine', name: 'FuegoCine', enabled: true, priority: 2 },
   { id: 'supabase', name: 'Base de Datos Supabase', enabled: true, priority: 3 }
 ];
 
-let currentSources: SourceConfig[] = loadSources();
+let currentSources: SourceConfig[] = [...DEFAULT_SOURCES];
+let isInitialized = false;
 
-function loadSources(): SourceConfig[] {
-  try {
-    if (fs.existsSync(SOURCES_FILE)) {
-      const content = fs.readFileSync(SOURCES_FILE, 'utf8');
-      const parsed = JSON.parse(content);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed.sort((a: any, b: any) => a.priority - b.priority);
-      }
-    }
-  } catch (err) {
-    console.warn('[SourceManager] Error leyendo sources.json:', err);
+// Inicializar sincronización remota en segundo plano
+CloudStore.getSources().then(sources => {
+  if (sources && sources.length > 0) {
+    currentSources = sources;
+    isInitialized = true;
   }
-  return DEFAULT_SOURCES;
-}
-
-function saveSources(sources: SourceConfig[]) {
-  try {
-    const dir = path.dirname(SOURCES_FILE);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    fs.writeFileSync(SOURCES_FILE, JSON.stringify(sources, null, 2), 'utf8');
-  } catch (err) {
-    console.warn('[SourceManager] Error guardando sources.json:', err);
-  }
-}
+}).catch(() => {});
 
 export class SourceManager {
   /**
    * Obtiene las fuentes ordenadas por prioridad
    */
   static getSources(): SourceConfig[] {
+    // Disparar sincronización silenciosa si no se ha inicializado
+    if (!isInitialized) {
+      CloudStore.getSources().then(s => {
+        if (s && s.length > 0) currentSources = s;
+      }).catch(() => {});
+    }
     return [...currentSources].sort((a, b) => a.priority - b.priority);
   }
 
@@ -69,7 +54,11 @@ export class SourceManager {
       return existing;
     }).sort((a, b) => a.priority - b.priority);
 
-    saveSources(currentSources);
+    // Guardar en la nube y disco local
+    CloudStore.saveSources(currentSources).catch(err => {
+      console.warn('[SourceManager] Cloud save error:', err);
+    });
+
     return this.getSources();
   }
 
@@ -77,7 +66,7 @@ export class SourceManager {
    * Verifica si una fuente está activa
    */
   static isEnabled(sourceId: string): boolean {
-    const s = currentSources.find(x => x.id === sourceId);
+    const s = this.getSources().find(x => x.id === sourceId);
     return s ? s.enabled : true;
   }
 }
