@@ -39,9 +39,15 @@
                     "items": {
                       "type": "object",
                       "properties": {
-                        "id": { "type": "string" },
-                        "enabled": { "type": "boolean" },
-                        "priority": { "type": "number" }
+                        "id": {
+                          "type": "string"
+                        },
+                        "enabled": {
+                          "type": "boolean"
+                        },
+                        "priority": {
+                          "type": "number"
+                        }
                       }
                     }
                   }
@@ -62,10 +68,19 @@
         "summary": "Buscar títulos en TMDB para edición",
         "description": "Retorna coincidencia de películas y series en TMDB con sus TMDB IDs, posters y fechas para personalizar su portada.",
         "parameters": [
-          { "name": "q", "in": "query", "required": true, "schema": { "type": "string" } }
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
         ],
         "responses": {
-          "200": { "description": "Búsqueda en TMDB exitosa" }
+          "200": {
+            "description": "Búsqueda en TMDB exitosa"
+          }
         }
       }
     },
@@ -74,7 +89,14 @@
         "summary": "Establecer portada y backdrop personalizada",
         "description": "Guarda una URL de poster o backdrop personalizada para sustituir la oficial de TMDB.",
         "parameters": [
-          { "name": "tmdb_id", "in": "path", "required": true, "schema": { "type": "string" } }
+          {
+            "name": "tmdb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
         ],
         "requestBody": {
           "content": {
@@ -82,31 +104,46 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "custom_poster": { "type": "string" },
-                  "custom_backdrop": { "type": "string" }
+                  "custom_poster": {
+                    "type": "string"
+                  },
+                  "custom_backdrop": {
+                    "type": "string"
+                  }
                 }
               }
             }
           }
         },
         "responses": {
-          "200": { "description": "Override guardado exitosamente" }
+          "200": {
+            "description": "Override guardado exitosamente"
+          }
         }
       },
       "delete": {
         "summary": "Restablecer portada y backdrop original",
         "parameters": [
-          { "name": "tmdb_id", "in": "path", "required": true, "schema": { "type": "string" } }
+          {
+            "name": "tmdb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
         ],
         "responses": {
-          "200": { "description": "Override eliminado exitosamente" }
+          "200": {
+            "description": "Override eliminado exitosamente"
+          }
         }
       }
     },
     "/api/v1/search": {
       "get": {
         "summary": "Búsqueda general en tiempo real",
-        "description": "Busca películas, series, animes y doramas por título u alias. Si es una película (`type: movie`), incluye sus servidores embed. Si es una serie (`type: tvseries`), incluye `seasons` con la estructura de temporadas y episodios. Los resultados de FuegoCine agrupan automáticamente los episodios individuales (patrón SxE) bajo un único MediaItem de serie con sus temporadas y capítulos consolidados.",
+        "description": "Busca películas, series, animes y doramas por título u alias. Si es una película (`type: movie`), incluye sus servidores embed. Si es una serie (`type: tvseries`), incluye `seasons` con la estructura de temporadas y episodios. Los resultados de FuegoCine agrupan automáticamente los episodios individuales (patrón SxE) bajo un único MediaItem de serie con sus temporadas y capítulos consolidados. Incluye tolerancia a errores de escritura (fuzzy matching) para recuperar coincidencias cercanas cuando el usuario comete typos.",
         "parameters": [
           {
             "name": "q",
@@ -115,6 +152,36 @@
             "description": "Término de búsqueda (ej. avatar, dragon ball, la casa del dragon)",
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "description": "Número de página, empezando en 1.",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Cantidad de resultados por página. Alias compatible: size. Máximo 100.",
+            "schema": {
+              "type": "integer",
+              "default": 25,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "size",
+            "in": "query",
+            "description": "Alias de limit para definir la cantidad de resultados por página. Máximo 100.",
+            "schema": {
+              "type": "integer",
+              "default": 25,
+              "maximum": 100
             }
           }
         ],
@@ -170,21 +237,27 @@
             "in": "path",
             "required": true,
             "description": "Slug de la serie (ej. la-casa-del-dragon)",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "season",
             "in": "path",
             "required": true,
             "description": "Número de temporada (ej. 1)",
-            "schema": { "type": "integer" }
+            "schema": {
+              "type": "integer"
+            }
           },
           {
             "name": "episode",
             "in": "path",
             "required": true,
             "description": "Número de episodio (ej. 1)",
-            "schema": { "type": "integer" }
+            "schema": {
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -205,17 +278,46 @@
       "get": {
         "summary": "Obtener servidores de reproducción de un episodio de serie (Alias Media)",
         "parameters": [
-          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
-          { "name": "season", "in": "path", "required": true, "schema": { "type": "integer" } },
-          { "name": "episode", "in": "path", "required": true, "schema": { "type": "integer" } }
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "season",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "episode",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
         ],
-        "responses": { "200": { "description": "Servidores del episodio obtenidos con éxito" } }
+        "responses": {
+          "200": {
+            "description": "Servidores del episodio obtenidos con éxito"
+          }
+        }
       }
     },
     "/api/v1/home": {
       "get": {
         "summary": "Obtener feed principal estilo Netflix (Alias)",
-        "responses": { "200": { "description": "Feed obtenido con éxito" } }
+        "responses": {
+          "200": {
+            "description": "Feed obtenido con éxito"
+          }
+        }
       }
     },
     "/api/v1/feeds/home": {
@@ -226,44 +328,171 @@
             "name": "country",
             "in": "query",
             "required": false,
-            "schema": { "type": "string", "default": "CL" }
+            "schema": {
+              "type": "string",
+              "default": "CL"
+            }
           }
         ],
-        "responses": { "200": { "description": "Feed obtenido con éxito" } }
+        "responses": {
+          "200": {
+            "description": "Feed obtenido con éxito"
+          }
+        }
       }
     },
     "/api/v1/movies": {
       "get": {
         "summary": "Obtener catálogo de películas con paginación",
         "parameters": [
-          { "name": "page", "in": "query", "schema": { "type": "integer", "default": 1 } },
-          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 20 } },
-          { "name": "genre", "in": "query", "schema": { "type": "string" } }
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            },
+            "description": "Número de página real sobre el índice general, empezando en 1."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "maximum": 100
+            },
+            "description": "Cantidad de ítems por página. Alias compatible: size. Máximo 100."
+          },
+          {
+            "name": "size",
+            "in": "query",
+            "description": "Alias de limit para definir la cantidad de ítems por página. Máximo 100.",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "genre",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
         ],
-        "responses": { "200": { "description": "Lista de películas obtenida con éxito" } }
+        "responses": {
+          "200": {
+            "description": "Lista de películas obtenida con éxito"
+          }
+        }
       }
     },
     "/api/v1/series": {
       "get": {
         "summary": "Obtener catálogo de series con paginación",
         "parameters": [
-          { "name": "page", "in": "query", "schema": { "type": "integer", "default": 1 } },
-          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 20 } },
-          { "name": "genre", "in": "query", "schema": { "type": "string" } }
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            },
+            "description": "Número de página real sobre el índice general, empezando en 1."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "maximum": 100
+            },
+            "description": "Cantidad de ítems por página. Alias compatible: size. Máximo 100."
+          },
+          {
+            "name": "size",
+            "in": "query",
+            "description": "Alias de limit para definir la cantidad de ítems por página. Máximo 100.",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "genre",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
         ],
-        "responses": { "200": { "description": "Lista de series obtenida con éxito" } }
+        "responses": {
+          "200": {
+            "description": "Lista de series obtenida con éxito"
+          }
+        }
       }
     },
     "/api/v1/media": {
       "get": {
         "summary": "Obtener catálogo general (películas + series)",
         "parameters": [
-          { "name": "page", "in": "query", "schema": { "type": "integer", "default": 1 } },
-          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 20 } },
-          { "name": "type", "in": "query", "schema": { "type": "string" } },
-          { "name": "genre", "in": "query", "schema": { "type": "string" } }
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            },
+            "description": "Número de página real sobre el índice general, empezando en 1."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "maximum": 100
+            },
+            "description": "Cantidad de ítems por página. Alias compatible: size. Máximo 100."
+          },
+          {
+            "name": "size",
+            "in": "query",
+            "description": "Alias de limit para definir la cantidad de ítems por página. Máximo 100.",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "genre",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
         ],
-        "responses": { "200": { "description": "Catálogo devuelto con éxito" } }
+        "responses": {
+          "200": {
+            "description": "Catálogo devuelto con éxito"
+          }
+        }
       }
     },
     "/api/v1/media/batch": {
@@ -275,22 +504,35 @@
             "in": "query",
             "required": true,
             "description": "Lista de IDs separados por comas (ej. ?ids=558,94997,748783)",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "compact",
             "in": "query",
             "required": false,
-            "schema": { "type": "boolean", "default": false }
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
           }
         ],
-        "responses": { "200": { "description": "Lote de contenidos devuelto con éxito" } }
+        "responses": {
+          "200": {
+            "description": "Lote de contenidos devuelto con éxito"
+          }
+        }
       }
     },
     "/api/v1/revalidate": {
       "get": {
         "summary": "Invalidar y revalidar la caché de borde y memoria",
-        "responses": { "200": { "description": "Caché invalidado con éxito" } }
+        "responses": {
+          "200": {
+            "description": "Caché invalidado con éxito"
+          }
+        }
       }
     },
     "/api/v1/stream/proxy": {
@@ -302,12 +544,132 @@
             "in": "query",
             "required": true,
             "description": "URL directa de video (MP4 o M3U8 HLS)",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
-          "206": { "description": "Respuesta parcial de flujo de video (Range Request Seek)" },
-          "200": { "description": "Flujo de video completo" }
+          "206": {
+            "description": "Respuesta parcial de flujo de video (Range Request Seek)"
+          },
+          "200": {
+            "description": "Flujo de video completo"
+          }
+        }
+      }
+    },
+    "/api/v1/movies/search": {
+      "summary": "Búsqueda general en tiempo real",
+      "description": "Busca películas, series, animes y doramas por título u alias. Si es una película (`type: movie`), incluye sus servidores embed. Si es una serie (`type: tvseries`), incluye `seasons` con la estructura de temporadas y episodios. Los resultados de FuegoCine agrupan automáticamente los episodios individuales (patrón SxE) bajo un único MediaItem de serie con sus temporadas y capítulos consolidados. Incluye tolerancia a errores de escritura (fuzzy matching) para recuperar coincidencias cercanas cuando el usuario comete typos.",
+      "parameters": [
+        {
+          "name": "q",
+          "in": "query",
+          "required": true,
+          "description": "Término de búsqueda (ej. avatar, dragon ball, la casa del dragon)",
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "page",
+          "in": "query",
+          "description": "Número de página, empezando en 1.",
+          "schema": {
+            "type": "integer",
+            "default": 1,
+            "minimum": 1
+          }
+        },
+        {
+          "name": "limit",
+          "in": "query",
+          "description": "Cantidad de resultados por página. Alias compatible: size. Máximo 100.",
+          "schema": {
+            "type": "integer",
+            "default": 25,
+            "maximum": 100
+          }
+        },
+        {
+          "name": "size",
+          "in": "query",
+          "description": "Alias de limit para definir la cantidad de resultados por página. Máximo 100.",
+          "schema": {
+            "type": "integer",
+            "default": 25,
+            "maximum": 100
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Búsqueda exitosa",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SearchResponse"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/discover": {
+      "get": {
+        "summary": "Descubrimiento paginado del catálogo general",
+        "description": "Devuelve una página real del índice general y permite filtrar por type o genre.",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "description": "Número de página real sobre el índice general, empezando en 1.",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Cantidad de ítems por página. Alias compatible: size. Máximo 100.",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "size",
+            "in": "query",
+            "description": "Alias de limit para definir la cantidad de ítems por página. Máximo 100.",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "genre",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Descubrimiento devuelto con éxito"
+          }
         }
       }
     }
@@ -317,56 +679,145 @@
       "ServerOption": {
         "type": "object",
         "properties": {
-          "id": { "type": "string" },
-          "name": { "type": "string" },
-          "quality": { "type": "string", "example": "1080p" },
-          "language": { "type": "string", "example": "latino" },
-          "embed_url": { "type": "string", "example": "https://vidhideplus.com/v/f1kgebbi5bly" },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "quality": {
+            "type": "string",
+            "example": "1080p"
+          },
+          "language": {
+            "type": "string",
+            "example": "latino"
+          },
+          "embed_url": {
+            "type": "string",
+            "example": "https://vidhideplus.com/v/f1kgebbi5bly"
+          },
           "status": {
             "type": "string",
-            "enum": ["online", "offline"],
+            "enum": [
+              "online",
+              "offline"
+            ],
             "description": "Estado de salud del servidor verificado en la capa de aplicación (Soft Errors). Los reproductores o clientes DEBEN IGNORAR O FILTRAR los servidores con status: 'offline'."
           },
-          "last_checked": { "type": "string", "format": "date-time" }
+          "last_checked": {
+            "type": "string",
+            "format": "date-time"
+          }
         }
       },
       "Episode": {
         "type": "object",
         "properties": {
-          "episode_number": { "type": "integer", "example": 1 },
-          "name": { "type": "string", "example": "Los herederos del Dragón" },
-          "still_path": { "type": "string", "nullable": true },
-          "servers": { "type": "array", "items": { "$ref": "#/components/schemas/ServerOption" } }
+          "episode_number": {
+            "type": "integer",
+            "example": 1
+          },
+          "name": {
+            "type": "string",
+            "example": "Los herederos del Dragón"
+          },
+          "still_path": {
+            "type": "string",
+            "nullable": true
+          },
+          "servers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ServerOption"
+            }
+          }
         }
       },
       "Season": {
         "type": "object",
         "properties": {
-          "season_number": { "type": "integer", "example": 1 },
-          "name": { "type": "string", "example": "Temporada 1" },
-          "episodes_count": { "type": "integer", "example": 10 },
-          "episodes": { "type": "array", "items": { "$ref": "#/components/schemas/Episode" } }
+          "season_number": {
+            "type": "integer",
+            "example": 1
+          },
+          "name": {
+            "type": "string",
+            "example": "Temporada 1"
+          },
+          "episodes_count": {
+            "type": "integer",
+            "example": 10
+          },
+          "episodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Episode"
+            }
+          }
         }
       },
       "MediaItem": {
         "type": "object",
         "properties": {
-          "id": { "type": "string", "example": "la-casa-del-dragon" },
-          "tmdb_id": { "type": "integer" },
-          "type": { "type": "string", "enum": ["movie", "tvseries"], "description": "Determina si el contenido es película o serie. Para 'movie', consultar `servers`. Para 'tvseries', consultar `seasons` o la ruta de episodios." },
-          "title": { "type": "string" },
-          "original_title": { "type": "string" },
-          "overview": { "type": "string" },
-          "rating": { "type": "number" },
-          "release_date": { "type": "string" },
-          "genres": { "type": "array", "items": { "type": "string" } },
-          "poster": { "type": "string", "nullable": true },
-          "backdrop": { "type": "string", "nullable": true },
-          "tagline": { "type": "string", "description": "Lema o eslogan oficial de TMDB" },
-          "trailer": { "type": "string", "nullable": true, "description": "URL oficial de tráiler en YouTube (prioriza audio Latino)" },
+          "id": {
+            "type": "string",
+            "example": "la-casa-del-dragon"
+          },
+          "tmdb_id": {
+            "type": "integer"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "movie",
+              "tvseries"
+            ],
+            "description": "Determina si el contenido es película o serie. Para 'movie', consultar `servers`. Para 'tvseries', consultar `seasons` o la ruta de episodios."
+          },
+          "title": {
+            "type": "string"
+          },
+          "original_title": {
+            "type": "string"
+          },
+          "overview": {
+            "type": "string"
+          },
+          "rating": {
+            "type": "number"
+          },
+          "release_date": {
+            "type": "string"
+          },
+          "genres": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "poster": {
+            "type": "string",
+            "nullable": true
+          },
+          "backdrop": {
+            "type": "string",
+            "nullable": true
+          },
+          "tagline": {
+            "type": "string",
+            "description": "Lema o eslogan oficial de TMDB"
+          },
+          "trailer": {
+            "type": "string",
+            "nullable": true,
+            "description": "URL oficial de tráiler en YouTube (prioriza audio Latino)"
+          },
           "cast": {
             "type": "array",
-            "items": { "type": "string" },
+            "items": {
+              "type": "string"
+            },
             "description": "Lista de nombres simples de actores del reparto (evita [object Object] en clientes)"
           },
           "cast_details": {
@@ -374,46 +825,123 @@
             "items": {
               "type": "object",
               "properties": {
-                "name": { "type": "string" },
-                "character": { "type": "string" },
-                "photo": { "type": "string", "nullable": true }
+                "name": {
+                  "type": "string"
+                },
+                "character": {
+                  "type": "string"
+                },
+                "photo": {
+                  "type": "string",
+                  "nullable": true
+                }
               }
             },
             "description": "Lista detallada del reparto enriquecida desde TMDB con fotos y nombres de personaje"
           },
-          "servers": { "type": "array", "items": { "$ref": "#/components/schemas/ServerOption" }, "description": "Presente únicamente cuando type = movie" },
-          "total_seasons": { "type": "integer", "description": "Presente únicamente cuando type = tvseries" },
-          "total_episodes": { "type": "integer", "description": "Presente únicamente cuando type = tvseries" },
-          "seasons": { "type": "array", "items": { "$ref": "#/components/schemas/Season" }, "description": "Lista de temporadas y episodios. Presente únicamente cuando type = tvseries" }
+          "servers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ServerOption"
+            },
+            "description": "Presente únicamente cuando type = movie"
+          },
+          "total_seasons": {
+            "type": "integer",
+            "description": "Presente únicamente cuando type = tvseries"
+          },
+          "total_episodes": {
+            "type": "integer",
+            "description": "Presente únicamente cuando type = tvseries"
+          },
+          "seasons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Season"
+            },
+            "description": "Lista de temporadas y episodios. Presente únicamente cuando type = tvseries"
+          }
         }
       },
       "SearchResponse": {
         "type": "object",
         "properties": {
-          "status": { "type": "string", "example": "success" },
-          "query": { "type": "string" },
-          "count": { "type": "integer" },
-          "results": { "type": "array", "items": { "$ref": "#/components/schemas/MediaItem" } }
+          "status": {
+            "type": "string",
+            "example": "success"
+          },
+          "query": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer",
+            "description": "Cantidad de ítems devueltos en la página actual."
+          },
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MediaItem"
+            }
+          },
+          "page": {
+            "type": "integer"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "total_results": {
+            "type": "integer",
+            "description": "Total global estable de coincidencias disponibles en la ventana de búsqueda, no la suma acumulada por página."
+          },
+          "total_pages": {
+            "type": "integer"
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "next_page": {
+            "type": "integer",
+            "nullable": true
+          }
         }
       },
       "MediaItemResponse": {
         "type": "object",
         "properties": {
-          "status": { "type": "string", "example": "success" },
-          "data": { "$ref": "#/components/schemas/MediaItem" }
+          "status": {
+            "type": "string",
+            "example": "success"
+          },
+          "data": {
+            "$ref": "#/components/schemas/MediaItem"
+          }
         }
       },
       "EpisodeDetailResponse": {
         "type": "object",
         "properties": {
-          "status": { "type": "string", "example": "success" },
+          "status": {
+            "type": "string",
+            "example": "success"
+          },
           "data": {
             "type": "object",
             "properties": {
-              "series_id": { "type": "string" },
-              "season_number": { "type": "integer" },
-              "episode_number": { "type": "integer" },
-              "servers": { "type": "array", "items": { "$ref": "#/components/schemas/ServerOption" } }
+              "series_id": {
+                "type": "string"
+              },
+              "season_number": {
+                "type": "integer"
+              },
+              "episode_number": {
+                "type": "integer"
+              },
+              "servers": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ServerOption"
+                }
+              }
             }
           }
         }

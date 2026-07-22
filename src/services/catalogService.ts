@@ -9,6 +9,17 @@ const getByIdCache = new Map<string, { timestamp: number; data: MediaItem }>();
 const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutos de caché en memoria
 
 export class CatalogService {
+  private static dedupeById(items: MediaItem[]): MediaItem[] {
+    const seen = new Set<string>();
+    return items.filter(item => {
+      if (!item.id || seen.has(item.id)) {
+        return false;
+      }
+      seen.add(item.id);
+      return true;
+    });
+  }
+
   /**
    * Limpia toda la caché en memoria de la API
    */
@@ -56,7 +67,20 @@ export class CatalogService {
       return cached.data;
     }
 
-    const liveItems = await RealScraperService.scrapeHomepage();
+    const [homepageItems, latestMovies, latestSeries, latestAnimes] = await Promise.all([
+      RealScraperService.scrapeHomepage(),
+      RealScraperService.scrapeLatest('peliculas', 60),
+      RealScraperService.scrapeLatest('series', 60),
+      RealScraperService.scrapeLatest('animes', 60)
+    ]);
+
+    const liveItems = this.dedupeById([
+      ...homepageItems,
+      ...latestMovies,
+      ...latestSeries,
+      ...latestAnimes
+    ]);
+
     if (liveItems.length > 0) {
       const enrichedList: MediaItem[] = [];
       for (const item of liveItems) {
@@ -355,21 +379,30 @@ export class CatalogService {
    * Búsqueda en vivo con Caché en Memoria, Web Scraping y Unificación
    * Implementa ponderación por título, búsqueda por prefijos y ordenamiento por relevancia
    */
-  static async search(query: string): Promise<MediaItem[]> {
+  static async search(query: string, maxResults: number = 25): Promise<MediaItem[]> {
     const q = query.toLowerCase().trim();
     if (!q) return [];
 
+    const normalizedMaxResults = Math.max(1, maxResults);
+    const cacheKey = `search:${q}:${normalizedMaxResults}`;
+
     // Verificación de caché en memoria
-    const cached = searchCache.get(q);
+    const cached = searchCache.get(cacheKey);
     if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
       return cached.data;
     }
 
     // 1. Scraping en vivo de fuentes activas
-    const realScraped = await RealScraperService.scrapeRealMovies(q);
-    
+    const realScraped = await RealScraperService.scrapeRealMovies(q, normalizedMaxResults);
+
+    if (realScraped.length < normalizedMaxResults) {
+      // Añadimos el índice general como pool de candidatos para permitir fuzzy matching
+      // cuando la fuente live no devuelve coincidencias por errores de escritura.
+      realScraped.push(...await this.getAll());
+    }
+
     // 2. Unificar catálogo para eliminar títulos duplicados y fusionar servidores
-    let unified = await this.unifyMediaItems(realScraped);
+    let unified = await this.unifyMediaItems(realScraped, normalizedMaxResults);
     
     // 3. Fallback a Supabase si no hay resultados del scraping
     if (unified.length === 0) {
@@ -383,7 +416,7 @@ export class CatalogService {
 
         if (data && data.length > 0) {
           const dbItems = data.map(this.mapDbItemToMediaItem);
-          unified = await this.unifyMediaItems(dbItems);
+          unified = await this.unifyMediaItems(dbItems, normalizedMaxResults);
         }
       } catch (err) {}
     }
@@ -391,8 +424,9 @@ export class CatalogService {
     // 4. Aplicar scoring y ordenamiento por relevancia
     if (unified.length > 0) {
       unified = this.scoreAndSortResults(unified, q);
-      searchCache.set(q, { timestamp: Date.now(), data: unified });
-      return unified;
+      const limited = unified.slice(0, normalizedMaxResults);
+      searchCache.set(cacheKey, { timestamp: Date.now(), data: limited });
+      return limited;
     }
 
     return [];
@@ -408,18 +442,61 @@ export class CatalogService {
    *   - Peso 50: Contiene la palabra completa en title u original_title
    *   - Peso 10: Coincidencia por prefijo débil
    *   - Peso 1: Coincidencia en overview/sinopsis o aliases
-   */
+  */
   private static scoreAndSortResults(items: MediaItem[], query: string): MediaItem[] {
-    const queryLower = query.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    const normalizeText = (value: string) => value
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9\s]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    const getLevenshteinDistance = (a: string, b: string): number => {
+      if (a === b) return 0;
+      if (a.length === 0) return b.length;
+      if (b.length === 0) return a.length;
+
+      const previous = Array.from({ length: b.length + 1 }, (_, i) => i);
+      const current = new Array<number>(b.length + 1);
+
+      for (let i = 1; i <= a.length; i++) {
+        current[0] = i;
+        for (let j = 1; j <= b.length; j++) {
+          const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+          current[j] = Math.min(
+            current[j - 1] + 1,
+            previous[j] + 1,
+            previous[j - 1] + cost
+          );
+        }
+        previous.splice(0, previous.length, ...current);
+      }
+
+      return previous[b.length];
+    };
+
+    const isFuzzyMatch = (needle: string, candidate: string): boolean => {
+      if (needle.length < 3 || candidate.length < 3) return false;
+      const distance = getLevenshteinDistance(needle, candidate);
+      const maxDistance = Math.max(1, Math.floor(Math.max(needle.length, candidate.length) * 0.25));
+      return distance <= Math.min(maxDistance, 2);
+    };
+
+    const queryLower = normalizeText(query);
     const queryWords = queryLower.split(/\s+/).filter(w => w.length > 0);
 
     const scored = items.map(item => {
       let score = 0;
 
-      const titleLower = (item.title || '').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-      const originalTitleLower = (item.original_title || '').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-      const overviewLower = (item.overview || '').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-      const aliasesLower = (item.aliases || []).map(a => a.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""));
+      const titleLower = normalizeText(item.title || '');
+      const originalTitleLower = normalizeText(item.original_title || '');
+      const overviewLower = normalizeText(item.overview || '');
+      const aliasesLower = (item.aliases || []).map(a => normalizeText(a));
+      const searchableWords = [titleLower, originalTitleLower, ...aliasesLower]
+        .join(' ')
+        .split(/\s+/)
+        .filter(w => w.length >= 3);
 
       // --- PRIORIDAD MÁXIMA: El título visible COMIENZA con la frase completa buscada ---
       // Ej: Busca "el c" -> Match máximo para "El Chavo", "El Calabozo", "El Chavo Animado"
@@ -485,9 +562,22 @@ export class CatalogService {
         else if (score < 2 && aliasesLower.some(alias => alias.includes(word))) {
           score += 2;
         }
+        // Peso 35: tolerancia a errores de escritura en palabras del título/alias (ej: "avatr" -> "avatar")
+        else if (score < 35 && searchableWords.some(candidate => isFuzzyMatch(word, candidate))) {
+          score += 35;
+        }
         // Peso 1: Coincidencia en overview/sinopsis (menor prioridad)
         else if (overviewLower.includes(word)) {
           score += 1;
+        }
+      }
+
+      if (score < 70 && queryLower.length >= 4) {
+        const compactQuery = queryLower.replace(/\s+/g, '');
+        const compactTitle = titleLower.replace(/\s+/g, '');
+        const compactOriginalTitle = originalTitleLower.replace(/\s+/g, '');
+        if (isFuzzyMatch(compactQuery, compactTitle) || isFuzzyMatch(compactQuery, compactOriginalTitle)) {
+          score += 70;
         }
       }
 
@@ -507,7 +597,7 @@ export class CatalogService {
    * Unifica y agrupa elementos multimedia que corresponden al mismo título o TMDB ID,
    * fusionando SERVIDORES DE TODAS LAS FUENTES ACTIVAS en paralelo y enriqueciendo con TMDB en sub-segundos.
    */
-  private static async unifyMediaItems(items: MediaItem[]): Promise<MediaItem[]> {
+  private static async unifyMediaItems(items: MediaItem[], maxResults: number = 25): Promise<MediaItem[]> {
     const grouped = new Map<string, { item: MediaItem; sourceUrls: string[] }>();
 
     const getCanonicalKey = (t: string) => {
@@ -575,7 +665,7 @@ export class CatalogService {
     }
 
     // 3. Procesamiento PARALELO ultrarrápido de todas las entradas unificadas
-    const entries = Array.from(grouped.values()).slice(0, 10);
+    const entries = Array.from(grouped.values()).slice(0, maxResults);
 
     const unifiedList = await Promise.all(
       entries.map(async (entry) => {
