@@ -800,7 +800,8 @@ app.get(['/api/v1/search', '/api/v1/movies/search'], async (req: Request, res: R
     const { page, limit } = getPaginationParams(req, 25, 100);
     const compact = req.query.compact === 'true';
 
-    const results = await CatalogService.search(q, page * limit);
+    const searchScanLimit = 1000;
+    const results = await CatalogService.search(q, searchScanLimit);
     const startIndex = (page - 1) * limit;
     const paginated = results.slice(startIndex, startIndex + limit);
     const finalItems = compact ? paginated.map(CatalogService.toCompactItem) : paginated;
@@ -812,6 +813,7 @@ app.get(['/api/v1/search', '/api/v1/movies/search'], async (req: Request, res: R
       limit,
       total_results: results.length,
       count: finalItems.length,
+      has_more: startIndex + finalItems.length < results.length,
       results: finalItems
     });
   } catch (err) {

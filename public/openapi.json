@@ -143,7 +143,7 @@
     "/api/v1/search": {
       "get": {
         "summary": "Búsqueda general en tiempo real",
-        "description": "Busca películas, series, animes y doramas por título u alias. Si es una película (`type: movie`), incluye sus servidores embed. Si es una serie (`type: tvseries`), incluye `seasons` con la estructura de temporadas y episodios. Los resultados de FuegoCine agrupan automáticamente los episodios individuales (patrón SxE) bajo un único MediaItem de serie con sus temporadas y capítulos consolidados.",
+        "description": "Busca películas, series, animes y doramas por título u alias. Si es una película (`type: movie`), incluye sus servidores embed. Si es una serie (`type: tvseries`), incluye `seasons` con la estructura de temporadas y episodios. Los resultados de FuegoCine agrupan automáticamente los episodios individuales (patrón SxE) bajo un único MediaItem de serie con sus temporadas y capítulos consolidados. La paginación calcula `total_results` sobre el conjunto global recuperado para la consulta, no sobre el acumulado hasta la página solicitada, e incluye `has_more` para scroll infinito.",
         "parameters": [
           {
             "name": "q",
@@ -562,7 +562,7 @@
     "/api/v1/movies/search": {
       "get": {
         "summary": "Búsqueda general en tiempo real",
-        "description": "Busca películas, series, animes y doramas por título u alias. Si es una película (`type: movie`), incluye sus servidores embed. Si es una serie (`type: tvseries`), incluye `seasons` con la estructura de temporadas y episodios. Los resultados de FuegoCine agrupan automáticamente los episodios individuales (patrón SxE) bajo un único MediaItem de serie con sus temporadas y capítulos consolidados.",
+        "description": "Busca películas, series, animes y doramas por título u alias. Si es una película (`type: movie`), incluye sus servidores embed. Si es una serie (`type: tvseries`), incluye `seasons` con la estructura de temporadas y episodios. Los resultados de FuegoCine agrupan automáticamente los episodios individuales (patrón SxE) bajo un único MediaItem de serie con sus temporadas y capítulos consolidados. La paginación calcula `total_results` sobre el conjunto global recuperado para la consulta, no sobre el acumulado hasta la página solicitada, e incluye `has_more` para scroll infinito.",
         "parameters": [
           {
             "name": "q",
@@ -876,13 +876,30 @@
             "type": "string"
           },
           "count": {
-            "type": "integer"
+            "type": "integer",
+            "description": "Cantidad de elementos devueltos en esta página."
           },
           "results": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/MediaItem"
             }
+          },
+          "page": {
+            "type": "integer",
+            "description": "Número de página solicitado."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Cantidad máxima de resultados por página."
+          },
+          "total_results": {
+            "type": "integer",
+            "description": "Total global de coincidencias recuperadas para la consulta antes de paginar; no es el conteo acumulado de la página actual."
+          },
+          "has_more": {
+            "type": "boolean",
+            "description": "Indica si existen más resultados después de la página actual."
           }
         }
       },
