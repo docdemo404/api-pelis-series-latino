@@ -365,7 +365,7 @@ app.get('/panel', async (req: Request, res: Response) => {
 
       try {
         saveBtn.disabled = true;
-        saveBtn.textContent = 'Guardando...';
+        saveBtn.textContent = '⏳ Guardando en nube...';
         const res = await fetch('/api/v1/panel/sources', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -376,15 +376,16 @@ app.get('/panel', async (req: Request, res: Response) => {
         saveBtn.textContent = '💾 Guardar Configuración';
 
         if (json.status === 'success') {
-          alertBox.innerHTML = '<div class="alert alert-success border-success bg-dark text-success mt-3 rounded-3">✅ <strong>Configuración Guardada:</strong> Se actualizó el orden y estado de las fuentes.</div>';
-          setTimeout(() => { alertBox.innerHTML = ''; }, 4000);
+          const ts = new Date().toLocaleString('es-ES', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+          alertBox.innerHTML = '<div class="alert alert-success border-success bg-dark text-success mt-3 rounded-3">✅ <strong>Guardado permanentemente</strong> — Configuración persistida en la nube a las ' + ts + '. Los cambios sobrevivirán reinicios y redeploys.</div>';
+          setTimeout(() => { alertBox.innerHTML = ''; }, 6000);
         } else {
-          alertBox.innerHTML = '<div class="alert alert-danger mt-3">❌ Error actualizando fuentes.</div>';
+          alertBox.innerHTML = '<div class="alert alert-danger mt-3">❌ Error actualizando fuentes: ' + (json.message || '') + '</div>';
         }
       } catch (err) {
         saveBtn.disabled = false;
         saveBtn.textContent = '💾 Guardar Configuración';
-        alertBox.innerHTML = '<div class="alert alert-danger mt-3">❌ Error de conexión.</div>';
+        alertBox.innerHTML = '<div class="alert alert-danger mt-3">❌ Error de conexión al guardar.</div>';
       }
     });
 
