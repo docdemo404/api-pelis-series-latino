@@ -1,5 +1,0 @@
-[
-  { "id": "tioplus", "name": "TioPlus / PelisPlus Latino", "enabled": true, "priority": 1 },
-  { "id": "fuegocine", "name": "FuegoCine", "enabled": true, "priority": 2 },
-  { "id": "supabase", "name": "Base de Datos Supabase", "enabled": true, "priority": 3 }
-]

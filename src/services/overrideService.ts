@@ -9,27 +9,27 @@ export interface MediaOverride {
 
 let overridesCache: Record<string, MediaOverride> = {};
 let isInitialized = false;
+let loading: Promise<void> | null = null;
 
-// Cargar overrides desde la nube en segundo plano
-CloudStore.getOverrides().then(ov => {
-  if (ov) {
-    overridesCache = ov;
-    isInitialized = true;
-  }
-}).catch(() => {});
+// Carga perezosa desde la nube: evita una llamada de red en el import (cold start).
+// Se dispara en el primer acceso real a los overrides, no al cargar el módulo.
+function ensureLoaded(): void {
+  if (isInitialized || loading) return;
+  loading = CloudStore.getOverrides()
+    .then(ov => { if (ov) overridesCache = ov; })
+    .catch(() => {})
+    .then(() => { isInitialized = true; loading = null; });
+}
 
 export class OverrideService {
   static getOverride(key: string | number): MediaOverride | null {
-    if (!isInitialized) {
-      CloudStore.getOverrides().then(ov => {
-        if (ov) overridesCache = ov;
-      }).catch(() => {});
-    }
+    ensureLoaded();
     const k = String(key).toLowerCase().trim();
     return overridesCache[k] || null;
   }
 
   static getAllOverrides(): Record<string, MediaOverride> {
+    ensureLoaded();
     return { ...overridesCache };
   }
 

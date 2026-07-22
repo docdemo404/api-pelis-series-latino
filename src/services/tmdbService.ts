@@ -2,9 +2,10 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { MediaItem, ContentType, CastMember } from '../types';
 import { OverrideService } from './overrideService';
+import { USER_AGENT } from '../utils/httpClient';
 
 const API_KEY = '99b8bc99e85e79fabd52b64513c9780d';
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+const UA = USER_AGENT;
 
 const tmdbIdCache = new Map<string, number>();
 const tmdbDetailCache = new Map<string, any>();

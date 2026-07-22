@@ -1,4 +1,5 @@
 import { ServerOption } from '../types';
+import { USER_AGENT } from '../utils/httpClient';
 
 export class ResolverService {
   /**
@@ -26,7 +27,7 @@ export class ResolverService {
       stream_url: finalUrl,
       headers: {
         'Referer': new URL(originalUrl).origin + '/',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        'User-Agent': USER_AGENT,
         'Origin': new URL(originalUrl).origin
       },
       expires_in_seconds: 3600

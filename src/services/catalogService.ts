@@ -3,6 +3,7 @@ import { supabase } from './supabaseService';
 import { RealScraperService } from './realScraperService';
 import { TmdbService } from './tmdbService';
 import { sortServersBySourcePriority, getPrimaryStream } from './streamSorter';
+import { normalizeTitle } from '../utils/text';
 
 const searchCache = new Map<string, { timestamp: number; data: MediaItem[] }>();
 const getByIdCache = new Map<string, { timestamp: number; data: MediaItem }>();
@@ -26,6 +27,28 @@ export class CatalogService {
   static clearCache(): void {
     searchCache.clear();
     getByIdCache.clear();
+  }
+
+  /**
+   * Propaga los servidores a la jerarquía de episodios de una serie.
+   * Cada episodio usa sus PROPIOS servidores (reales, por episodio) si los tiene; si no,
+   * hereda los de nivel serie como fallback reproducible en la portada. Los enlaces reales
+   * por episodio se obtienen bajo demanda vía /series/:id/season/:s/episode/:e.
+   * Consolida la lógica antes duplicada en getById y unifyMediaItems.
+   */
+  private static inheritServersToEpisodes(item: MediaItem | null | undefined): void {
+    if (!item || !item.seasons || item.seasons.length === 0) return;
+    const seriesLevel = sortServersBySourcePriority(item.servers || []);
+    for (const season of item.seasons) {
+      if (!season.episodes) continue;
+      for (const ep of season.episodes) {
+        const own = ep.servers && ep.servers.length > 0 ? ep.servers : seriesLevel;
+        ep.servers = sortServersBySourcePriority(own);
+        if (ep.servers.length > 0) {
+          ep.primary_stream = getPrimaryStream(ep.servers);
+        }
+      }
+    }
   }
 
   /**
@@ -346,20 +369,8 @@ export class CatalogService {
       }
     }
 
-    // 7. Herencia e inyección de servidores a la jerarquía de episodios en Series
-    if (result && result.seasons && result.seasons.length > 0) {
-      const activeServers = sortServersBySourcePriority(result.servers || []);
-      for (const season of result.seasons) {
-        if (season.episodes) {
-          for (const ep of season.episodes) {
-            ep.servers = sortServersBySourcePriority(ep.servers && ep.servers.length > 0 ? ep.servers : activeServers);
-            if (ep.servers.length > 0) {
-              ep.primary_stream = getPrimaryStream(ep.servers);
-            }
-          }
-        }
-      }
-    }
+    // 7. Herencia de servidores a la jerarquía de episodios en series
+    this.inheritServersToEpisodes(result);
 
     // ÚNICAMENTE almacenar en caché si se encontraron servidores o temporadas válidas
     if (result && ((result.servers && result.servers.length > 0) || (result.seasons && result.seasons.length > 0))) {
@@ -396,11 +407,13 @@ export class CatalogService {
     const realScraped = await RealScraperService.scrapeRealMovies(q, normalizedMaxResults);
 
     if (realScraped.length < normalizedMaxResults) {
+      // Match del catálogo insensible a acentos (usa la utilidad compartida).
+      const nq = normalizeTitle(q);
       const catalogMatches = (await this.getAll()).filter(item => {
-        const haystack = [item.title, item.original_title, ...(item.aliases || [])]
-          .join(' ')
-          .toLowerCase();
-        return haystack.includes(q);
+        const haystack = normalizeTitle(
+          [item.title, item.original_title, ...(item.aliases || [])].join(' ')
+        );
+        return haystack.includes(nq);
       });
       realScraped.push(...catalogMatches);
     }
@@ -468,10 +481,6 @@ export class CatalogService {
       else if (queryWords.length > 0 && titleLower.startsWith(queryWords[0])) {
         score = 120;
       }
-      // --- PRIORIDAD ALTA: Coincidencia EXACTA completa en title ---
-      else if (titleLower === queryLower) {
-        score = 150;
-      }
       // --- PRIORIDAD MEDIA-ALTA: Título original comienza con la frase completa ---
       else if (originalTitleLower.startsWith(queryLower)) {
         score = 100;
@@ -488,49 +497,25 @@ export class CatalogService {
         return { item, score: score + popularityBonus };
       }
 
-      // Para items sin prefix match fuerte, aplicamos scoring por palabras
+      // Coincidencias por palabra (acumulativas) para el resto de candidatos.
+      // Usa conjuntos de palabras en vez de RegExp dinámico (evita el bug de escape
+      // y el SyntaxError con queries que contienen metacaracteres como "(").
+      const titleWords = new Set(titleLower.split(/\s+/));
+      const originalWords = new Set(originalTitleLower.split(/\s+/));
       for (const word of queryWords) {
         if (word.length < 2) continue;
-
-        // Patrón para coincidencia de palabra completa
-        const wholeWordRegexTitle = new RegExp(`(^|\\s)${word.replace(/[.*+?^${}()|[\\]\\/g, '\\$&')}(\\s|$)`, 'i');
-        const wholeWordRegexOriginal = new RegExp(`(^|\\s)${word.replace(/[.*+?^${}()|[\\]\\/g, '\\$&')}(\\s|$)`, 'i');
-
-        // Peso 80: Coincidencia de palabra completa en original_title (si no tiene score aún)
-        if (score < 80 && wholeWordRegexOriginal.test(originalTitleLower)) {
-          score += 80;
-        }
-        // Peso 50: Contiene la palabra completa en title
-        else if (score < 50 && wholeWordRegexTitle.test(titleLower)) {
-          score += 50;
-        }
-        // Peso 10: Prefijo débil (substring al inicio)
-        else if (score < 10 && (titleLower.includes(word) && titleLower.indexOf(word) === 0)) {
-          score += 10;
-        }
-        else if (score < 10 && (originalTitleLower.includes(word) && originalTitleLower.indexOf(word) === 0)) {
-          score += 10;
-        }
-        // Peso 5: Substring simple en title
-        else if (score < 5 && titleLower.includes(word)) {
-          score += 5;
-        }
-        // Peso 5: Substring simple en original_title
-        else if (score < 5 && originalTitleLower.includes(word)) {
-          score += 5;
-        }
-        // Peso 2: Coincidencia en aliases
-        else if (score < 2 && aliasesLower.some(alias => alias.includes(word))) {
-          score += 2;
-        }
-        // Peso 1: Coincidencia en overview/sinopsis (menor prioridad)
-        else if (overviewLower.includes(word)) {
-          score += 1;
-        }
+        if (titleWords.has(word)) score += 50;             // palabra completa en title
+        else if (originalWords.has(word)) score += 40;     // palabra completa en original_title
+        else if (titleLower.includes(word)) score += 10;   // substring en title
+        else if (originalTitleLower.includes(word)) score += 8;
+        else if (aliasesLower.some(a => a.includes(word))) score += 2;
+        else if (overviewLower.includes(word)) score += 1;
       }
 
-      // Bonus por rating/popularidad como desempate secundario (máximo 0.1 puntos)
-      const popularityBonus = (item.rating || 0) / 1000;
+      // Sin relevancia textual no se muestra (el rating por sí solo no basta para aparecer).
+      if (score <= 0) return { item, score: 0 };
+      // Desempate por rating, acotado a <= 0.01 para no cruzar de nivel.
+      const popularityBonus = Math.min(Math.max(item.rating || 0, 0), 10) / 1000;
 
       return { item, score: score + popularityBonus };
     });
@@ -649,20 +634,8 @@ export class CatalogService {
         // Enriquecer con metadatos oficiales completos de TMDB
         const enriched = await TmdbService.enrichMediaItem(targetItem);
 
-        // Herencia e inyección de servidores a episodios si es una serie
-        if (enriched.seasons && enriched.seasons.length > 0) {
-          const activeServers = sortServersBySourcePriority(enriched.servers || []);
-          for (const season of enriched.seasons) {
-            if (season.episodes) {
-              for (const ep of season.episodes) {
-                ep.servers = sortServersBySourcePriority(ep.servers && ep.servers.length > 0 ? ep.servers : activeServers);
-                if (ep.servers.length > 0) {
-                  ep.primary_stream = getPrimaryStream(ep.servers);
-                }
-              }
-            }
-          }
-        }
+        // Herencia de servidores a episodios si es una serie
+        this.inheritServersToEpisodes(enriched);
 
         return enriched;
       })

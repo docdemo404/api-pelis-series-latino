@@ -27,6 +27,9 @@ venv/
 .vscode/
 .idea/
 
+# Vercel
+.vercel/
+
 # Build outputs
 dist/
 build/

@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { SourceConfig } from './sourceManager';
+import { SourceConfig, DEFAULT_SOURCES } from '../config/sources';
 import { MediaOverride } from './overrideService';
 
 // ─── Credenciales desde variables de entorno (nunca hardcodeadas) ────────────
@@ -7,12 +7,6 @@ const VERCEL_TOKEN = () => process.env.VERCEL_API_TOKEN || '';
 const VERCEL_PROJECT_ID = () => process.env.VERCEL_PROJECT_ID || '';
 const VERCEL_TEAM_ID = () => process.env.VERCEL_TEAM_ID || '';
 const VERCEL_API = 'https://api.vercel.com';
-
-const DEFAULT_SOURCES: SourceConfig[] = [
-  { id: 'tioplus', name: 'TioPlus / PelisPlus Latino', enabled: true, priority: 1 },
-  { id: 'fuegocine', name: 'FuegoCine', enabled: true, priority: 2 },
-  { id: 'supabase', name: 'Base de Datos Supabase', enabled: true, priority: 3 }
-];
 
 // Cache en memoria (válido durante el proceso serverless)
 let cachedSources: SourceConfig[] | null = null;

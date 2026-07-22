@@ -9,6 +9,7 @@ import { RealScraperService } from '../src/services/realScraperService';
 import { SourceManager } from '../src/services/sourceManager';
 import { TmdbService } from '../src/services/tmdbService';
 import { OverrideService } from '../src/services/overrideService';
+import { USER_AGENT } from '../src/utils/httpClient';
 
 const app = express();
 app.use(cors());
@@ -928,7 +929,7 @@ app.get('/api/v1/stream/proxy', async (req: Request, res: Response, next: NextFu
 
     const range = req.headers.range;
     const originHeaders: Record<string, string> = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+      'User-Agent': USER_AGENT,
       'Referer': new URL(videoUrl).origin + '/',
       ...(range ? { 'Range': range } : {})
     };

@@ -3,15 +3,17 @@ import * as cheerio from 'cheerio';
 import { MediaItem, ServerOption, CastMember } from '../types';
 import { SourceManager } from './sourceManager';
 import { TmdbService } from './tmdbService';
+import { USER_AGENT, httpClient } from '../utils/httpClient';
 
 const BASE_URL = 'https://tioplus.app';
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+const UA = USER_AGENT;
 const TIMEOUT = 8000;
 
 function httpGet(url: string) {
-  return axios.get(url, {
+  // Usa el cliente compartido con keep-alive: reutiliza la conexión TCP/TLS a
+  // tioplus.app entre peticiones (homepage, búsqueda, detalle, /player), reduciendo latencia.
+  return httpClient.get(url, {
     headers: {
-      'User-Agent': UA,
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       'Accept-Language': 'es-ES,es;q=0.9',
       'Referer': BASE_URL,
@@ -578,7 +580,8 @@ export class RealScraperService {
         }
       }
 
-      // Para series/animes/doramas, auto-resolver los servidores del episodio 1 (S1:E1) para tener primary_stream y reproductores garantizados
+      // Para series/animes/doramas, resolver los servidores REALES del episodio 1 (S1:E1)
+      // como preview del título (primary_stream + reproductores garantizados en la portada).
       let primaryStream = isMovie ? servers[0] || undefined : undefined;
 
       if (!isMovie && seasons.length > 0 && (!tioplusUrl.includes('/season/') && !tioplusUrl.includes('/episode/'))) {
@@ -591,21 +594,13 @@ export class RealScraperService {
           if (epDetail && epDetail.servers && epDetail.servers.length > 0) {
             primaryStream = epDetail.servers[0];
             servers.push(...epDetail.servers);
+            // Asignar los enlaces reales SOLO al episodio 1 (el que realmente resolvimos).
+            // El resto de episodios se resuelve bajo demanda vía
+            // /series/:id/season/:s/episode/:e para no exponer enlaces incorrectos.
+            const firstEp = seasons[0]?.episodes?.[0];
+            if (firstEp) firstEp.servers = [...epDetail.servers];
           }
         } catch {}
-      }
-
-      // Inyectar los servidores activos a todos los episodios de todas las temporadas
-      if (!isMovie && servers.length > 0 && seasons.length > 0) {
-        for (const s of seasons) {
-          if (s.episodes) {
-            for (const ep of s.episodes) {
-              if (!ep.servers || ep.servers.length === 0) {
-                ep.servers = [...servers];
-              }
-            }
-          }
-        }
       }
 
       return {
@@ -646,23 +641,31 @@ export class RealScraperService {
    */
   static async scrapeEpisodeDetail(seriesSlug: string, season: number, episode: number) {
     const categories = ['serie', 'anime', 'dorama'];
-    for (const cat of categories) {
-      const episodeUrl = `${BASE_URL}/${cat}/${seriesSlug}/season/${season}/episode/${episode}`;
-      const detail = await this.scrapeDetail(episodeUrl);
-      if (detail && detail.servers && detail.servers.length > 0) {
-        const tmdbId = isNaN(Number(seriesSlug)) ? await TmdbService.getTmdbId(detail.title || seriesSlug, 'tvseries') : Number(seriesSlug);
-        return {
-          id: `${tmdbId}-${season}-${episode}`,
-          tmdb_id: tmdbId,
-          series_id: String(tmdbId),
-          season_number: season,
-          episode_number: episode,
-          primary_stream: detail.primary_stream,
-          servers: detail.servers || []
-        };
-      }
-    }
-    return null;
+    // Probar las 3 categorías EN PARALELO (antes era secuencial => hasta 3x la latencia).
+    // Las 2 categorías incorrectas devuelven 404 rápido; se conserva la prioridad serie>anime>dorama.
+    const settled = await Promise.allSettled(
+      categories.map(cat =>
+        this.scrapeDetail(`${BASE_URL}/${cat}/${seriesSlug}/season/${season}/episode/${episode}`)
+      )
+    );
+    const detail = settled
+      .map(r => (r.status === 'fulfilled' ? r.value : null))
+      .find(d => d && d.servers && d.servers.length > 0);
+
+    if (!detail) return null;
+
+    const tmdbId = isNaN(Number(seriesSlug))
+      ? await TmdbService.getTmdbId(detail.title || seriesSlug, 'tvseries')
+      : Number(seriesSlug);
+    return {
+      id: `${tmdbId}-${season}-${episode}`,
+      tmdb_id: tmdbId,
+      series_id: String(tmdbId),
+      season_number: season,
+      episode_number: episode,
+      primary_stream: detail.primary_stream,
+      servers: detail.servers || []
+    };
   }
 
   /**
