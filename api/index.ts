@@ -789,7 +789,8 @@ app.get(['/api/v1/search', '/api/v1/movies/search'], async (req: Request, res: R
     }
 
     const page = parseInt(req.query.page as string) || 1;
-    const limit = parseInt(req.query.limit as string) || 20;
+    // Límite por defecto aumentado a 25 resultados para mejor UX, con máximo de 50
+    const limit = Math.min(parseInt(req.query.limit as string) || 25, 50);
     const compact = req.query.compact === 'true';
 
     const results = await CatalogService.search(q);
