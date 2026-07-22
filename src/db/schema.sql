@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS media_items (
     type VARCHAR(20) NOT NULL CHECK (type IN ('movie', 'tvseries')),
     title VARCHAR(500) NOT NULL,
     original_title VARCHAR(500) NOT NULL,
+    title_normalized TEXT,
     aliases TEXT[] DEFAULT '{}',
     tagline TEXT,
     overview TEXT,
@@ -31,22 +32,14 @@ CREATE TABLE IF NOT EXISTS media_items (
 -- Desactivar RLS o permitir acceso de lectura/escritura público para la API
 ALTER TABLE media_items DISABLE ROW LEVEL SECURITY;
 
--- 2. Tabla de Servidores de Video y Enlaces
-CREATE TABLE IF NOT EXISTS video_servers (
-    id VARCHAR(255) PRIMARY KEY,
-    media_id VARCHAR(255) REFERENCES media_items(id) ON DELETE CASCADE,
-    name VARCHAR(100) NOT NULL,
-    quality VARCHAR(20) NOT NULL,
-    language VARCHAR(50) NOT NULL,
-    embed_url TEXT NOT NULL,
-    direct_stream TEXT,
-    status VARCHAR(20) DEFAULT 'online',
-    last_checked TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-
-ALTER TABLE video_servers DISABLE ROW LEVEL SECURITY;
-
--- 3. Índices de Búsqueda Instantánea (< 10ms)
+-- 2. Índices de Búsqueda Instantánea (< 10ms)
 CREATE INDEX IF NOT EXISTS idx_media_type ON media_items(type);
 CREATE INDEX IF NOT EXISTS idx_media_title ON media_items USING gin(to_tsvector('spanish', title));
 CREATE INDEX IF NOT EXISTS idx_media_aliases ON media_items USING gin(aliases);
+
+-- Búsqueda por PREFIJO en milisegundos (ilike 'q%' sobre título normalizado sin acentos,
+-- mantenido por scripts/refreshCatalog.ts). Ver src/db/migrations/001_search_prefix_index.sql
+CREATE INDEX IF NOT EXISTS idx_media_title_norm_prefix ON media_items (title_normalized text_pattern_ops);
+
+-- Orden por frescura para el getAll DB-first del catálogo
+CREATE INDEX IF NOT EXISTS idx_media_updated_at ON media_items (updated_at DESC);

@@ -1,4 +1,4 @@
-name: Automated Link Health Checker & Scraper
+name: Catalog Refresh & Pre-scrape a Supabase
 
 on:
   schedule:
@@ -7,7 +7,7 @@ on:
   workflow_dispatch: # Permite ejecución manual desde la interfaz de GitHub
 
 jobs:
-  health-check:
+  refresh-catalog:
     runs-on: ubuntu-latest
 
     steps:
@@ -23,7 +23,14 @@ jobs:
       - name: Instalar dependencias
         run: npm ci
 
-      - name: Ejecutar Verificación de Salud de Enlaces y Scraping
+      # Pre-scrapea el catálogo (homepage + últimos películas/series/animes) y lo
+      # persiste en Supabase. La API sirve búsqueda/listados desde la DB (DB-first)
+      # en milisegundos en lugar de scrapear dentro del request.
+      - name: Refrescar catálogo pre-scrapeado en Supabase
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
-        run: npx ts-node src/services/checkerService.ts
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          # Necesaria para escribir en media_items (la tabla tiene RLS activado)
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx ts-node scripts/refreshCatalog.ts

@@ -4,10 +4,11 @@ import { RealScraperService } from './realScraperService';
 import { TmdbService } from './tmdbService';
 import { sortServersBySourcePriority, getPrimaryStream } from './streamSorter';
 import { normalizeTitle } from '../utils/text';
+import { CacheStore } from '../cache/store';
 
-const searchCache = new Map<string, { timestamp: number; data: MediaItem[] }>();
-const getByIdCache = new Map<string, { timestamp: number; data: MediaItem }>();
-const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutos de caché en memoria
+// TTL del caché de catálogo/búsqueda. Con Redis (KV_REST_API_* / UPSTASH_*) las entradas
+// se comparten entre lambdas y sobreviven cold starts; sin Redis degrada a memoria local.
+const CACHE_TTL_SECONDS = 10 * 60;
 
 export class CatalogService {
   private static dedupeById(items: MediaItem[]): MediaItem[] {
@@ -25,8 +26,7 @@ export class CatalogService {
    * Limpia toda la caché en memoria de la API
    */
   static clearCache(): void {
-    searchCache.clear();
-    getByIdCache.clear();
+    CacheStore.clear();
   }
 
   /**
@@ -85,11 +85,30 @@ export class CatalogService {
    */
   static async getAll(): Promise<MediaItem[]> {
     const cacheKey = 'all_homepage';
-    const cached = searchCache.get(cacheKey);
-    if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
-      return cached.data;
-    }
+    const cached = await CacheStore.get<MediaItem[]>(cacheKey);
+    if (cached) return cached;
 
+    // 0. DB-FIRST: catálogo pre-scrapeado en background (scripts/refreshCatalog.ts).
+    //    Si Supabase tiene catálogo suficiente y fresco (< 24h), se sirve directo de la DB
+    //    (1 query) en lugar de lanzar 4 scrapes en vivo por cold start.
+    try {
+      const { data } = await supabase
+        .from('media_items')
+        .select('*')
+        .order('updated_at', { ascending: false })
+        .limit(200);
+      if (data && data.length >= 30) {
+        const newest = Date.parse(data[0].updated_at || '') || 0;
+        const isFresh = Date.now() - newest < 24 * 60 * 60 * 1000;
+        if (isFresh) {
+          const dbItems = data.map(this.mapDbItemToMediaItem);
+          await CacheStore.set(cacheKey, dbItems, CACHE_TTL_SECONDS);
+          return dbItems;
+        }
+      }
+    } catch {}
+
+    // 1. Scraping en vivo (fallback cuando la DB está vacía o desactualizada)
     const [homepageItems, latestMovies, latestSeries, latestAnimes] = await Promise.all([
       RealScraperService.scrapeHomepage(),
       RealScraperService.scrapeLatest('peliculas', 60),
@@ -109,10 +128,11 @@ export class CatalogService {
       for (const item of liveItems) {
         enrichedList.push(await TmdbService.enrichMediaItem(item));
       }
-      searchCache.set(cacheKey, { timestamp: Date.now(), data: enrichedList });
+      await CacheStore.set(cacheKey, enrichedList, CACHE_TTL_SECONDS);
       return enrichedList;
     }
 
+    // 2. Último recurso: lo que haya en Supabase aunque esté desactualizado
     try {
       const { data } = await supabase.from('media_items').select('*').limit(50);
       if (data && data.length > 0) {
@@ -121,7 +141,7 @@ export class CatalogService {
         for (const item of dbItems) {
           enrichedList.push(await TmdbService.enrichMediaItem(item));
         }
-        searchCache.set(cacheKey, { timestamp: Date.now(), data: enrichedList });
+        await CacheStore.set(cacheKey, enrichedList, CACHE_TTL_SECONDS);
         return enrichedList;
       }
     } catch (err) {}
@@ -136,11 +156,9 @@ export class CatalogService {
     const q = id.toLowerCase().trim();
     const cacheKey = typeHint ? `${q}:${typeHint}` : q;
 
-    // Verificación de caché en memoria
-    const cached = getByIdCache.get(cacheKey);
-    if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
-      return cached.data;
-    }
+    // Verificación de caché (compartida entre lambdas si hay Redis)
+    const cached = await CacheStore.get<MediaItem>(`byid:${cacheKey}`);
+    if (cached) return cached;
 
     let result: MediaItem | null = null;
 
@@ -374,13 +392,11 @@ export class CatalogService {
 
     // ÚNICAMENTE almacenar en caché si se encontraron servidores o temporadas válidas
     if (result && ((result.servers && result.servers.length > 0) || (result.seasons && result.seasons.length > 0))) {
-      getByIdCache.set(cacheKey, { timestamp: Date.now(), data: result });
-      getByIdCache.set(result.id, { timestamp: Date.now(), data: result });
-      getByIdCache.set(`${result.id}:${result.type}`, { timestamp: Date.now(), data: result });
+      const keys = [cacheKey, result.id, `${result.id}:${result.type}`];
       if (result.tmdb_id) {
-        getByIdCache.set(String(result.tmdb_id), { timestamp: Date.now(), data: result });
-        getByIdCache.set(`${result.tmdb_id}:${result.type}`, { timestamp: Date.now(), data: result });
+        keys.push(String(result.tmdb_id), `${result.tmdb_id}:${result.type}`);
       }
+      await Promise.all(keys.map(k => CacheStore.set(`byid:${k}`, result, CACHE_TTL_SECONDS)));
     }
 
     return result;
@@ -390,6 +406,36 @@ export class CatalogService {
    * Búsqueda en vivo con Caché en Memoria, Web Scraping y Unificación
    * Implementa ponderación por título, búsqueda por prefijos y ordenamiento por relevancia
    */
+  /**
+   * Pase local de PREFIJO sobre Supabase: ilike 'q%' con acentos normalizados.
+   * Usa la columna title_normalized (migración 001, índice text_pattern_ops => milisegundos)
+   * y cae a title si la columna aún no existe. Nunca lanza: si la DB no está poblada
+   * simplemente aporta 0 candidatos y la búsqueda sigue dependiendo del scraping.
+   */
+  private static async searchDbByPrefix(query: string, limit: number = 30): Promise<MediaItem[]> {
+    const nq = normalizeTitle(query).trim();
+    if (!nq) return [];
+    try {
+      const { data, error } = await supabase
+        .from('media_items')
+        .select('*')
+        .ilike('title_normalized', `${nq}%`)
+        .limit(limit);
+      // Si la columna existe (sin error), confiar en su resultado aunque venga vacío.
+      if (!error) return (data || []).map(this.mapDbItemToMediaItem);
+    } catch {}
+    try {
+      // Fallback: la columna title_normalized aún no existe en esta DB.
+      const { data } = await supabase
+        .from('media_items')
+        .select('*')
+        .ilike('title', `${nq}%`)
+        .limit(limit);
+      return (data || []).map(this.mapDbItemToMediaItem);
+    } catch {}
+    return [];
+  }
+
   static async search(query: string, maxResults: number = 25): Promise<MediaItem[]> {
     const q = query.toLowerCase().trim();
     if (!q) return [];
@@ -397,14 +443,18 @@ export class CatalogService {
     const normalizedMaxResults = Math.max(1, maxResults);
     const cacheKey = `search:${q}:${normalizedMaxResults}`;
 
-    // Verificación de caché en memoria
-    const cached = searchCache.get(cacheKey);
-    if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
-      return cached.data;
-    }
+    // Verificación de caché (compartida entre lambdas si hay Redis)
+    const cached = await CacheStore.get<MediaItem[]>(cacheKey);
+    if (cached) return cached;
 
-    // 1. Scraping en vivo de fuentes activas
-    const realScraped = await RealScraperService.scrapeRealMovies(q, normalizedMaxResults);
+    // 1. Scraping en vivo de fuentes activas + pase de PREFIJO local en Supabase, EN PARALELO.
+    //    El pase local garantiza que los títulos que EMPIEZAN con el término aparezcan
+    //    aunque la fuente scrapeada no los devuelva (aporta 0 si la DB está vacía).
+    const [realScraped, dbPrefixMatches] = await Promise.all([
+      RealScraperService.scrapeRealMovies(q, normalizedMaxResults),
+      this.searchDbByPrefix(q)
+    ]);
+    realScraped.push(...dbPrefixMatches);
 
     if (realScraped.length < normalizedMaxResults) {
       // Match del catálogo insensible a acentos (usa la utilidad compartida).
@@ -442,7 +492,7 @@ export class CatalogService {
     if (unified.length > 0) {
       unified = this.scoreAndSortResults(unified, q);
       const limited = unified.slice(0, normalizedMaxResults);
-      searchCache.set(cacheKey, { timestamp: Date.now(), data: limited });
+      await CacheStore.set(cacheKey, limited, CACHE_TTL_SECONDS);
       return limited;
     }
 

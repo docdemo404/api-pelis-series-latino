@@ -20,6 +20,10 @@
       "dest": "/public/index.html"
     },
     {
+      "src": "/panel",
+      "dest": "/public/panel.html"
+    },
+    {
       "src": "/(.*)",
       "dest": "/api/index.ts"
     }
