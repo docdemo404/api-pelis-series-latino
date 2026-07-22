@@ -1,3 +1,6 @@
+import fs from 'fs';
+import path from 'path';
+
 export interface SourceConfig {
   id: string; // 'tioplus' | 'fuegocine' | 'supabase'
   name: string;
@@ -5,11 +8,42 @@ export interface SourceConfig {
   priority: number;
 }
 
-let currentSources: SourceConfig[] = [
+const SOURCES_FILE = path.join(__dirname, '../data/sources.json');
+
+const DEFAULT_SOURCES: SourceConfig[] = [
   { id: 'tioplus', name: 'TioPlus / PelisPlus Latino', enabled: true, priority: 1 },
   { id: 'fuegocine', name: 'FuegoCine', enabled: true, priority: 2 },
   { id: 'supabase', name: 'Base de Datos Supabase', enabled: true, priority: 3 }
 ];
+
+let currentSources: SourceConfig[] = loadSources();
+
+function loadSources(): SourceConfig[] {
+  try {
+    if (fs.existsSync(SOURCES_FILE)) {
+      const content = fs.readFileSync(SOURCES_FILE, 'utf8');
+      const parsed = JSON.parse(content);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed.sort((a: any, b: any) => a.priority - b.priority);
+      }
+    }
+  } catch (err) {
+    console.warn('[SourceManager] Error leyendo sources.json:', err);
+  }
+  return DEFAULT_SOURCES;
+}
+
+function saveSources(sources: SourceConfig[]) {
+  try {
+    const dir = path.dirname(SOURCES_FILE);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(SOURCES_FILE, JSON.stringify(sources, null, 2), 'utf8');
+  } catch (err) {
+    console.warn('[SourceManager] Error guardando sources.json:', err);
+  }
+}
 
 export class SourceManager {
   /**
@@ -35,6 +69,7 @@ export class SourceManager {
       return existing;
     }).sort((a, b) => a.priority - b.priority);
 
+    saveSources(currentSources);
     return this.getSources();
   }
 

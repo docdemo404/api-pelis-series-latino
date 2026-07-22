@@ -1,6 +1,7 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { MediaItem, ContentType, CastMember } from '../types';
+import { OverrideService } from './overrideService';
 
 const API_KEY = '99b8bc99e85e79fabd52b64513c9780d';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
@@ -239,7 +240,7 @@ export class TmdbService {
 
       const canonicalId = (item.id && isNaN(Number(item.id))) ? item.id : String(tmdbData.id);
 
-      return {
+      const enrichedItem = {
         ...item,
         id: canonicalId,
         tmdb_id: tmdbData.id,
@@ -260,9 +261,67 @@ export class TmdbService {
         total_episodes: tmdbData.number_of_episodes || item.total_episodes,
         seasons: seasons.length > 0 ? seasons : item.seasons
       };
+
+      return OverrideService.applyOverridesToItem(enrichedItem);
     } catch (err: any) {
       console.warn(`[TMDB Enrich Error]: ${err.message}`);
-      return item;
+      return OverrideService.applyOverridesToItem(item);
+    }
+  }
+
+  /**
+   * Obtiene todas las imágenes/posters/backdrops alternativos de TMDB para un contenido
+   */
+  static async getTmdbImages(tmdbId: number, type: ContentType = 'movie'): Promise<{ posters: string[]; backdrops: string[] }> {
+    const endpoint = type === 'tvseries' ? 'tv' : 'movie';
+    const url = `https://api.themoviedb.org/3/${endpoint}/${tmdbId}/images?api_key=${API_KEY}&include_image_language=es,en,null`;
+
+    try {
+      const res = await axios.get(url, { timeout: 5000 });
+      const posters = (res.data?.posters || []).map((p: any) => `https://image.tmdb.org/t/p/w500${p.file_path}`);
+      const backdrops = (res.data?.backdrops || []).map((b: any) => `https://image.tmdb.org/t/p/w1280${b.file_path}`);
+      return { posters, backdrops };
+    } catch (err: any) {
+      console.warn(`[TMDB Images Error]: ${err.message}`);
+      return { posters: [], backdrops: [] };
+    }
+  }
+
+  /**
+   * Búsqueda multi en TMDB (películas y series) para el panel de administración
+   */
+  static async searchTmdbMulti(query: string): Promise<Array<{ tmdb_id: number; title: string; release_date: string; type: ContentType; poster: string | null; backdrop: string | null }>> {
+    const q = query.trim();
+    if (!q) return [];
+
+    try {
+      const res = await axios.get(`https://api.themoviedb.org/3/search/multi`, {
+        params: {
+          api_key: API_KEY,
+          query: q,
+          language: 'es-MX',
+          include_adult: false
+        },
+        timeout: 5000
+      });
+
+      const results = res.data?.results || [];
+      return results
+        .filter((item: any) => item.media_type === 'movie' || item.media_type === 'tv')
+        .slice(0, 10)
+        .map((item: any) => ({
+          tmdb_id: item.id,
+          title: item.title || item.name || '',
+          release_date: item.release_date || item.first_air_date || '',
+          type: item.media_type === 'tv' ? 'tvseries' as const : 'movie' as const,
+          poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
+          backdrop: item.backdrop_path ? `https://image.tmdb.org/t/p/w1280${item.backdrop_path}` : null,
+        }));
+    } catch (err: any) {
+      console.warn(`[TMDB Multi Search Error]: ${err.message}`);
+      return [];
     }
   }
 }
+
+

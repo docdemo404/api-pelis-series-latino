@@ -7,6 +7,8 @@ import { FeedService } from '../src/services/feedService';
 import { ResolverService } from '../src/services/resolverService';
 import { RealScraperService } from '../src/services/realScraperService';
 import { SourceManager } from '../src/services/sourceManager';
+import { TmdbService } from '../src/services/tmdbService';
+import { OverrideService } from '../src/services/overrideService';
 
 const app = express();
 app.use(cors());
@@ -193,6 +195,68 @@ app.get('/panel', (req: Request, res: Response) => {
           <div id="alertBox" class="mt-3"></div>
         </div>
 
+        <!-- Editor Visual de Portadas & Metadatos (TMDB Override) -->
+        <div class="card main-card p-4 p-md-5 mb-4">
+          <div class="d-flex align-items-center justify-content-between mb-3">
+            <div>
+              <h3 class="brand-title fw-bold m-0 text-info">🖼️ Editor de Portadas & Imágenes Alternativas (TMDB)</h3>
+              <p class="text-secondary small m-0 mt-1">Busca cualquier película o serie para elegir portadas/backdrops oficiales de TMDB o establecer una URL personalizada.</p>
+            </div>
+          </div>
+
+          <div class="input-group mb-4">
+            <input type="text" id="editorQuery" class="form-control bg-dark text-white border-secondary" placeholder="Buscar película o serie (ej: Scary Movie 6, Toy Story 5, Avatar)...">
+            <button class="btn btn-info fw-bold" type="button" id="editorSearchBtn">🔍 Buscar en TMDB</button>
+          </div>
+
+          <div id="editorSearchResults" class="mb-4" style="display: none;">
+            <h6 class="text-uppercase text-secondary fw-bold small mb-3">Selecciona un título para editar su portada:</h6>
+            <div id="mediaGrid" class="row g-3"></div>
+          </div>
+
+          <!-- Panel de Selección de Imágenes -->
+          <div id="imagePickerContainer" class="p-4 bg-dark border border-secondary rounded-3" style="display: none;">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+              <h5 class="fw-bold m-0 text-white" id="selectedTitleHeader">Personalizar Imágenes</h5>
+              <button type="button" class="btn btn-sm btn-outline-secondary" id="closePickerBtn">❌ Cerrar</button>
+            </div>
+
+            <div class="row g-4">
+              <!-- Vista previa actual -->
+              <div class="col-md-4">
+                <div class="card bg-slate-900 border border-secondary p-3 text-center">
+                  <h6 class="fw-bold text-secondary mb-2">Vista Previa Actual</h6>
+                  <img id="previewPoster" src="" class="img-fluid rounded-3 mb-2 shadow" style="max-height: 280px; object-fit: cover;">
+                  <div class="small text-truncate text-secondary mb-2" id="previewTitle"></div>
+                  <button type="button" id="resetOverrideBtn" class="btn btn-outline-danger btn-sm w-100 mb-2">🔄 Restablecer Portada Original</button>
+                </div>
+              </div>
+
+              <!-- Galería de Portadas Alternativas TMDB -->
+              <div class="col-md-8">
+                <h6 class="fw-bold text-info mb-2">Posters Alternativos en TMDB (Haz clic para seleccionar)</h6>
+                <div id="postersGallery" class="d-flex gap-2 overflow-auto pb-3 mb-3" style="max-height: 200px;"></div>
+
+                <h6 class="fw-bold text-info mb-2">FONDOS / Backdrops Alternativos</h6>
+                <div id="backdropsGallery" class="d-flex gap-2 overflow-auto pb-3 mb-3" style="max-height: 160px;"></div>
+
+                <div class="mb-3">
+                  <label class="form-label small text-secondary">URL de Poster Personalizada (Opcional):</label>
+                  <input type="text" id="customPosterUrl" class="form-control form-control-sm bg-dark text-white border-secondary" placeholder="https://...">
+                </div>
+
+                <div class="mb-3">
+                  <label class="form-label small text-secondary">URL de Backdrop Personalizada (Opcional):</label>
+                  <input type="text" id="customBackdropUrl" class="form-control form-control-sm bg-dark text-white border-secondary" placeholder="https://...">
+                </div>
+
+                <button type="button" id="saveOverrideBtn" class="btn btn-gradient w-100">💾 Aplicar Esta Portada / Backdrop</button>
+                <div id="overrideAlert" class="mt-2"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- Sandbox de Pruebas en Vivo -->
         <div class="card sandbox-card p-4">
           <h4 class="brand-title fw-bold text-warning mb-2">🧪 Probador de Unificación en Vivo</h4>
@@ -228,6 +292,26 @@ app.get('/panel', (req: Request, res: Response) => {
     const testCount = document.getElementById('testCount');
     const testStatus = document.getElementById('testStatus');
     const jsonPreview = document.getElementById('jsonPreview');
+
+    // Elementos del Editor de Medios
+    const editorQuery = document.getElementById('editorQuery');
+    const editorSearchBtn = document.getElementById('editorSearchBtn');
+    const editorSearchResults = document.getElementById('editorSearchResults');
+    const mediaGrid = document.getElementById('mediaGrid');
+    const imagePickerContainer = document.getElementById('imagePickerContainer');
+    const selectedTitleHeader = document.getElementById('selectedTitleHeader');
+    const closePickerBtn = document.getElementById('closePickerBtn');
+    const previewPoster = document.getElementById('previewPoster');
+    const previewTitle = document.getElementById('previewTitle');
+    const resetOverrideBtn = document.getElementById('resetOverrideBtn');
+    const postersGallery = document.getElementById('postersGallery');
+    const backdropsGallery = document.getElementById('backdropsGallery');
+    const customPosterUrl = document.getElementById('customPosterUrl');
+    const customBackdropUrl = document.getElementById('customBackdropUrl');
+    const saveOverrideBtn = document.getElementById('saveOverrideBtn');
+    const overrideAlert = document.getElementById('overrideAlert');
+
+    let activeMediaItem = null;
 
     function updateCardIndices() {
       const items = Array.from(list.children);
@@ -304,6 +388,182 @@ app.get('/panel', (req: Request, res: Response) => {
       }
     });
 
+    // --- Lógica del Editor de Medios ---
+    editorSearchBtn.addEventListener('click', async () => {
+      const q = editorQuery.value.trim();
+      if (!q) return;
+      editorSearchBtn.disabled = true;
+      editorSearchBtn.textContent = 'Cargando TMDB...';
+      editorSearchResults.style.display = 'block';
+      mediaGrid.innerHTML = '<div class="col-12 text-secondary">Buscando títulos en TMDB...</div>';
+
+      try {
+        const res = await fetch('/api/v1/panel/media/search?q=' + encodeURIComponent(q));
+        const json = await res.json();
+        editorSearchBtn.disabled = false;
+        editorSearchBtn.textContent = '🔍 Buscar en TMDB';
+
+        if (!json.results || json.results.length === 0) {
+          mediaGrid.innerHTML = '<div class="col-12 text-warning">No se encontraron resultados para la búsqueda.</div>';
+          return;
+        }
+
+        mediaGrid.innerHTML = json.results.map(function(item) {
+          var p = item.poster || 'https://via.placeholder.com/60x90';
+          var y = item.release_date ? item.release_date.substring(0,4) : '';
+          var t = (item.title || '').replace(/"/g, '&quot;');
+          return '<div class="col-md-6 col-lg-4">' +
+            '<div class="d-flex align-items-center gap-3 p-2 bg-dark border border-secondary rounded-3 h-100">' +
+              '<img src="' + p + '" class="rounded-2" style="width: 50px; height: 75px; object-fit: cover;">' +
+              '<div class="flex-grow-1 overflow-hidden">' +
+                '<h6 class="fw-bold text-white mb-1 text-truncate">' + item.title + '</h6>' +
+                '<div class="small text-secondary mb-2">' + y + ' • TMDB ID: ' + item.tmdb_id + '</div>' +
+                '<button type="button" class="btn btn-sm btn-info text-dark fw-bold btn-select-media" ' +
+                  'data-tmdb="' + item.tmdb_id + '" data-type="' + item.type + '" data-title="' + t + '" data-poster="' + p + '">' +
+                  '🖼️ Cambiar Portada' +
+                '</button>' +
+              '</div>' +
+            '</div>' +
+          '</div>';
+        }).join('');
+
+      } catch (err) {
+        editorSearchBtn.disabled = false;
+        editorSearchBtn.textContent = '🔍 Buscar en TMDB';
+        mediaGrid.innerHTML = '<div class="col-12 text-danger">Error de conexión con la API de TMDB.</div>';
+      }
+    });
+
+    mediaGrid.addEventListener('click', async (e) => {
+      const btn = e.target.closest('.btn-select-media');
+      if (!btn) return;
+
+      const tmdbId = btn.getAttribute('data-tmdb');
+      const type = btn.getAttribute('data-type');
+      const title = btn.getAttribute('data-title');
+      const poster = btn.getAttribute('data-poster');
+
+      activeMediaItem = { tmdb_id: tmdbId, type, title, poster };
+
+      selectedTitleHeader.textContent = 'Personalizar Portada: ' + title;
+      previewTitle.textContent = title;
+      previewPoster.src = poster || 'https://via.placeholder.com/200x300';
+      customPosterUrl.value = poster;
+      customBackdropUrl.value = '';
+      imagePickerContainer.style.display = 'block';
+      imagePickerContainer.scrollIntoView({ behavior: 'smooth' });
+
+      postersGallery.innerHTML = '<div class="text-secondary small">Cargando portadas de TMDB...</div>';
+      backdropsGallery.innerHTML = '<div class="text-secondary small">Cargando fondos de TMDB...</div>';
+
+      try {
+        const res = await fetch('/api/v1/panel/media/' + tmdbId + '/images?type=' + type);
+        const json = await res.json();
+
+        if (json.override) {
+          if (json.override.custom_poster) {
+            previewPoster.src = json.override.custom_poster;
+            customPosterUrl.value = json.override.custom_poster;
+          }
+          if (json.override.custom_backdrop) {
+            customBackdropUrl.value = json.override.custom_backdrop;
+          }
+        }
+
+        const posters = json.images?.posters || [];
+        const backdrops = json.images?.backdrops || [];
+
+        postersGallery.innerHTML = posters.length > 0
+          ? posters.map(function(url) {
+              return '<img src="' + url + '" class="rounded-2 img-thumbnail bg-dark border-secondary cursor-pointer btn-pick-poster" style="height: 120px; cursor: pointer; object-fit: cover;">';
+            }).join('')
+          : '<div class="text-secondary small">No hay portadas adicionales en TMDB.</div>';
+
+        backdropsGallery.innerHTML = backdrops.length > 0
+          ? backdrops.map(function(url) {
+              return '<img src="' + url + '" class="rounded-2 img-thumbnail bg-dark border-secondary cursor-pointer btn-pick-backdrop" style="height: 80px; width: 140px; cursor: pointer; object-fit: cover;">';
+            }).join('')
+          : '<div class="text-secondary small">No hay fondos adicionales en TMDB.</div>';
+
+      } catch (err) {
+        postersGallery.innerHTML = '<div class="text-danger small">Error cargando galería de TMDB.</div>';
+      }
+    });
+
+    closePickerBtn.addEventListener('click', () => {
+      imagePickerContainer.style.display = 'none';
+    });
+
+    postersGallery.addEventListener('click', (e) => {
+      if (e.target.classList.contains('btn-pick-poster')) {
+        const url = e.target.src;
+        customPosterUrl.value = url;
+        previewPoster.src = url;
+      }
+    });
+
+    backdropsGallery.addEventListener('click', (e) => {
+      if (e.target.classList.contains('btn-pick-backdrop')) {
+        const url = e.target.src;
+        customBackdropUrl.value = url;
+      }
+    });
+
+    saveOverrideBtn.addEventListener('click', async () => {
+      if (!activeMediaItem) return;
+
+      const posterVal = customPosterUrl.value.trim();
+      const backdropVal = customBackdropUrl.value.trim();
+
+      try {
+        saveOverrideBtn.disabled = true;
+        saveOverrideBtn.textContent = 'Guardando...';
+
+        const res = await fetch('/api/v1/panel/media/' + activeMediaItem.tmdb_id + '/override', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ custom_poster: posterVal, custom_backdrop: backdropVal })
+        });
+        const json = await res.json();
+        saveOverrideBtn.disabled = false;
+        saveOverrideBtn.textContent = '💾 Aplicar Esta Portada / Backdrop';
+
+        if (json.status === 'success') {
+          overrideAlert.innerHTML = '<div class="alert alert-success bg-dark border-success text-success p-2 small m-0 rounded-3">✅ Portada personalizada guardada exitosamente.</div>';
+          setTimeout(() => { overrideAlert.innerHTML = ''; }, 4000);
+        } else {
+          overrideAlert.innerHTML = '<div class="alert alert-danger p-2 small m-0">❌ Error guardando portada.</div>';
+        }
+      } catch (err) {
+        saveOverrideBtn.disabled = false;
+        saveOverrideBtn.textContent = '💾 Aplicar Esta Portada / Backdrop';
+        overrideAlert.innerHTML = '<div class="alert alert-danger p-2 small m-0">❌ Error de conexión.</div>';
+      }
+    });
+
+    resetOverrideBtn.addEventListener('click', async () => {
+      if (!activeMediaItem) return;
+
+      try {
+        resetOverrideBtn.disabled = true;
+        const res = await fetch('/api/v1/panel/media/' + activeMediaItem.tmdb_id + '/override', {
+          method: 'DELETE'
+        });
+        const json = await res.json();
+        resetOverrideBtn.disabled = false;
+
+        if (json.status === 'success') {
+          previewPoster.src = activeMediaItem.poster || 'https://via.placeholder.com/200x300';
+          customPosterUrl.value = activeMediaItem.poster || '';
+          customBackdropUrl.value = '';
+          overrideAlert.innerHTML = '<div class="alert alert-info bg-dark border-info text-info p-2 small m-0 rounded-3">🔄 Restablecido a la portada oficial original.</div>';
+          setTimeout(() => { overrideAlert.innerHTML = ''; }, 4000);
+        }
+      } catch (err) {
+        resetOverrideBtn.disabled = false;
+      }
+    });
+
     testBtn.addEventListener('click', async () => {
       const q = testQuery.value.trim();
       if (!q) return;
@@ -353,6 +613,48 @@ app.post('/api/v1/panel/sources', (req: Request, res: Response) => {
     message: 'Fuentes de catálogo y orden de prioridad actualizados con éxito',
     sources: updated
   });
+});
+
+// Buscar películas o series en TMDB para editar en el panel
+app.get('/api/v1/panel/media/search', async (req: Request, res: Response) => {
+  const q = String(req.query.q || '').trim();
+  if (!q) {
+    return res.status(400).json({ status: 'error', message: 'Se requiere parámetro "q"' });
+  }
+  const results = await TmdbService.searchTmdbMulti(q);
+  res.json({ status: 'success', count: results.length, results });
+});
+
+// Obtener todas las portadas y backdrops alternativos de TMDB para un tmdb_id
+app.get('/api/v1/panel/media/:tmdb_id/images', async (req: Request, res: Response) => {
+  const tmdbId = Number(req.params.tmdb_id);
+  const type = (req.query.type as any) === 'tvseries' ? 'tvseries' : 'movie';
+  if (isNaN(tmdbId) || tmdbId <= 0) {
+    return res.status(400).json({ status: 'error', message: 'tmdb_id inválido' });
+  }
+  const images = await TmdbService.getTmdbImages(tmdbId, type);
+  const currentOverride = OverrideService.getOverride(tmdbId);
+  res.json({ status: 'success', tmdb_id: tmdbId, override: currentOverride, images });
+});
+
+// Guardar portada/backdrop personalizada (Override)
+app.post('/api/v1/panel/media/:tmdb_id/override', (req: Request, res: Response) => {
+  const tmdbId = req.params.tmdb_id;
+  const { custom_poster, custom_backdrop, custom_title } = req.body;
+  const updated = OverrideService.setOverride(tmdbId, { custom_poster, custom_backdrop, custom_title });
+  res.json({ status: 'success', message: 'Portada/backdrop personalizada guardada con éxito', data: updated });
+});
+
+// Eliminar portada/backdrop personalizada
+app.delete('/api/v1/panel/media/:tmdb_id/override', (req: Request, res: Response) => {
+  const tmdbId = req.params.tmdb_id;
+  const removed = OverrideService.removeOverride(tmdbId);
+  res.json({ status: 'success', message: removed ? 'Override eliminado con éxito' : 'No había override para este ID' });
+});
+
+// Listar todos los overrides activos
+app.get('/api/v1/panel/overrides', (req: Request, res: Response) => {
+  res.json({ status: 'success', overrides: OverrideService.getAllOverrides() });
 });
 
 // Especificación OpenAPI 3.0 para Agentes de IA y Clientes Automatizados

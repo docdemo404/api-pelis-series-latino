@@ -57,6 +57,52 @@
         }
       }
     },
+    "/api/v1/panel/media/search": {
+      "get": {
+        "summary": "Buscar títulos en TMDB para edición",
+        "description": "Retorna coincidencia de películas y series en TMDB con sus TMDB IDs, posters y fechas para personalizar su portada.",
+        "parameters": [
+          { "name": "q", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Búsqueda en TMDB exitosa" }
+        }
+      }
+    },
+    "/api/v1/panel/media/{tmdb_id}/override": {
+      "post": {
+        "summary": "Establecer portada y backdrop personalizada",
+        "description": "Guarda una URL de poster o backdrop personalizada para sustituir la oficial de TMDB.",
+        "parameters": [
+          { "name": "tmdb_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "custom_poster": { "type": "string" },
+                  "custom_backdrop": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Override guardado exitosamente" }
+        }
+      },
+      "delete": {
+        "summary": "Restablecer portada y backdrop original",
+        "parameters": [
+          { "name": "tmdb_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Override eliminado exitosamente" }
+        }
+      }
+    },
     "/api/v1/search": {
       "get": {
         "summary": "Búsqueda general en tiempo real",
