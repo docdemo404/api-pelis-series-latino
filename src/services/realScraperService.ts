@@ -732,7 +732,8 @@ export class RealScraperService {
       }
     };
 
-    const activeSources = SourceManager.getSources().filter(s => s.enabled);
+    const sources = await SourceManager.getSourcesAsync();
+    const activeSources = sources.filter(s => s.enabled);
     const finalResults: MediaItem[] = [];
 
     for (const src of activeSources) {

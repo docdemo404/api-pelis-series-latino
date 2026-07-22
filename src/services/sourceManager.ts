@@ -14,32 +14,51 @@ const DEFAULT_SOURCES: SourceConfig[] = [
 ];
 
 let currentSources: SourceConfig[] = [...DEFAULT_SOURCES];
-let isInitialized = false;
-
-// Inicializar sincronización remota en segundo plano
-CloudStore.getSources().then(sources => {
-  if (sources && sources.length > 0) {
-    currentSources = sources;
-    isInitialized = true;
-  }
-}).catch(() => {});
 
 export class SourceManager {
   /**
-   * Obtiene las fuentes ordenadas por prioridad
+   * Obtiene las fuentes ordenadas por prioridad de forma asíncrona (sincronizando con la nube)
+   */
+  static async getSourcesAsync(): Promise<SourceConfig[]> {
+    try {
+      const cloudSources = await CloudStore.getSources();
+      if (Array.isArray(cloudSources) && cloudSources.length > 0) {
+        currentSources = cloudSources;
+      }
+    } catch (e) {}
+    return [...currentSources].sort((a, b) => a.priority - b.priority);
+  }
+
+  /**
+   * Obtiene las fuentes ordenadas por prioridad (versión sincrónica con memoria)
    */
   static getSources(): SourceConfig[] {
-    // Disparar sincronización silenciosa si no se ha inicializado
-    if (!isInitialized) {
-      CloudStore.getSources().then(s => {
-        if (s && s.length > 0) currentSources = s;
-      }).catch(() => {});
-    }
     return [...currentSources].sort((a, b) => a.priority - b.priority);
   }
 
   /**
    * Actualiza el estado y prioridad de las fuentes
+   */
+  static async updateSourcesAsync(newSources: Partial<SourceConfig>[]): Promise<SourceConfig[]> {
+    currentSources = currentSources.map(existing => {
+      const match = newSources.find(n => n.id === existing.id);
+      if (match) {
+        return {
+          ...existing,
+          enabled: typeof match.enabled === 'boolean' ? match.enabled : existing.enabled,
+          priority: typeof match.priority === 'number' ? match.priority : existing.priority
+        };
+      }
+      return existing;
+    }).sort((a, b) => a.priority - b.priority);
+
+    // Guardar asíncronamente en la nube
+    await CloudStore.saveSources(currentSources);
+    return this.getSources();
+  }
+
+  /**
+   * Actualiza síncronamente en memoria
    */
   static updateSources(newSources: Partial<SourceConfig>[]): SourceConfig[] {
     currentSources = currentSources.map(existing => {
@@ -54,11 +73,7 @@ export class SourceManager {
       return existing;
     }).sort((a, b) => a.priority - b.priority);
 
-    // Guardar en la nube y disco local
-    CloudStore.saveSources(currentSources).catch(err => {
-      console.warn('[SourceManager] Cloud save error:', err);
-    });
-
+    CloudStore.saveSources(currentSources).catch(() => {});
     return this.getSources();
   }
 

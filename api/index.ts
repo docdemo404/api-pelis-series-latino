@@ -48,8 +48,8 @@ function sendErrorResponse(res: Response, statusCode: number, code: string, mess
 app.use('/docs', express.static(path.join(__dirname, '../public')));
 
 // Panel de Control Interactivo de Fuentes (/panel y /api/v1/panel)
-app.get('/panel', (req: Request, res: Response) => {
-  const sources = SourceManager.getSources();
+app.get('/panel', async (req: Request, res: Response) => {
+  const sources = await SourceManager.getSourcesAsync();
   res.send(`<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -593,21 +593,22 @@ app.get('/panel', (req: Request, res: Response) => {
 });
 
 // Endpoint API para obtener estado del Panel y fuentes
-app.get('/api/v1/panel', (req: Request, res: Response) => {
+app.get('/api/v1/panel', async (req: Request, res: Response) => {
+  const sources = await SourceManager.getSourcesAsync();
   res.json({
     status: 'success',
-    sources: SourceManager.getSources()
+    sources
   });
 });
 
 // Endpoint API para actualizar fuentes y su orden de prioridad
-app.post('/api/v1/panel/sources', (req: Request, res: Response) => {
+app.post('/api/v1/panel/sources', async (req: Request, res: Response) => {
   const { sources } = req.body;
   if (!Array.isArray(sources)) {
     return res.status(400).json({ status: 'error', message: 'Se requiere un arreglo "sources"' });
   }
 
-  const updated = SourceManager.updateSources(sources);
+  const updated = await SourceManager.updateSourcesAsync(sources);
   res.json({
     status: 'success',
     message: 'Fuentes de catálogo y orden de prioridad actualizados con éxito',
