@@ -2,17 +2,20 @@
  * Job de pre-scrape del catálogo → Supabase (Fase 4.1 del plan de rendimiento).
  *
  * Corre en background (GitHub Actions, o manual):
- *   npm run refresh:catalog          # crawl COMPLETO del catálogo (miles de títulos)
- *   npm run refresh:catalog -- 20    # limitado (pruebas)
+ *   npm run refresh:catalog                    # crawl COMPLETO del catálogo (miles de títulos)
+ *   npm run refresh:catalog -- 20              # limitado (pruebas)
+ *   npm run refresh:catalog -- --streams=300   # además pre-resuelve enlaces del home
  *
  * Con la DB poblada, la API sirve listados (getAll DB-first) y el pase de prefijo
  * de búsqueda desde Postgres en milisegundos, sin scraping dentro del request.
+ * Con --streams, además, las fichas del home abren con los enlaces ya listos.
  */
 import 'dotenv/config';
 import { RealScraperService } from '../src/services/realScraperService';
+import { CatalogService } from '../src/services/catalogService';
 import { TmdbService } from '../src/services/tmdbService';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
-import { canonicalTitle, normalizeTitle } from '../src/utils/text';
+import { canonicalTitle, searchIndexKey } from '../src/utils/text';
 import { MediaItem } from '../src/types';
 
 // Con RLS activado en media_items, escribir requiere la SUPABASE_SERVICE_ROLE_KEY
@@ -31,7 +34,7 @@ async function hasColumn(column: string): Promise<boolean> {
   return !error;
 }
 
-function toRow(item: MediaItem, withNormalized: boolean, withMetadataSource: boolean) {
+function toRow(item: MediaItem, withNormalized: boolean, withMetadataSource: boolean, withRichMetadata: boolean) {
   const row: Record<string, unknown> = {
     id: item.id,
     tmdb_id: item.tmdb_id,
@@ -58,16 +61,105 @@ function toRow(item: MediaItem, withNormalized: boolean, withMetadataSource: boo
     updated_at: new Date().toISOString()
   };
   if (withNormalized) {
-    row.title_normalized = normalizeTitle(item.title).trim();
+    // Incluye título original y alias: así "vengadores" encuentra "Avengers 2: Era de Ultrón".
+    row.title_normalized = searchIndexKey(item.title, item.original_title, item.aliases);
   }
   if (withMetadataSource) {
     row.metadata_source = item.metadata_source || 'tmdb';
   }
+  if (withRichMetadata) {
+    row.runtime = item.runtime ?? null;
+    row.director = item.director || (item.created_by || []).join(', ') || null;
+    // URL exacta del detalle en la fuente: con ella la API resuelve los enlaces con UN
+    // solo scrapeDetail en vez de una búsqueda por título (migración 004).
+    row.source_url = (item as any)._tioplus_url || item._source_url || null;
+  }
   return row;
 }
 
+/** El upsert chocó contra el UNIQUE de tmdb_id: la película ya está, con otro id de fuente. */
+function isTmdbIdConflict(message: string): boolean {
+  return /duplicate key/i.test(message) && /tmdb_id/i.test(message);
+}
+
+/**
+ * La misma película existe en las DOS fuentes con slugs distintos, pero `tmdb_id` es UNIQUE,
+ * así que la segunda copia no puede insertarse. En vez de descartarla (eran ~2.000 títulos
+ * por crawl), se aprovecha para COMPLETAR la ficha que ya está: se rellenan solo los huecos
+ * (póster, sinopsis, duración, y sobre todo la url de origen si faltaba), sin pisar nunca
+ * datos buenos ni cambiar el id de la fila existente.
+ */
+async function mergeIntoExisting(row: Record<string, unknown>): Promise<boolean> {
+  const tmdbId = row.tmdb_id as number;
+  if (!tmdbId) return false;
+
+  const { data } = await db
+    .from('media_items')
+    .select('id,poster,backdrop,logo,overview,runtime,director,source_url,trailer')
+    .eq('tmdb_id', tmdbId)
+    .limit(1);
+
+  const existing = data && data[0];
+  if (!existing) return false;
+
+  const patch: Record<string, unknown> = {};
+  const fillIfEmpty = (field: string) => {
+    const current = (existing as any)[field];
+    const incoming = row[field];
+    const isEmpty = current === null || current === undefined || current === '';
+    if (isEmpty && incoming) patch[field] = incoming;
+  };
+
+  ['poster', 'backdrop', 'logo', 'overview', 'runtime', 'director', 'source_url', 'trailer'].forEach(fillIfEmpty);
+  if (Object.keys(patch).length === 0) return true; // nada que aportar: no es un fallo
+
+  const { error } = await db.from('media_items').update(patch).eq('id', existing.id);
+  return !error;
+}
+
+/**
+ * Pre-calentado de enlaces: resuelve los servidores de los títulos que alimentan el home
+ * y los deja persistidos, de modo que la primera persona que abra la ficha ya los
+ * encuentre listos (`streams.status: "ready"`) sin esperar a ningún scraping.
+ */
+async function prewarmStreams(items: MediaItem[], max: number): Promise<void> {
+  const targets = items.slice(0, max);
+  if (targets.length === 0) return;
+
+  console.log(`🔥 Pre-resolviendo enlaces de ${targets.length} títulos del home...`);
+  const CONCURRENCY = 8;
+  let ok = 0;
+
+  for (let i = 0; i < targets.length; i += CONCURRENCY) {
+    const chunk = targets.slice(i, i + CONCURRENCY);
+    const resolved = await Promise.all(
+      chunk.map(item =>
+        // deep: fusión multifuente completa. Aquí sí compensa el coste, porque se hace
+        // una vez al día y fuera del camino de ninguna request.
+        CatalogService.getStreams(item.id, item.type, { deep: true }).catch(() => null)
+      )
+    );
+    ok += resolved.filter(r => r && r.servers && r.servers.length > 0).length;
+  }
+
+  console.log(`   ${ok}/${targets.length} títulos con enlaces persistidos`);
+}
+
+/**
+ * `--streams` / `--streams=N`: cuántos títulos del home llevan sus enlaces pre-resueltos.
+ * Sin el flag no se pre-calienta nada (crawl igual de rápido que antes).
+ */
+function parseStreamsFlag(argv: string[]): number {
+  const flag = argv.find(a => a === '--streams' || a.startsWith('--streams='));
+  if (!flag) return 0;
+  const value = flag.includes('=') ? parseInt(flag.split('=')[1], 10) : NaN;
+  return Number.isFinite(value) && value > 0 ? value : 300;
+}
+
 async function main() {
-  const limitArg = parseInt(process.argv[2] || '', 10);
+  const positional = process.argv.slice(2).filter(a => !a.startsWith('--'));
+  const limitArg = parseInt(positional[0] || '', 10);
+  const streamsLimit = parseStreamsFlag(process.argv);
 
   console.log('🔎 Recolectando catálogo desde las fuentes...');
   let items = await collectCatalog();
@@ -144,10 +236,15 @@ async function main() {
   if (!withMetadataSource) {
     console.warn('   ⚠ Columna metadata_source ausente — ejecuta src/db/migrations/003_metadata_source.sql para auditar el origen de la metadata.');
   }
+  const withRichMetadata = await hasColumn('source_url');
+  if (!withRichMetadata) {
+    console.warn('   ⚠ Columnas source_url/runtime/director ausentes — ejecuta src/db/migrations/004_streams_and_rich_metadata.sql para fichas instantáneas.');
+  }
 
-  const rows = all.map(it => toRow(it, withNormalized, withMetadataSource));
+  const rows = all.map(it => toRow(it, withNormalized, withMetadataSource, withRichMetadata));
   let ok = 0;
   let fail = 0;
+  let mergedCount = 0;
   const BATCH = 50;
   for (let i = 0; i < rows.length; i += BATCH) {
     const chunk = rows.slice(i, i + BATCH);
@@ -159,16 +256,39 @@ async function main() {
     // Reintento fila a fila para aislar conflictos puntuales (p.ej. tmdb_id ya usado por otro id)
     for (const row of chunk) {
       const { error: rowError } = await db.from('media_items').upsert(row, { onConflict: 'id' });
-      if (rowError) {
-        fail++;
-        console.warn(`   ⚠ ${row.id}: ${rowError.message}`);
-      } else {
+      if (!rowError) {
         ok++;
+        continue;
       }
+
+      if (isTmdbIdConflict(rowError.message)) {
+        const merged = await mergeIntoExisting(row);
+        if (merged) {
+          mergedCount++;
+          continue;
+        }
+      }
+
+      fail++;
+      console.warn(`   ⚠ ${row.id}: ${rowError.message}`);
     }
   }
 
-  console.log(`✅ Refresh completado: ${ok} filas guardadas, ${fail} fallidas`);
+  console.log(
+    `✅ Refresh completado: ${ok} filas guardadas` +
+    (mergedCount > 0 ? `, ${mergedCount} fusionadas con la ficha existente` : '') +
+    `, ${fail} fallidas`
+  );
+
+  if (streamsLimit > 0) {
+    if (!withRichMetadata) {
+      console.warn('   ⚠ Sin la migración 004 los enlaces no se pueden persistir: se omite el pre-calentado.');
+    } else {
+      // El orden de `all` es el mismo que alimenta el home (frescura), así que los
+      // primeros N son justo los que más se van a abrir.
+      await prewarmStreams(all, streamsLimit);
+    }
+  }
 }
 
 main()

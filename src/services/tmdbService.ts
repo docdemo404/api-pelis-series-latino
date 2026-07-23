@@ -28,12 +28,22 @@ const CONFIDENT_SCORE = 0.9;
 const LEAD_NOISE = /^(ver|descargar|pelicula|película|serie|anime)\s+/i;
 const TAIL_NOISE = /\s+(online|gratis|completa|hd|full\s*hd|4k|1080p|720p|480p|latino|castellano|subtitulado|sub\s*espa(n|ñ)ol|audio\s*latino|espa(n|ñ)ol\s*latino|en\s*espa(n|ñ)ol|mega|torrent)$/i;
 
+// Coletillas de "pack" que las fuentes añaden a las series y que TMDB no reconoce:
+// con ellas dentro, /search devuelve CERO resultados ("Gen V Todas Las Temporadas" → vacío).
+const PACK_NOISE = /\b(todas\s+las\s+temporadas?|temporadas?\s+completas?|serie\s+completa|saga\s+completa|coleccion\s+completa|colección\s+completa|todos\s+los\s+capitulos|todos\s+los\s+capítulos)\b/gi;
+
+// Artículo inicial en español. TMDB indexa "Vengadores: La era de Ultrón", así que buscar
+// "LOS Vengadores…" no devuelve nada y el único resultado acaba siendo una parodia.
+const LEADING_ARTICLE = /^(los|las|el|la|un|una|unos|unas)\s+/i;
+
 /** Limpia un título de listado para buscarlo en TMDB (sin año, sin ruido, sin temporada). */
 function cleanForSearch(title: string): string {
   let t = (title || '')
     .replace(/\s*\(\d{4}\)\s*$/, '')
     .replace(/\[[^\]]*\]/g, '')
+    .replace(PACK_NOISE, ' ')
     .replace(/\b(temporada|season|capitulo|capítulo|episodio)\s*\d+\b/gi, '')
+    .replace(/\s{2,}/g, ' ')
     .trim();
 
   t = t.replace(/^gru\s*(\d+)\s*/i, 'Mi villano favorito $1 ');
@@ -45,6 +55,94 @@ function cleanForSearch(title: string): string {
   }
 
   return t || title.trim();
+}
+
+/**
+ * Variantes de consulta para el mismo título, de la más literal a la más laxa.
+ * El buscador de TMDB es sensible a artículos y puntuación: si la forma exacta no
+ * devuelve nada, estas reescrituras son las que encuentran la ficha correcta.
+ */
+function queryVariants(cleanTitle: string): string[] {
+  const variants = [cleanTitle];
+
+  const noArticle = cleanTitle.replace(LEADING_ARTICLE, '').trim();
+  if (noArticle && noArticle !== cleanTitle) variants.push(noArticle);
+
+  // Sin puntuación: "Vengadores: Era de Ultrón" → "Vengadores Era de Ultrón".
+  const noPunct = noArticle.replace(/[:;,\-–—_]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+  if (noPunct && !variants.includes(noPunct)) variants.push(noPunct);
+
+  return variants;
+}
+
+/**
+ * Logo del título (arte tipográfico) para el hero estilo Netflix/Prime.
+ * Prioriza el logo en español, luego inglés, luego el que no declara idioma.
+ */
+function pickLogo(tmdbData: any): string | null {
+  const logos: any[] = tmdbData?.images?.logos || [];
+  if (logos.length === 0) return null;
+  const byLang = (lang: string | null) => logos.find(l => l.iso_639_1 === lang && l.file_path);
+  const chosen = byLang('es') || byLang('en') || byLang(null) || logos[0];
+  return chosen?.file_path ? `https://image.tmdb.org/t/p/w500${chosen.file_path}` : null;
+}
+
+/** Duración en minutos: `runtime` en películas, media del episodio en series. */
+function pickRuntime(tmdbData: any): number | undefined {
+  if (typeof tmdbData?.runtime === 'number' && tmdbData.runtime > 0) return tmdbData.runtime;
+  const epRuntime = Array.isArray(tmdbData?.episode_run_time) ? tmdbData.episode_run_time[0] : undefined;
+  return typeof epRuntime === 'number' && epRuntime > 0 ? epRuntime : undefined;
+}
+
+/**
+ * Clasificación por edades REAL (antes se emitía siempre 'PG-13' hardcodeado).
+ * Prioriza los mercados hispanohablantes y cae a US, que es el que TMDB tiene
+ * cubierto de forma más consistente.
+ */
+function pickContentRating(tmdbData: any): string | undefined {
+  const preferred = ['MX', 'AR', 'CL', 'ES', 'CO', 'US'];
+
+  // Series: content_ratings.results = [{ iso_3166_1, rating }]
+  const tvResults: any[] = tmdbData?.content_ratings?.results || [];
+  if (tvResults.length > 0) {
+    for (const country of preferred) {
+      const hit = tvResults.find(r => r.iso_3166_1 === country && r.rating);
+      if (hit) return hit.rating;
+    }
+    const any = tvResults.find(r => r.rating);
+    if (any) return any.rating;
+  }
+
+  // Películas: release_dates.results = [{ iso_3166_1, release_dates: [{ certification }] }]
+  const movieResults: any[] = tmdbData?.release_dates?.results || [];
+  if (movieResults.length > 0) {
+    const certOf = (entry: any) => (entry?.release_dates || []).map((d: any) => d.certification).find((c: string) => c);
+    for (const country of preferred) {
+      const hit = movieResults.find(r => r.iso_3166_1 === country);
+      const cert = certOf(hit);
+      if (cert) return cert;
+    }
+    for (const entry of movieResults) {
+      const cert = certOf(entry);
+      if (cert) return cert;
+    }
+  }
+
+  return undefined;
+}
+
+/** Director (películas) tomado del equipo técnico. */
+function pickDirector(tmdbData: any): string | undefined {
+  const crew: any[] = tmdbData?.credits?.crew || [];
+  const director = crew.find(c => c.job === 'Director');
+  return director?.name || undefined;
+}
+
+/** Creadores (series). */
+function pickCreators(tmdbData: any): string[] | undefined {
+  const creators: any[] = tmdbData?.created_by || [];
+  const names = creators.map(c => c.name).filter(Boolean);
+  return names.length > 0 ? names : undefined;
 }
 
 /** Similitud 0..1 entre dos títulos: exacto > prefijo > substring > solapamiento de palabras. */
@@ -60,8 +158,21 @@ function similarity(a: string, b: string): number {
   const ta = tokens(a);
   const tb = tokens(b);
   if (!ta.size || !tb.size) return 0;
+
   let inter = 0;
-  ta.forEach(t => { if (tb.has(t)) inter++; });
+  let alphaInter = 0;
+  ta.forEach(t => {
+    if (!tb.has(t)) return;
+    inter++;
+    if (/[a-z]/.test(t)) alphaInter++;
+  });
+
+  // Los títulos en alfabetos no latinos se quedan sin letras al normalizar ("영구람보 3" → "3"),
+  // así que empataban por el NÚMERO con títulos como "Rambo 3" y ganaban al original.
+  // Si ambos lados tienen palabras y no comparten ninguna, la coincidencia no vale.
+  const hasAlpha = (t: Set<string>) => Array.from(t).some(x => /[a-z]/.test(x));
+  if (alphaInter === 0 && hasAlpha(ta) && hasAlpha(tb)) return 0;
+
   return (2 * inter) / (ta.size + tb.size);
 }
 
@@ -118,13 +229,22 @@ export class TmdbService {
         .filter((r: any) => endpoint !== 'multi' || r.media_type === 'movie' || r.media_type === 'tv');
       if (!results.length) return null;
 
-      // Ante empate de similitud (p. ej. anime original vs. remake homónimo) gana el más popular.
-      let best: { id: number; score: number; popularity: number } | null = null;
+      // Ante similitud MUY parecida (p. ej. anime original vs. remake homónimo, o una
+      // parodia con nombre casi idéntico al original) gana la ficha con respaldo real de
+      // público: la parodia "Vengadores Chiflados" tiene 1 voto frente a los 24.000 del
+      // título auténtico. Se compara con margen, no solo en el empate exacto.
+      const TIE_MARGIN = 0.06;
+      const credibility = (r: any) => (r.vote_count || 0) * 1000 + (r.popularity || 0);
+
+      let best: { id: number; score: number; credibility: number } | null = null;
       for (const r of results.slice(0, 10)) {
         const score = scoreResult(r, query, year);
-        const popularity = r.popularity || 0;
-        if (!best || score > best.score || (score === best.score && popularity > best.popularity)) {
-          best = { id: r.id, score, popularity };
+        const cred = credibility(r);
+        const beatsBest = !best
+          || score > best.score + TIE_MARGIN
+          || (Math.abs(score - best.score) <= TIE_MARGIN && cred > best.credibility);
+        if (beatsBest) {
+          best = { id: r.id, score, credibility: cred };
         }
       }
       return best;
@@ -166,12 +286,16 @@ export class TmdbService {
       return bestScore >= CONFIDENT_SCORE;
     };
 
-    if (!consider(year ? await this.searchScored(endpoint, cleanTitle, year) : null)) {
-      if (!consider(await this.searchScored(endpoint, cleanTitle))) {
-        if (!consider(await this.searchScored(opposite, cleanTitle))) {
-          consider(await this.searchScored('multi', cleanTitle));
-        }
-      }
+    // Cada variante de la consulta recorre la misma escalera. Se para en cuanto el match
+    // es inequívoco, así que para los títulos "normales" el coste no cambia: la primera
+    // variante es el título limpio de siempre.
+    for (const variant of queryVariants(cleanTitle)) {
+      if (consider(year ? await this.searchScored(endpoint, variant, year) : null)) break;
+      if (consider(await this.searchScored(endpoint, variant))) break;
+      if (consider(await this.searchScored(opposite, variant))) break;
+      if (consider(await this.searchScored('multi', variant))) break;
+      // Con un match ya aceptable no merece la pena seguir reescribiendo la consulta.
+      if (bestScore >= MATCH_THRESHOLD) break;
     }
 
     // Fallback a scraping del buscador de TMDB (útil cuando la API limita por rate),
@@ -221,7 +345,14 @@ export class TmdbService {
       // Peticiones paralelas en una sola ida y vuelta de red (sub-300ms)
       const [primaryRes, fallbackEsRes, fallbackVidRes] = await Promise.allSettled([
         axios.get(`https://api.themoviedb.org/3/${endpoint}/${tmdbId}`, {
-          params: { api_key: API_KEY, language: 'es-MX', append_to_response: 'credits,videos' },
+          params: {
+            api_key: API_KEY,
+            language: 'es-MX',
+            // images → logo del título (arte para el hero estilo Netflix)
+            // release_dates / content_ratings → clasificación por edades real
+            append_to_response: `credits,videos,images,${endpoint === 'tv' ? 'content_ratings' : 'release_dates'}`,
+            include_image_language: 'es,en,null'
+          },
           timeout: 2500
         }),
         axios.get(`https://api.themoviedb.org/3/${endpoint}/${tmdbId}`, {
@@ -391,9 +522,14 @@ export class TmdbService {
         genres: genres.length > 0 ? genres : item.genres,
         poster: tmdbData.poster_path ? `https://image.tmdb.org/t/p/w500${tmdbData.poster_path}` : item.poster,
         backdrop: tmdbData.backdrop_path ? `https://image.tmdb.org/t/p/w1280${tmdbData.backdrop_path}` : item.backdrop,
+        logo: pickLogo(tmdbData) || item.logo,
         trailer: trailerUrl,
         cast: castNames,
         cast_details: castMembers.length > 0 ? castMembers : item.cast_details,
+        runtime: pickRuntime(tmdbData) ?? item.runtime,
+        content_rating: pickContentRating(tmdbData) || item.content_rating,
+        director: pickDirector(tmdbData) || item.director,
+        created_by: pickCreators(tmdbData) || item.created_by,
         total_seasons: tmdbData.number_of_seasons || item.total_seasons,
         total_episodes: tmdbData.number_of_episodes || item.total_episodes,
         seasons: seasons.length > 0 ? seasons : item.seasons,

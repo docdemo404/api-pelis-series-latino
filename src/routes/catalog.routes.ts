@@ -28,6 +28,7 @@ router.get('/api/v1', (_req: Request, res: Response) => {
       '/api/v1/openapi.json',
       '/api/v1/feeds/home?country=CL',
       '/api/v1/media/scary-movie-6',
+      '/api/v1/media/scary-movie-6/streams',
       '/api/v1/series/naruto/season/1/episode/1',
       '/api/v1/stream/resolve?id=srv_101'
     ]
@@ -45,10 +46,22 @@ router.all(['/api/v1/revalidate', '/api/v1/cache/clear'], (_req: Request, res: R
 });
 
 // Alias Estándar para Feed Home (/home y /feeds/home)
+//
+// Devuelve el catálogo de inicio completo: hero rotatorio (`spotlight`) + ~15 carruseles
+// temáticos. Las tarjetas llevan la metadata completa (sinopsis, logo, duración,
+// clasificación, tráiler) para que la ficha emergente del cliente se pinte sin más
+// peticiones; los enlaces se piden aparte en /api/v1/media/:id/streams.
+//   ?detail=card|compact  → tarjeta con metadata (por defecto) o payload compacto
+//   ?rows=id1,id2         → solo esas filas (carga por lotes)
+//   ?limit=20             → ítems por carrusel (máx. 40)
 router.get(['/api/v1/home', '/api/v1/feeds/home'], async (req: Request, res: Response, next: NextFunction) => {
   try {
     const country = (req.query.country as string) || 'CL';
-    const feed = await FeedService.getHomeFeed(country);
+    const detail = (req.query.detail as string) === 'compact' ? 'compact' : 'card';
+    const { limit } = getPaginationParams(req, 20, 40);
+    const rows = String(req.query.rows || '').split(',').map(r => r.trim()).filter(Boolean);
+
+    const feed = await FeedService.getHomeFeed(country, { detail, limit, rows });
     res.json({ status: 'success', data: feed });
   } catch (err) {
     next(err);
@@ -106,7 +119,9 @@ router.get('/api/v1/discover', async (req: Request, res: Response, next: NextFun
   }
 });
 
-// Consulta en Lote (Batching Request) — debe registrarse antes que /media/:id
+// Consulta en Lote (Batching Request) — debe registrarse antes que /media/:id.
+// Usa el camino rápido de metadata (sin resolver enlaces), así que prefetchear una fila
+// entera del home sigue siendo barato.
 router.get('/api/v1/media/batch', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const rawIds = (req.query.ids as string) || '';
@@ -116,7 +131,9 @@ router.get('/api/v1/media/batch', async (req: Request, res: Response, next: Next
     }
     const results = await CatalogService.getBatch(ids);
     const compact = req.query.compact === 'true';
-    const finalItems = compact ? results.map(CatalogService.toCompactItem) : results;
+    const finalItems = compact
+      ? results.map(CatalogService.toCompactItem)
+      : results.map(item => CatalogService.toPublicItem(item));
     res.json({ status: 'success', count: finalItems.length, data: finalItems });
   } catch (err) {
     next(err);

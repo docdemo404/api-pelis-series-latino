@@ -102,6 +102,22 @@ function getWordStems(word: string): string[] {
   return Array.from(stems);
 }
 
+/**
+ * Título de una tarjeta de listado de TioPlus, probando todas las variantes de markup.
+ *
+ * El sitio dejó de rellenar `.title_over span` (hoy viene VACÍO en todos los listados) y
+ * pasó a `h2`/`h3`. Como ese era el único selector que se consultaba, los listados de
+ * películas, series y animes devolvían cero títulos y el catálogo acabó alimentándose
+ * solo de FuegoCine. Se consulta en cascada y se cae al `alt` de la imagen.
+ */
+function extractCardTitle($el: cheerio.Cheerio<any>): string {
+  const fromMarkup = $el.find('.title_over span, h2, h3, .title').first().text().trim();
+  if (fromMarkup) return fromMarkup;
+
+  const alt = $el.find('img').first().attr('alt') || '';
+  return alt.replace(/^Ver\s+/i, '').trim();
+}
+
 export class RealScraperService {
   /**
    * Scrapea el homepage completo de TioPlus (slider + secciones)
@@ -168,7 +184,7 @@ export class RealScraperService {
         const href = linkEl.attr('href') || '';
         const imgEl = $el.find('img').first();
         const poster = imgEl.attr('data-src') || imgEl.attr('src') || null;
-        const titleText = $el.find('.title_over span').first().text().trim();
+        const titleText = extractCardTitle($el);
 
         if (!href || !titleText) return;
 
@@ -528,7 +544,7 @@ export class RealScraperService {
             rating: 0,
             release_date: year,
             genres: [],
-            subcategories: ['Latino HD'],
+            subcategories: href.includes('/anime/') ? ['Latino HD', 'Anime'] : ['Latino HD'],
             poster: poster && !poster.includes('placeholder') ? poster : null,
             backdrop: null,
             logo: null,
@@ -885,7 +901,10 @@ export class RealScraperService {
     const maxPages = Math.max(1, Math.ceil(limit / 10) + 2);
 
     for (let page = 1; items.length < limit && page <= maxPages; page++) {
-      const url = page === 1 ? `${BASE_URL}/${type}` : `${BASE_URL}/${type}/page/${page}`;
+      // La paginación real del sitio es /peliculas/2, /peliculas/3… El patrón /page/2 que
+      // se usaba antes devuelve 404 (y ?page=2 responde 200 pero repite la primera página),
+      // así que el crawl se quedaba SIEMPRE en los 24 títulos de la portada de cada categoría.
+      const url = page === 1 ? `${BASE_URL}/${type}` : `${BASE_URL}/${type}/${page}`;
 
       try {
         const res = await httpGet(url);
@@ -900,7 +919,7 @@ export class RealScraperService {
           const href = linkEl.attr('href') || '';
           const imgEl = $el.find('img').first();
           const poster = imgEl.attr('data-src') || imgEl.attr('src') || null;
-          const titleText = $el.find('.title_over span').first().text().trim();
+          const titleText = extractCardTitle($el);
 
           if (!href || !titleText) return;
 
@@ -926,7 +945,10 @@ export class RealScraperService {
             rating: 0,
             release_date: year,
             genres: [],
-            subcategories: ['Latino HD'],
+            // La categoría de origen se conserva como subcategoría: es el único dato que
+            // distingue el anime del resto de series (TMDB no lo marca) y con él el home
+            // puede armar su carrusel de anime.
+            subcategories: type === 'animes' ? ['Latino HD', 'Anime'] : ['Latino HD'],
             poster: poster && !poster.includes('placeholder') ? poster : null,
             backdrop: null,
             logo: null,

@@ -219,13 +219,37 @@
     },
     "/api/v1/media/{id}": {
       "get": {
-        "summary": "Obtener detalle por Slug o ID",
+        "summary": "Obtener detalle por Slug o ID (metadata instantánea)",
+        "description": "Devuelve la ficha completa (sinopsis, imágenes, reparto, temporadas) desde la base de datos o la caché, sin esperar a la resolución de enlaces. El bloque `streams` indica si los servidores ya están listos o dónde pedirlos (`GET /api/v1/media/{id}/streams`), lo que permite abrir una ficha emergente al instante y resolver la reproducción solo cuando el usuario pulsa Reproducir. Usa `streams=wait` para el comportamiento bloqueante clásico (metadata + servidores en una sola respuesta).",
         "parameters": [
           {
             "name": "id",
             "in": "path",
             "required": true,
             "description": "Slug o ID del contenido (ej. scary-movie-6, la-casa-del-dragon)",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "streams",
+            "in": "query",
+            "required": false,
+            "description": "wait | true | 1 → espera a que los servidores estén resueltos y los incluye en la respuesta (más lento). Por defecto la respuesta es instantánea y `streams.status` vale 'pending'.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "wait",
+                "true",
+                "1"
+              ]
+            }
+          },
+          {
+            "name": "include",
+            "in": "query",
+            "required": false,
+            "description": "season_1 | first_season → adjunta el primer episodio resuelto. streams → alias legacy de streams=wait.",
             "schema": {
               "type": "string"
             }
@@ -238,6 +262,124 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/MediaItemResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/media/{id}/streams": {
+      "get": {
+        "summary": "Resolver los enlaces reproducibles de un título",
+        "description": "Camino lento aislado: resuelve los servidores del título (desde los enlaces persistidos si tienen menos de 24 h, si no scrapeando la fuente) y los guarda para las siguientes consultas. Pensado para llamarse al pulsar Reproducir, con la ficha ya pintada.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Slug o ID del contenido",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "deep",
+            "in": "query",
+            "required": false,
+            "description": "1 | true → fuerza la fusión multifuente completa (TioPlus + FuegoCine). Más lento; devuelve el máximo de servidores disponibles.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1",
+                "true"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Enlaces resueltos con éxito",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StreamsResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "El contenido solicitado no existe o no está disponible"
+          }
+        }
+      }
+    },
+    "/api/v1/series/{id}": {
+      "get": {
+        "summary": "Obtener detalle de una serie (metadata instantánea)",
+        "description": "Igual que /api/v1/media/{id} pero forzando el tipo serie: incluye temporadas y episodios. Los enlaces se piden en /api/v1/series/{id}/streams o por episodio.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Slug o ID de la serie",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "streams",
+            "in": "query",
+            "required": false,
+            "description": "wait | true | 1 → espera a la resolución de servidores.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Detalle obtenido con éxito",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MediaItemResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/series/{id}/streams": {
+      "get": {
+        "summary": "Resolver los enlaces reproducibles de una serie",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "deep",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Enlaces resueltos con éxito",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StreamsResponse"
                 }
               }
             }
@@ -330,17 +472,8 @@
     },
     "/api/v1/home": {
       "get": {
-        "summary": "Obtener feed principal estilo Netflix (Alias)",
-        "responses": {
-          "200": {
-            "description": "Feed obtenido con éxito"
-          }
-        }
-      }
-    },
-    "/api/v1/feeds/home": {
-      "get": {
-        "summary": "Obtener feed principal estilo Netflix",
+        "summary": "Obtener el catálogo de inicio estilo Netflix (alias de /api/v1/feeds/home)",
+        "description": "Mismo contrato y mismos parámetros que /api/v1/feeds/home.",
         "parameters": [
           {
             "name": "country",
@@ -350,11 +483,113 @@
               "type": "string",
               "default": "CL"
             }
+          },
+          {
+            "name": "detail",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "card",
+                "compact"
+              ],
+              "default": "card"
+            }
+          },
+          {
+            "name": "rows",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "maximum": 40
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "Feed obtenido con éxito"
+            "description": "Feed obtenido con éxito",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HomeFeedResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/feeds/home": {
+      "get": {
+        "summary": "Obtener el catálogo de inicio estilo Netflix",
+        "description": "Devuelve el hero rotatorio (`spotlight`, hasta 5 títulos con ficha completa) y alrededor de 15 carruseles temáticos (Top 10 del país, novedades, películas, series, mejor valoradas, anime, acción, comedia, terror, ciencia ficción, animación, drama, romance, aventura, crimen, documentales y clásicos). Cada fila se omite si no reúne al menos 8 títulos, de modo que nunca se publica un carrusel a medias.\n\nLas tarjetas viajan con la metadata completa (sinopsis, tagline, logo, duración, clasificación por edades, géneros, tráiler y número de temporadas), por lo que un cliente puede abrir su ficha emergente SIN ninguna petición adicional; solo los enlaces de reproducción se resuelven aparte en `/api/v1/media/{id}/streams`.",
+        "parameters": [
+          {
+            "name": "country",
+            "in": "query",
+            "required": false,
+            "description": "Código ISO del país, usado en el titular del Top 10.",
+            "schema": {
+              "type": "string",
+              "default": "CL"
+            }
+          },
+          {
+            "name": "detail",
+            "in": "query",
+            "required": false,
+            "description": "card (por defecto) → tarjetas con metadata completa. compact → proyección compacta clásica, payload mínimo.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "card",
+                "compact"
+              ],
+              "default": "card"
+            }
+          },
+          {
+            "name": "rows",
+            "in": "query",
+            "required": false,
+            "description": "Lista separada por comas de ids de fila (ej. action,anime,top_10_cl). Devuelve solo esas filas, para cargar el home por lotes.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Ítems por carrusel. Máximo 40.",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "maximum": 40
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Feed obtenido con éxito",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HomeFeedResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -846,6 +1081,37 @@
             "type": "string",
             "description": "Lema o eslogan oficial de TMDB"
           },
+          "logo": {
+            "type": "string",
+            "nullable": true,
+            "description": "Arte tipográfico del título (logo transparente de TMDB, es/en). Pensado para portadas y héroes."
+          },
+          "runtime": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Duración en minutos. En series, duración media del episodio."
+          },
+          "content_rating": {
+            "type": "string",
+            "nullable": true,
+            "description": "Clasificación por edades oficial, priorizando mercados hispanohablantes (MX, AR, CL, ES, CO) y con US como respaldo."
+          },
+          "director": {
+            "type": "string",
+            "nullable": true,
+            "description": "Director de la película."
+          },
+          "created_by": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "string"
+            },
+            "description": "Creadores de la serie."
+          },
+          "streams": {
+            "$ref": "#/components/schemas/StreamsStatus"
+          },
           "trailer": {
             "type": "string",
             "nullable": true,
@@ -898,6 +1164,301 @@
               "$ref": "#/components/schemas/Season"
             },
             "description": "Lista de temporadas y episodios. Presente únicamente cuando type = tvseries"
+          }
+        }
+      },
+      "StreamsStatus": {
+        "type": "object",
+        "description": "Estado de los enlaces de un título. La metadata se devuelve siempre al instante; cuando status es 'pending' los servidores todavía no están resueltos y el cliente debe pedirlos a `url` (normalmente al pulsar Reproducir).",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "pending"
+            ]
+          },
+          "url": {
+            "type": "string",
+            "example": "/api/v1/media/scary-movie-6/streams"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Momento de la última resolución de enlaces. Por debajo de 24 h se sirven directamente de la base de datos."
+          }
+        }
+      },
+      "StreamsResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "example": "success"
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "tmdb_id": {
+                "type": "integer"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "movie",
+                  "tvseries"
+                ]
+              },
+              "title": {
+                "type": "string"
+              },
+              "primary_stream": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/ServerOption"
+                  }
+                ],
+                "nullable": true,
+                "description": "Servidor recomendado según prioridad de fuente, calidad e idioma."
+              },
+              "servers": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ServerOption"
+                }
+              },
+              "seasons": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Season"
+                },
+                "description": "Presente únicamente en series."
+              },
+              "updated_at": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
+              }
+            }
+          }
+        }
+      },
+      "CardItem": {
+        "type": "object",
+        "description": "Tarjeta de carrusel del home (detail=card). Lleva toda la metadata necesaria para pintar una ficha emergente sin peticiones adicionales; no incluye reparto, servidores ni temporadas.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "tmdb_id": {
+            "type": "integer"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "movie",
+              "tvseries"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "original_title": {
+            "type": "string"
+          },
+          "tagline": {
+            "type": "string"
+          },
+          "overview": {
+            "type": "string"
+          },
+          "poster": {
+            "type": "string",
+            "nullable": true
+          },
+          "backdrop": {
+            "type": "string",
+            "nullable": true
+          },
+          "logo": {
+            "type": "string",
+            "nullable": true
+          },
+          "rating": {
+            "type": "number"
+          },
+          "content_rating": {
+            "type": "string",
+            "nullable": true
+          },
+          "runtime": {
+            "type": "integer",
+            "nullable": true
+          },
+          "release_date": {
+            "type": "string"
+          },
+          "year": {
+            "type": "integer",
+            "nullable": true
+          },
+          "genres": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "subcategories": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "trailer": {
+            "type": "string",
+            "nullable": true
+          },
+          "total_seasons": {
+            "type": "integer"
+          },
+          "total_episodes": {
+            "type": "integer"
+          },
+          "detail_url": {
+            "type": "string",
+            "example": "/api/v1/media/scary-movie-6"
+          },
+          "streams_url": {
+            "type": "string",
+            "example": "/api/v1/media/scary-movie-6/streams"
+          }
+        }
+      },
+      "HeroItem": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CardItem"
+          },
+          {
+            "type": "object",
+            "description": "Destacado del hero: la tarjeta más reparto y dirección.",
+            "properties": {
+              "cast": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "cast_details": {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                }
+              },
+              "dubbing_cast": {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                }
+              },
+              "director": {
+                "type": "string",
+                "nullable": true
+              },
+              "created_by": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "HomeFeedRow": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "top_10_cl"
+          },
+          "title": {
+            "type": "string",
+            "example": "Top 10 en Chile hoy"
+          },
+          "subtitle": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "carousel",
+              "featured"
+            ]
+          },
+          "layout": {
+            "type": "string",
+            "enum": [
+              "ranked",
+              "backdrop",
+              "poster"
+            ],
+            "description": "Pista de render: ranked (numerado tipo Top 10), backdrop (tarjeta ancha) o poster (tarjeta vertical)."
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CardItem"
+            }
+          },
+          "endpoint": {
+            "type": "string",
+            "description": "Endpoint paginado para el 'ver todo' / scroll infinito de la fila.",
+            "example": "/api/v1/discover?genre=Acci%C3%B3n"
+          }
+        }
+      },
+      "HomeFeedResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "example": "success"
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "featured": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/HeroItem"
+                  }
+                ],
+                "nullable": true,
+                "description": "Primer destacado. Se mantiene por compatibilidad; equivale a spotlight[0]."
+              },
+              "spotlight": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/HeroItem"
+                },
+                "description": "Hasta 5 destacados con ficha completa para rotar en el hero."
+              },
+              "rows": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/HomeFeedRow"
+                }
+              },
+              "updated_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
           }
         }
       },

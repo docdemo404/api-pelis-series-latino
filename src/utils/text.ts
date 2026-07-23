@@ -23,6 +23,35 @@ export function canonicalTitle(input: string | null | undefined): string {
 }
 
 /**
+ * Clave de BÚSQUEDA de una ficha: el título mostrado seguido de sus otros nombres
+ * conocidos (título original y alias de la fuente), normalizados y sin repeticiones.
+ *
+ * Es lo que se guarda en `media_items.title_normalized`, la única columna sobre la que
+ * busca el RPC `search_media`. Incluir los otros nombres es lo que permite encontrar
+ * "Avengers 2: Era de Ultrón" escribiendo "vengadores", o una película por su título
+ * original en inglés. El título mostrado va PRIMERO para que el ranking por prefijo
+ * (LIKE 'q%') siga premiando el nombre principal.
+ */
+export function searchIndexKey(
+  title: string | null | undefined,
+  originalTitle?: string | null,
+  aliases?: string[] | null
+): string {
+  const parts = [title, originalTitle, ...(aliases || [])]
+    .map(t => normalizeTitle(t).replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+
+  const seen = new Set<string>();
+  const unique = parts.filter(p => {
+    if (seen.has(p)) return false;
+    seen.add(p);
+    return true;
+  });
+
+  return unique.join(' ').trim();
+}
+
+/**
  * Convierte un texto en slug URL-safe: sin acentos, minúsculas, separado por guiones.
  */
 export function slugify(input: string | null | undefined): string {

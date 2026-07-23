@@ -23,8 +23,15 @@ CREATE TABLE IF NOT EXISTS media_items (
     trailer TEXT,
     cast_data JSONB DEFAULT '[]'::jsonb,
     dubbing_cast_data JSONB DEFAULT '[]'::jsonb,
+    runtime INT,
+    director TEXT,
     total_seasons INT DEFAULT 0,
     total_episodes INT DEFAULT 0,
+    -- Enlaces persistidos: evitan scrapear en vivo al abrir una ficha (ver migración 004)
+    servers JSONB DEFAULT '[]'::jsonb,
+    seasons JSONB DEFAULT '[]'::jsonb,
+    source_url TEXT,
+    streams_updated_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -43,3 +50,8 @@ CREATE INDEX IF NOT EXISTS idx_media_title_norm_prefix ON media_items (title_nor
 
 -- Orden por frescura para el getAll DB-first del catálogo
 CREATE INDEX IF NOT EXISTS idx_media_updated_at ON media_items (updated_at DESC);
+
+-- Carruseles del home y discover paginado en la DB. Ver src/db/migrations/004_streams_and_rich_metadata.sql
+CREATE INDEX IF NOT EXISTS idx_media_type_rating ON media_items (type, rating DESC NULLS LAST);
+CREATE INDEX IF NOT EXISTS idx_media_genres ON media_items USING gin (genres);
+CREATE INDEX IF NOT EXISTS idx_media_streams_updated ON media_items (streams_updated_at DESC NULLS LAST);

@@ -28,6 +28,10 @@ jobs:
       # Crawl COMPLETO del catálogo (todas las categorías de tioplus paginadas hasta agotar +
       # todo FuegoCine) y lo persiste en Supabase. La API sirve búsqueda/listados desde la DB
       # (DB-first) en milisegundos, con recuperación total y scroll infinito.
+      #
+      # --streams=300 pre-resuelve además los enlaces de los títulos que alimentan el home,
+      # para que su ficha emergente abra con los servidores ya listos (requiere la
+      # migración 004; sin ella el paso se omite con un aviso).
       - name: Refrescar catálogo pre-scrapeado en Supabase
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
@@ -35,4 +39,4 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           # Necesaria para escribir en media_items (la tabla tiene RLS activado)
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: npx ts-node scripts/refreshCatalog.ts
+        run: npx ts-node scripts/refreshCatalog.ts --streams=300

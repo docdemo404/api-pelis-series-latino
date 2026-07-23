@@ -1,5 +1,5 @@
 import { MediaItem, ServerOption, ContentType } from '../types';
-import { supabase } from './supabaseService';
+import { supabase, getSupabaseAdmin } from './supabaseService';
 import { RealScraperService } from './realScraperService';
 import { TmdbService } from './tmdbService';
 import { sortServersBySourcePriority, getPrimaryStream } from './streamSorter';
@@ -9,6 +9,13 @@ import { CacheStore } from '../cache/store';
 // TTL del caché de catálogo/búsqueda. Con Redis (KV_REST_API_* / UPSTASH_*) las entradas
 // se comparten entre lambdas y sobreviven cold starts; sin Redis degrada a memoria local.
 const CACHE_TTL_SECONDS = 10 * 60;
+
+// La METADATA (sinopsis, pósters, reparto…) apenas cambia: se cachea mucho más tiempo que
+// los enlaces, que sí caducan. Es lo que permite que la ficha emergente abra al instante.
+const METADATA_TTL_SECONDS = 6 * 60 * 60;
+
+// Enlaces persistidos por debajo de esta antigüedad se sirven de la DB sin volver a scrapear.
+const STREAMS_FRESH_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Clave canónica de título para AGRUPAR variantes del mismo contenido entre fuentes
@@ -96,8 +103,17 @@ export class CatalogService {
       if (fcDetail) return fcDetail;
     }
 
-    for (const cat of ['pelicula', 'serie', 'anime', 'dorama']) {
-      const detail = await RealScraperService.scrapeDetail(`https://tioplus.app/${cat}/${slug}`).catch(() => null);
+    // Las 4 categorías se prueban EN PARALELO: en serie costaban hasta 4 round-trips
+    // encadenados en el peor caso (el que más pesaba en la latencia del detalle).
+    const categories = ['pelicula', 'serie', 'anime', 'dorama'];
+    const probes = await Promise.all(
+      categories.map(cat =>
+        RealScraperService.scrapeDetail(`https://tioplus.app/${cat}/${slug}`).catch(() => null)
+      )
+    );
+
+    // Se conserva el orden de preferencia original (película > serie > anime > dorama).
+    for (const detail of probes) {
       if (detail && (detail.servers?.length || detail.seasons?.length)) return detail;
     }
 
@@ -180,11 +196,198 @@ export class CatalogService {
   }
 
   /**
-   * Consulta múltiples títulos en lote (Batching Request)
+   * Proyección de TARJETA para el home y los carruseles. Lleva la metadata completa que
+   * necesita la ficha emergente (sinopsis, tagline, logo, duración, clasificación, tráiler),
+   * de modo que la app pueda abrir el popup SIN pedir nada más; solo los enlaces se piden
+   * aparte, al pulsar Reproducir. Sin cast, servidores ni temporadas.
+   */
+  static toCardItem(item: MediaItem): Partial<MediaItem> & Record<string, unknown> {
+    return {
+      id: item.id,
+      tmdb_id: item.tmdb_id,
+      type: item.type,
+      title: item.title,
+      original_title: item.original_title,
+      tagline: item.tagline || '',
+      overview: item.overview || '',
+      poster: item.poster,
+      backdrop: item.backdrop,
+      logo: item.logo,
+      rating: item.rating,
+      content_rating: item.content_rating,
+      runtime: item.runtime,
+      release_date: item.release_date,
+      year: item.release_date ? Number(String(item.release_date).substring(0, 4)) || null : null,
+      genres: item.genres,
+      subcategories: item.subcategories,
+      trailer: item.trailer,
+      total_seasons: item.total_seasons,
+      total_episodes: item.total_episodes,
+      detail_url: `/api/v1/media/${item.id}`,
+      streams_url: `/api/v1/media/${item.id}/streams`
+    };
+  }
+
+  /**
+   * Proyección de HÉROE (destacados del home): la tarjeta + reparto y dirección.
+   */
+  static toHeroItem(item: MediaItem): Partial<MediaItem> & Record<string, unknown> {
+    return {
+      ...this.toCardItem(item),
+      cast: (item.cast || []).slice(0, 8),
+      cast_details: (item.cast_details || []).slice(0, 8),
+      dubbing_cast: item.dubbing_cast || [],
+      director: item.director,
+      created_by: item.created_by,
+      original_language_title: item.original_title
+    };
+  }
+
+  /**
+   * Consulta múltiples títulos en lote (Batching Request).
+   * Usa el camino RÁPIDO (metadata sin resolución de enlaces) para que prefetchear
+   * una fila entera del home siga siendo barato.
    */
   static async getBatch(ids: string[]): Promise<MediaItem[]> {
-    const results = await Promise.all(ids.map(id => this.getById(id)));
+    const results = await Promise.all(ids.map(id => this.getMetadata(id)));
     return results.filter((item): item is MediaItem => item !== null);
+  }
+
+  /**
+   * Pool de títulos para construir el home. Una sola query a Postgres (sin scraping),
+   * cacheada, lo bastante ancha para alimentar ~15 carruseles temáticos. Cae a getAll()
+   * (que sí sabe scrapear en vivo) cuando la DB todavía no está poblada.
+   *
+   * Se exigen póster y géneros: el job de refresco escribe AL FINAL los títulos sin match
+   * en TMDB (sin géneros ni sinopsis), así que ordenar solo por frescura llenaba el pool
+   * entero con ellos y el home se quedaba sin carruseles temáticos ni destacados.
+   */
+  static async getHomePool(limit: number = 800): Promise<MediaItem[]> {
+    const cacheKey = `home_pool:${limit}`;
+    const cached = await CacheStore.get<MediaItem[]>(cacheKey);
+    if (cached) return cached;
+
+    try {
+      const { data } = await supabase
+        .from('media_items')
+        .select('*')
+        .not('poster', 'is', null)
+        .not('genres', 'eq', '{}')
+        .order('updated_at', { ascending: false })
+        .limit(limit);
+
+      if (data && data.length >= 30) {
+        const items = data.map(this.mapDbItemToMediaItem);
+        await CacheStore.set(cacheKey, items, CACHE_TTL_SECONDS);
+        return items;
+      }
+    } catch {}
+
+    // Sin la columna genres poblada (catálogo recién creado) se repite sin filtros.
+    try {
+      const { data } = await supabase
+        .from('media_items')
+        .select('*')
+        .order('updated_at', { ascending: false })
+        .limit(limit);
+
+      if (data && data.length >= 30) {
+        const items = data.map(this.mapDbItemToMediaItem);
+        await CacheStore.set(cacheKey, items, CACHE_TTL_SECONDS);
+        return items;
+      }
+    } catch {}
+
+    const fallback = await this.getAll();
+    if (fallback.length > 0) {
+      await CacheStore.set(cacheKey, fallback, CACHE_TTL_SECONDS);
+    }
+    return fallback;
+  }
+
+  /**
+   * Consulta de UNA fila del home resuelta en Postgres.
+   *
+   * A partir de unos pocos miles de fichas ya no sirve filtrar un pool común en memoria:
+   * "las N más recientes" son en realidad "las N últimas que escribió el crawl", así que
+   * categorías enteras (anime, documentales…) quedaban fuera por puro orden de escritura.
+   * Cada carrusel pide lo suyo con los índices de la migración 004.
+   */
+  static async queryRow(spec: {
+    type?: ContentType;
+    /** Basta con que la ficha tenga UNO de estos géneros (cubre las variantes de TMDB). */
+    genres?: string[];
+    /** Valor exacto dentro de subcategories (p. ej. 'Anime'). */
+    subcategory?: string;
+    minRating?: number;
+    /** Estrenos anteriores a este año (clásicos). */
+    beforeYear?: number;
+    order?: 'recent' | 'rating';
+    limit?: number;
+  }): Promise<MediaItem[]> {
+    const limit = Math.max(1, Math.min(spec.limit || 60, 200));
+
+    try {
+      let query = supabase
+        .from('media_items')
+        .select('*')
+        .not('poster', 'is', null)
+        .not('genres', 'eq', '{}');
+
+      if (spec.type) query = query.eq('type', spec.type);
+      if (spec.genres && spec.genres.length > 0) query = query.overlaps('genres', spec.genres);
+      if (spec.subcategory) query = query.contains('subcategories', [spec.subcategory]);
+      if (spec.minRating) query = query.gte('rating', spec.minRating);
+      if (spec.beforeYear) {
+        // release_date es texto ('2009-05-01' o '2009'): la comparación lexicográfica
+        // funciona con ambos formatos mientras se acote por abajo para excluir los vacíos.
+        query = query.gte('release_date', '1900').lt('release_date', String(spec.beforeYear));
+      }
+
+      query = spec.order === 'recent'
+        ? query.order('updated_at', { ascending: false })
+        : query.order('rating', { ascending: false, nullsFirst: false });
+
+      const { data, error } = await query.limit(limit);
+      if (error || !data) return [];
+      return data.map(this.mapDbItemToMediaItem);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Listado paginado DIRECTO en Postgres (tipo + género + rango), con total exacto.
+   * Habilita el "ver todo" de cada fila del home y el scroll infinito sin traer el
+   * catálogo entero a memoria. Devuelve null si la DB no está poblada o la consulta
+   * falla, para que el llamador caiga al filtrado en memoria de siempre.
+   */
+  static async discoverPaged(
+    page: number,
+    limit: number,
+    type?: string,
+    genre?: string
+  ): Promise<{ items: MediaItem[]; total: number } | null> {
+    const safeLimit = Math.max(1, Math.min(limit, 100));
+    const from = Math.max(0, (Math.max(1, page) - 1) * safeLimit);
+
+    try {
+      let query = supabase
+        .from('media_items')
+        .select('*', { count: 'exact' })
+        .order('updated_at', { ascending: false })
+        .range(from, from + safeLimit - 1);
+
+      if (type) query = query.eq('type', type);
+      if (genre) query = query.contains('genres', [genre]);
+
+      const { data, count, error } = await query;
+      if (error || !data || data.length === 0) return null;
+
+      return { items: data.map(this.mapDbItemToMediaItem), total: count ?? data.length };
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -256,17 +459,123 @@ export class CatalogService {
     return [];
   }
 
+  /** Clave de caché estable para un id + pista de tipo. */
+  private static cacheKeyFor(q: string, typeHint?: ContentType): string {
+    return typeHint ? `${q}:${typeHint}` : q;
+  }
+
   /**
-   * Obtiene un título por ID/Slug de forma consistente (Caché ultrarrápida en sub-10ms).
+   * Guarda un ítem bajo TODAS las formas de id con las que puede volver a pedirse
+   * (id de la fuente, tmdb_id, con y sin tipo), para que la segunda visita sea gratis.
+   */
+  private static async cacheItem(prefix: 'meta' | 'byid', cacheKey: string, item: MediaItem, ttl: number): Promise<void> {
+    const keys = new Set<string>([cacheKey, item.id, `${item.id}:${item.type}`]);
+    if (item.tmdb_id) {
+      keys.add(String(item.tmdb_id));
+      keys.add(`${item.tmdb_id}:${item.type}`);
+    }
+    await Promise.all(Array.from(keys).filter(Boolean).map(k => CacheStore.set(`${prefix}:${k}`, item, ttl)));
+  }
+
+  /** ¿La ficha de la DB ya trae metadata utilizable, o hay que pasarla por TMDB? */
+  private static isMetadataComplete(item: MediaItem): boolean {
+    return Boolean(item.title && item.poster && item.overview && item.overview.length > 20);
+  }
+
+  /** ¿Los enlaces persistidos siguen siendo válidos (menos de 24 h)? */
+  private static hasFreshStreams(item: MediaItem): boolean {
+    if (!item.servers || item.servers.length === 0) return false;
+    if (!item.streams_updated_at) return false;
+    const ts = Date.parse(item.streams_updated_at);
+    return Number.isFinite(ts) && Date.now() - ts < STREAMS_FRESH_MS;
+  }
+
+  /**
+   * Escribe de vuelta en Supabase los enlaces recién resueltos (write-through). Se llama en
+   * fire-and-forget: NUNCA debe retrasar ni tumbar la respuesta. Si la migración 004 aún no
+   * se ejecutó, el update falla en silencio y todo sigue funcionando desde el caché.
+   */
+  private static async persistStreams(item: MediaItem): Promise<void> {
+    if (!item.id) return;
+    try {
+      await getSupabaseAdmin()
+        .from('media_items')
+        .update({
+          servers: item.servers || [],
+          seasons: item.seasons || [],
+          source_url: item._source_url || null,
+          streams_updated_at: new Date().toISOString()
+        })
+        .eq('id', item.id);
+    } catch {}
+  }
+
+  /** Copia pública de un ítem: elimina los campos internos (`_source_url`, `_tioplus_url`). */
+  static toPublicItem<T extends Record<string, any>>(item: T): T {
+    const { _source_url, _tioplus_url, ...rest } = item as any;
+    return rest as T;
+  }
+
+  /**
+   * Obtiene un título por ID/Slug CON los enlaces ya resueltos. Es la composición de los
+   * dos caminos: metadata instantánea + resolución de servidores. Se conserva para los
+   * clientes que quieren todo en una sola respuesta (`?streams=wait`) y para usos internos.
    */
   static async getById(id: string, typeHint?: ContentType): Promise<MediaItem | null> {
-    const q = id.toLowerCase().trim();
-    const cacheKey = typeHint ? `${q}:${typeHint}` : q;
+    return this.getStreams(id, typeHint);
+  }
 
-    // Verificación de caché (compartida entre lambdas si hay Redis)
-    const cached = await CacheStore.get<MediaItem>(`byid:${cacheKey}`);
+  /**
+   * CAMINO RÁPIDO — metadata sin resolver enlaces (lo que necesita la ficha emergente).
+   *
+   * Orden: caché → Supabase (tolerante a cualquier forma de id) → fuentes en vivo.
+   * No hace búsquedas por título en las fuentes ni fusión multifuente: eso es lo que
+   * convertía cada apertura de popup en varios segundos de scraping. El resultado se
+   * cachea SIEMPRE (antes solo se guardaba si traía servidores, así que los títulos
+   * sin enlaces se re-scrapeaban en cada request).
+   */
+  static async getMetadata(id: string, typeHint?: ContentType): Promise<MediaItem | null> {
+    const q = id.toLowerCase().trim();
+    if (!q) return null;
+    const cacheKey = this.cacheKeyFor(q, typeHint);
+
+    // Un detalle completo ya caliente sirve también como metadata.
+    const full = await CacheStore.get<MediaItem>(`byid:${cacheKey}`);
+    if (full) return full;
+
+    const cached = await CacheStore.get<MediaItem>(`meta:${cacheKey}`);
     if (cached) return cached;
 
+    let result: MediaItem | null = null;
+
+    // 1. DB-FIRST: el catálogo pre-scrapeado ya trae la ficha completa (job de refresh).
+    const dbRow = await this.findDbRowByAnyId(q);
+    if (dbRow) {
+      const mapped = this.mapDbItemToMediaItem(dbRow);
+      result = this.isMetadataComplete(mapped)
+        ? mapped
+        : await TmdbService.enrichMediaItem(mapped, { skipSeasons: true });
+    }
+
+    // 2. Fuera de la DB: resolver contra TMDB / las fuentes reales.
+    if (!result) {
+      result = await this.resolveMetadataLive(q, typeHint);
+    }
+
+    if (!result) return null;
+
+    // 3. Temporadas de series (desde la DB si están persistidas, si no desde TMDB).
+    await this.ensureSeasons(result);
+    this.inheritServersToEpisodes(result);
+
+    await this.cacheItem('meta', cacheKey, result, METADATA_TTL_SECONDS);
+    return result;
+  }
+
+  /**
+   * Resolución de metadata contra TMDB y las fuentes reales, para ids que NO están en la DB.
+   */
+  private static async resolveMetadataLive(q: string, typeHint?: ContentType): Promise<MediaItem | null> {
     let result: MediaItem | null = null;
 
     // 0. Si el ID es numérico (ID oficial de TMDB), consultar primero DB/Caché y luego TMDB
@@ -402,37 +711,100 @@ export class CatalogService {
       }
     }
 
-    // 4. Fallback a Supabase TOLERANTE AL FORMATO del id: id exacto, tmdb_id, slug embebido
-    //    en el id de la fuente y título derivado del slug. Cubre los ids "legacy" derivados
-    //    del título que la búsqueda devolvía antes ("madagascar-3-los-fugitivos").
-    if (!result) {
-      const dbRow = await this.findDbRowByAnyId(q);
-      if (dbRow) {
-        const mapped = this.mapDbItemToMediaItem(dbRow);
-        // El id REAL de la fila sí resuelve contra la fuente: recuperamos servidores/temporadas.
-        if (mapped.id && mapped.id !== q) {
-          const fromSource = await this.resolveFromSource(mapped.id);
-          if (fromSource) {
-            if (fromSource.servers && fromSource.servers.length) mapped.servers = fromSource.servers;
-            if (fromSource.seasons && fromSource.seasons.length) mapped.seasons = fromSource.seasons;
-          }
-        }
-        result = await TmdbService.enrichMediaItem(mapped);
-      }
+    return result;
+  }
+
+  /**
+   * Garantía de temporadas para series: si la ficha no las trae (ni de la DB ni de la
+   * fuente), se reconstruyen desde TMDB. Las llamadas por temporada ya van en paralelo
+   * dentro de getTmdbSeasons.
+   */
+  private static async ensureSeasons(item: MediaItem): Promise<void> {
+    const isSeries = item.type === 'tvseries' || (item.total_seasons != null && item.total_seasons > 0);
+    if (!isSeries || (item.seasons && item.seasons.length > 0)) return;
+
+    const tmdbId = item.tmdb_id || Number(item.id);
+    if (!tmdbId || tmdbId <= 0) return;
+
+    try {
+      item.seasons = await TmdbService.getTmdbSeasons(tmdbId, item.total_seasons || 1, item.poster, item.servers || []);
+    } catch {}
+  }
+
+  /** scrapeDetail con techo de latencia: una fuente lenta no puede bloquear la respuesta. */
+  private static async scrapeDetailWithTimeout(url: string, ms: number = 2500): Promise<MediaItem | null> {
+    const timeout = new Promise<null>(resolve => setTimeout(() => resolve(null), ms));
+    return Promise.race([RealScraperService.scrapeDetail(url).catch(() => null), timeout]);
+  }
+
+  /**
+   * CAMINO DE ENLACES — resuelve los servidores reproducibles de un título.
+   *
+   * Se pide aparte de la metadata (GET /api/v1/media/:id/streams), normalmente cuando el
+   * usuario pulsa Reproducir, por lo que la ficha ya está pintada mientras esto ocurre.
+   * Orden de coste creciente:
+   *   A. Enlaces persistidos en Supabase con menos de 24 h → 0 scrapes.
+   *   B. `source_url` de la fila → UN solo scrapeDetail contra la URL exacta.
+   *   C. Fusión multifuente (búsqueda por título en tioplus + fuegocine) — el camino
+   *      histórico, ahora reservado para cuando A y B no dan enlaces o se pide `deep`.
+   * Lo resuelto se escribe de vuelta en la DB para que la próxima apertura sea instantánea.
+   */
+  static async getStreams(id: string, typeHint?: ContentType, opts: { deep?: boolean } = {}): Promise<MediaItem | null> {
+    const q = id.toLowerCase().trim();
+    if (!q) return null;
+    const cacheKey = this.cacheKeyFor(q, typeHint);
+
+    const cached = await CacheStore.get<MediaItem>(`byid:${cacheKey}`);
+    if (cached && !opts.deep) return cached;
+
+    const result = await this.getMetadata(q, typeHint);
+    if (!result) return null;
+
+    // A. Enlaces persistidos y frescos: nada que scrapear.
+    if (!opts.deep && this.hasFreshStreams(result)) {
+      await this.cacheItem('byid', cacheKey, result, CACHE_TTL_SECONDS);
+      return result;
     }
 
-    // 5. Garantía y Fusión Multifuente de Servidores (TioPlus + FuegoCine).
-    //    La búsqueda pública es LEAN (sin servidores); aquí resolvemos AMBAS fuentes
-    //    directamente. scrapeRealMovies ya devuelve candidatos de tioplus Y fuegocine
-    //    (cada uno con su _tioplus_url), y traemos el detalle/servidores de cada uno.
-    if (result) {
+    const allServers: ServerOption[] = [...(result.servers || [])];
+    const existingUrls = new Set(allServers.map(s => s.embed_url));
+    const addServers = (servers?: ServerOption[] | null) => {
+      for (const s of servers || []) {
+        if (s && !existingUrls.has(s.embed_url)) {
+          allServers.push(s);
+          existingUrls.add(s.embed_url);
+        }
+      }
+    };
+    const adoptSeasons = (seasons?: any[] | null) => {
+      if (seasons && seasons.length > 0 && (!result.seasons || result.seasons.length === 0)) {
+        result.seasons = seasons;
+      }
+    };
+
+    // B. URL exacta de la fuente (persistida por el job): un único detalle, sin búsqueda.
+    if (result._source_url) {
+      const detail = await this.scrapeDetailWithTimeout(result._source_url);
+      addServers(detail?.servers);
+      adoptSeasons(detail?.seasons);
+    }
+
+    // B-bis. Sin source_url: el id de la fila SÍ resuelve por categoría contra la fuente.
+    if (allServers.length === 0) {
+      const fromSource = await this.resolveFromSource(result.id);
+      addServers(fromSource?.servers);
+      adoptSeasons(fromSource?.seasons);
+    }
+
+    // C. Fusión multifuente (TioPlus + FuegoCine) por título. Es el camino caro: solo cuando
+    //    no hemos conseguido enlaces por las vías baratas, o cuando se pide explícitamente
+    //    (`deep`, que usa el job de pre-calentado para dejar el set completo en la DB).
+    if (allServers.length === 0 || opts.deep) {
       const targetStrict = strictKey(result.title);
       const targetCanonical = canonicalTitleKey(result.title);
-      const allServers: ServerOption[] = [...(result.servers || [])];
-      const existingUrls = new Set(allServers.map(s => s.embed_url));
 
       const matchesTarget = (it: MediaItem) =>
-        (!!it.tmdb_id && !!result!.tmdb_id && it.tmdb_id === result!.tmdb_id) ||
+        (!!it.tmdb_id && !!result.tmdb_id && it.tmdb_id === result.tmdb_id) ||
         strictKey(it.title) === targetStrict ||
         (!!targetCanonical && canonicalTitleKey(it.title) === targetCanonical);
 
@@ -444,74 +816,48 @@ export class CatalogService {
         if (!matchesTarget(cand)) continue;
         const url = (cand as any)._tioplus_url;
         if (url && !sourceUrls.includes(url)) sourceUrls.push(url);
-        if (cand.servers && cand.servers.length > 0) {
-          for (const s of cand.servers) {
-            if (!existingUrls.has(s.embed_url)) { allServers.push(s); existingUrls.add(s.embed_url); }
-          }
-        }
-        if (cand.seasons && cand.seasons.length > 0 && (!result.seasons || result.seasons.length === 0)) {
-          result.seasons = cand.seasons;
-        }
+        addServers(cand.servers);
+        adoptSeasons(cand.seasons);
       }
 
-      // Detalle (servidores) de cada URL de fuente en paralelo (tioplus + fuegocine), timeout acotado.
-      const details = await Promise.all(sourceUrls.slice(0, 4).map(u => {
-        const timeout = new Promise<any>(resolve => setTimeout(() => resolve(null), 2500));
-        return Promise.race([RealScraperService.scrapeDetail(u), timeout]);
-      }));
+      // Detalle (servidores) de cada URL de fuente en paralelo, con timeout acotado.
+      const details = await Promise.all(sourceUrls.slice(0, 4).map(u => this.scrapeDetailWithTimeout(u)));
       for (const detail of details) {
-        if (detail && detail.servers && detail.servers.length > 0) {
-          for (const s of detail.servers) {
-            if (!existingUrls.has(s.embed_url)) { allServers.push(s); existingUrls.add(s.embed_url); }
-          }
-        }
-        if (detail && detail.seasons && detail.seasons.length > 0 && (!result.seasons || result.seasons.length === 0)) {
-          result.seasons = detail.seasons;
-        }
+        addServers(detail?.servers);
+        adoptSeasons(detail?.seasons);
       }
 
-      // Serie sin servidores → resolver activamente S1:E1.
-      if ((result.type === 'tvseries' || (result.total_seasons && result.total_seasons > 0)) && allServers.length === 0) {
-        try {
-          const titleSlug = normalizeTitle(result.title || '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-          const ep1Detail = await RealScraperService.scrapeEpisodeDetail(titleSlug, 1, 1);
-          if (ep1Detail && ep1Detail.servers && ep1Detail.servers.length > 0) {
-            for (const s of ep1Detail.servers) {
-              if (!existingUrls.has(s.embed_url)) { allServers.push(s); existingUrls.add(s.embed_url); }
-            }
-          }
-        } catch {}
-      }
-
-      result.servers = sortServersBySourcePriority(allServers);
-      if (result.servers.length > 0) {
-        result.primary_stream = getPrimaryStream(result.servers);
+      // Guardamos la URL de la fuente: la próxima resolución será un solo scrapeDetail.
+      if (!result._source_url && sourceUrls.length > 0) {
+        result._source_url = sourceUrls[0];
       }
     }
 
-    // 6. Garantía de Temporadas: Si es una serie (tvseries) y sus temporadas están vacías, poblar desde TMDB
-    if (result && (result.type === 'tvseries' || (result.total_seasons && result.total_seasons > 0))) {
-      if (!result.seasons || result.seasons.length === 0) {
-        const numSeasons = result.total_seasons || 1;
-        const tmdbId = result.tmdb_id || Number(result.id);
-        if (tmdbId > 0) {
-          try {
-            result.seasons = await TmdbService.getTmdbSeasons(tmdbId, numSeasons, result.poster, result.servers || []);
-          } catch {}
-        }
-      }
+    // D. Serie sin servidores → resolver activamente S1:E1.
+    const isSeries = result.type === 'tvseries' || (result.total_seasons != null && result.total_seasons > 0);
+    if (isSeries && allServers.length === 0) {
+      try {
+        const titleSlug = normalizeTitle(result.title || '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+        const ep1Detail = await RealScraperService.scrapeEpisodeDetail(titleSlug, 1, 1);
+        addServers(ep1Detail?.servers);
+      } catch {}
     }
 
-    // 7. Herencia de servidores a la jerarquía de episodios en series
+    result.servers = sortServersBySourcePriority(allServers);
+    if (result.servers.length > 0) {
+      result.primary_stream = getPrimaryStream(result.servers);
+      result.streams_updated_at = new Date().toISOString();
+    }
+
+    await this.ensureSeasons(result);
     this.inheritServersToEpisodes(result);
 
-    // ÚNICAMENTE almacenar en caché si se encontraron servidores o temporadas válidas
-    if (result && ((result.servers && result.servers.length > 0) || (result.seasons && result.seasons.length > 0))) {
-      const keys = [cacheKey, result.id, `${result.id}:${result.type}`];
-      if (result.tmdb_id) {
-        keys.push(String(result.tmdb_id), `${result.tmdb_id}:${result.type}`);
+    if (result.servers.length > 0 || (result.seasons && result.seasons.length > 0)) {
+      await this.cacheItem('byid', cacheKey, result, CACHE_TTL_SECONDS);
+      // Write-through: la próxima apertura (incluso desde otra lambda) sale de la DB.
+      if (result.servers.length > 0) {
+        void this.persistStreams(result).catch(() => {});
       }
-      await Promise.all(keys.map(k => CacheStore.set(`byid:${k}`, result, CACHE_TTL_SECONDS)));
     }
 
     return result;
@@ -767,7 +1113,9 @@ export class CatalogService {
       tagline: dbRow.tagline || '',
       overview: dbRow.overview || '',
       rating: dbRow.rating || 0.0,
-      content_rating: dbRow.content_rating || 'PG-13',
+      // Sin dato real preferimos omitirlo: el 'PG-13' fijo que se emitía antes era
+      // simplemente falso para la mayoría del catálogo.
+      content_rating: dbRow.content_rating || undefined,
       release_date: dbRow.release_date || '',
       genres: dbRow.genres || [],
       subcategories: dbRow.subcategories || [],
@@ -778,9 +1126,16 @@ export class CatalogService {
       cast: Array.isArray(dbRow.cast_data) ? dbRow.cast_data.map((c: any) => (typeof c === 'string' ? c : (c.name || ''))) : [],
       cast_details: Array.isArray(dbRow.cast_data) && typeof dbRow.cast_data[0] === 'object' ? dbRow.cast_data : undefined,
       dubbing_cast: dbRow.dubbing_cast_data || [],
+      runtime: typeof dbRow.runtime === 'number' && dbRow.runtime > 0 ? dbRow.runtime : undefined,
+      director: dbRow.director || undefined,
       metadata_source: dbRow.metadata_source === 'source' ? 'source' : 'tmdb',
       total_seasons: dbRow.total_seasons || 0,
       total_episodes: dbRow.total_episodes || 0,
+      // Temporadas y enlaces persistidos por el job (migración 004): con ellos el detalle
+      // se resuelve sin scraping en vivo.
+      seasons: Array.isArray(dbRow.seasons) && dbRow.seasons.length > 0 ? dbRow.seasons : undefined,
+      streams_updated_at: dbRow.streams_updated_at || null,
+      _source_url: dbRow.source_url || undefined,
       primary_stream: getPrimaryStream((dbRow.servers || []).map((s: any) => ({ ...s, source_id: s.source_id || 'supabase' }))),
       servers: sortServersBySourcePriority((dbRow.servers || []).map((s: any) => ({ ...s, source_id: s.source_id || 'supabase' }))),
     };

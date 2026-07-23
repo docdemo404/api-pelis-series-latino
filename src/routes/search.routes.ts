@@ -26,7 +26,7 @@ router.get(['/api/v1/search', '/api/v1/movies/search'], async (req: Request, res
     const { items, total } = await CatalogService.searchPaged(q, page, limit);
 
     const results = full
-      ? items
+      ? items.map(item => CatalogService.toPublicItem(item))
       : items.map(compact ? CatalogService.toCompactItem : CatalogService.toSearchItem);
 
     const startIndex = (page - 1) * limit;

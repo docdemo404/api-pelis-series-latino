@@ -2,12 +2,64 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { CatalogService } from '../services/catalogService';
 import { RealScraperService } from '../services/realScraperService';
 import { sendErrorResponse } from '../utils/apiHelpers';
+import { ContentType, MediaItem } from '../types';
 
 /**
  * Rutas de detalle: episodio específico, serie por id y media por id/slug.
  * Se montan DESPUÉS de catalog.routes para que /media/batch no sea capturado por /media/:id.
+ *
+ * RENDIMIENTO — metadata primero, enlaces después:
+ * la ficha (sinopsis, reparto, imágenes, temporadas) sale de la DB/caché en milisegundos,
+ * mientras que resolver los servidores implica scraping en vivo. Por eso el detalle
+ * responde de inmediato con un bloque `streams` que indica dónde pedir los enlaces, y la
+ * app los solicita al pulsar Reproducir. `?streams=wait` mantiene el comportamiento
+ * bloqueante de siempre para clientes que esperan todo en una sola respuesta.
  */
 const router = Router();
+
+/** ¿El cliente pide esperar a que los enlaces estén resueltos? */
+function wantsBlockingStreams(req: Request): boolean {
+  const streams = String(req.query.streams || '').toLowerCase();
+  const include = String(req.query.include || '').toLowerCase();
+  return streams === 'wait' || streams === 'true' || streams === '1' || include === 'streams';
+}
+
+/** Adjunta el bloque `streams` y elimina los campos internos del ítem. */
+function withStreamsBlock(item: MediaItem, basePath: 'media' | 'series') {
+  const ready = Boolean(item.servers && item.servers.length > 0);
+  return {
+    ...CatalogService.toPublicItem(item),
+    streams: {
+      status: ready ? 'ready' : 'pending',
+      url: `/api/v1/${basePath}/${item.id}/streams`,
+      updated_at: item.streams_updated_at || null
+    }
+  };
+}
+
+/** Resuelve y devuelve únicamente los enlaces reproducibles de un título. */
+async function respondWithStreams(req: Request, res: Response, typeHint?: ContentType) {
+  const deep = String(req.query.deep || '') === '1' || String(req.query.deep || '') === 'true';
+  const item = await CatalogService.getStreams(req.params.id, typeHint, { deep });
+
+  if (!item) {
+    return sendErrorResponse(res, 404, 'RESOURCE_NOT_FOUND', 'El contenido solicitado no existe o no está disponible.');
+  }
+
+  res.json({
+    status: 'success',
+    data: {
+      id: item.id,
+      tmdb_id: item.tmdb_id,
+      type: item.type,
+      title: item.title,
+      primary_stream: item.primary_stream || null,
+      servers: item.servers || [],
+      seasons: item.seasons || undefined,
+      updated_at: item.streams_updated_at || null
+    }
+  });
+}
 
 // Detalle de Episodio específico (/series/... y /media/...)
 router.get(
@@ -52,6 +104,24 @@ router.get(
   }
 );
 
+// Enlaces reproducibles (camino lento aislado). Se piden al pulsar Reproducir.
+// ?deep=1 fuerza la fusión multifuente completa (TioPlus + FuegoCine).
+router.get('/api/v1/media/:id/streams', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    await respondWithStreams(req, res);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get('/api/v1/series/:id/streams', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    await respondWithStreams(req, res, 'tvseries');
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Detalle específico para Series
 router.get('/api/v1/series/:id', async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -60,11 +130,15 @@ router.get('/api/v1/series/:id', async (req: Request, res: Response, next: NextF
       const epDetail = await RealScraperService.scrapeEpisodeDetail(req.params.id, parseInt(season as string), parseInt(episode as string));
       if (epDetail) return res.json({ status: 'success', data: epDetail });
     }
-    const item = await CatalogService.getById(req.params.id, 'tvseries');
+
+    const item = wantsBlockingStreams(req)
+      ? await CatalogService.getStreams(req.params.id, 'tvseries')
+      : await CatalogService.getMetadata(req.params.id, 'tvseries');
+
     if (!item) {
       return sendErrorResponse(res, 404, 'RESOURCE_NOT_FOUND', 'La serie solicitada no existe o no está disponible.');
     }
-    res.json({ status: 'success', data: item });
+    res.json({ status: 'success', data: withStreamsBlock(item, 'series') });
   } catch (err) {
     next(err);
   }
@@ -78,19 +152,25 @@ router.get('/api/v1/media/:id', async (req: Request, res: Response, next: NextFu
       const epDetail = await RealScraperService.scrapeEpisodeDetail(req.params.id, parseInt(season as string), parseInt(episode as string));
       if (epDetail) return res.json({ status: 'success', data: epDetail });
     }
-    const item = await CatalogService.getById(req.params.id);
+
+    const item = wantsBlockingStreams(req)
+      ? await CatalogService.getStreams(req.params.id)
+      : await CatalogService.getMetadata(req.params.id);
+
     if (!item) {
       return sendErrorResponse(res, 404, 'RESOURCE_NOT_FOUND', 'El contenido solicitado no existe o no está disponible.');
     }
 
+    const payload: Record<string, unknown> = withStreamsBlock(item, 'media');
+
     if (include === 'season_1' || include === 'first_season') {
       const firstEp = await RealScraperService.scrapeEpisodeDetail(item.id, 1, 1);
       if (firstEp) {
-        (item as any).season_1_first_episode = firstEp;
+        payload.season_1_first_episode = firstEp;
       }
     }
 
-    res.json({ status: 'success', data: item });
+    res.json({ status: 'success', data: payload });
   } catch (err) {
     next(err);
   }
