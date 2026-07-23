@@ -3,7 +3,7 @@ import { supabase } from './supabaseService';
 import { RealScraperService } from './realScraperService';
 import { TmdbService } from './tmdbService';
 import { sortServersBySourcePriority, getPrimaryStream } from './streamSorter';
-import { normalizeTitle } from '../utils/text';
+import { normalizeTitle, slugify } from '../utils/text';
 import { CacheStore } from '../cache/store';
 
 // TTL del caché de catálogo/búsqueda. Con Redis (KV_REST_API_* / UPSTASH_*) las entradas
@@ -81,6 +81,60 @@ export class CatalogService {
         }
       }
     }
+  }
+
+  /**
+   * Resuelve un slug directamente contra las fuentes reales:
+   * FuegoCine (ids con forma 2025-04-titulo-2012-html) y TioPlus (por categoría).
+   * Devuelve el detalle SIN enriquecer, o null si el slug no existe en ninguna fuente.
+   */
+  private static async resolveFromSource(slug: string): Promise<MediaItem | null> {
+    const fuegocineMatch = slug.match(/^(\d{4})-(\d{2})-(.+)-html$/);
+    if (fuegocineMatch) {
+      const fuegocineUrl = `https://www.fuegocine.com/${fuegocineMatch[1]}/${fuegocineMatch[2]}/${fuegocineMatch[3]}.html`;
+      const fcDetail = await RealScraperService.scrapeFuegocineDetail(fuegocineUrl).catch(() => null);
+      if (fcDetail) return fcDetail;
+    }
+
+    for (const cat of ['pelicula', 'serie', 'anime', 'dorama']) {
+      const detail = await RealScraperService.scrapeDetail(`https://tioplus.app/${cat}/${slug}`).catch(() => null);
+      if (detail && (detail.servers?.length || detail.seasons?.length)) return detail;
+    }
+
+    return null;
+  }
+
+  /**
+   * Localiza una fila del catálogo aceptando CUALQUIER forma de id que la API haya podido
+   * emitir: el id de la fuente, el tmdb_id, un slug contenido dentro del id de la fuente
+   * (fuegocine antepone fecha y añade año + "-html") o un slug derivado del título.
+   * Sin esto, un id válido de la búsqueda podía responder 404 en el detalle.
+   */
+  private static async findDbRowByAnyId(id: string): Promise<any | null> {
+    const slug = id.trim();
+    if (!slug) return null;
+    // Solo [a-z0-9-] llega a los patrones LIKE, así que no hay riesgo de inyección de comodines.
+    const safeSlug = slugify(slug);
+
+    const attempts: Array<() => PromiseLike<{ data: any[] | null }>> = [
+      // a) id exacto de la fuente
+      () => supabase.from('media_items').select('*').eq('id', slug).limit(1),
+      // b) tmdb_id numérico
+      ...(isNaN(Number(slug)) ? [] : [() => supabase.from('media_items').select('*').eq('tmdb_id', Number(slug)).limit(1)]),
+      // c) slug contenido en el id de la fuente (2025-04-<slug>-2012-html)
+      ...(safeSlug ? [() => supabase.from('media_items').select('*').ilike('id', `%${safeSlug}%`).limit(1)] : []),
+      // d) título derivado del slug: los guiones cubren espacios y puntuación ("3: los" ← "3-los")
+      ...(safeSlug ? [() => supabase.from('media_items').select('*').ilike('title_normalized', safeSlug.replace(/-/g, '%')).limit(1)] : [])
+    ];
+
+    for (const attempt of attempts) {
+      try {
+        const { data } = await attempt();
+        if (data && data.length > 0) return data[0];
+      } catch {}
+    }
+
+    return null;
   }
 
   /**
@@ -327,33 +381,17 @@ export class CatalogService {
       }
     }
 
-    // 1. Intentar si es un slug de FuegoCine (ej. 2025-04-spiderman-lejos-de-casa-2019-html)
+    // 1-2. Resolver el slug contra las fuentes reales (FuegoCine y TioPlus).
     if (!result) {
-      const fuegocineMatch = q.match(/^(\d{4})-(\d{2})-(.+)-html$/);
-      if (fuegocineMatch) {
-        const fuegocineUrl = `https://www.fuegocine.com/${fuegocineMatch[1]}/${fuegocineMatch[2]}/${fuegocineMatch[3]}.html`;
-        const fcDetail = await RealScraperService.scrapeFuegocineDetail(fuegocineUrl);
-        if (fcDetail) {
-          result = await TmdbService.enrichMediaItem(fcDetail);
-        }
-      }
+      const fromSource = await this.resolveFromSource(q);
+      if (fromSource) result = await TmdbService.enrichMediaItem(fromSource);
     }
 
-    // 2. Intentar por categorías directas en TioPlus (película, serie, anime, dorama)
+    // 3. Buscar por texto o TMDB ID de forma inteligente con filtro estricto de título / slug / alias.
+    //    El término se des-sluguifica ("madagascar-3-los-fugitivos" → "madagascar 3 los fugitivos")
+    //    porque la búsqueda opera sobre títulos, no sobre slugs con guiones.
     if (!result) {
-      const categories = ['pelicula', 'serie', 'anime', 'dorama'];
-      for (const cat of categories) {
-        const detail = await RealScraperService.scrapeDetail(`https://tioplus.app/${cat}/${q}`);
-        if (detail && (detail.servers?.length || detail.seasons?.length)) {
-          result = await TmdbService.enrichMediaItem(detail);
-          break;
-        }
-      }
-    }
-
-    // 3. Buscar por texto o TMDB ID de forma inteligente con filtro estricto de título / slug / alias
-    if (!result) {
-      const scraped = await this.search(q);
+      const scraped = await this.search(q.replace(/-/g, ' ').trim());
       if (scraped.length > 0) {
         const norm = (t: string) => t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "").trim();
         const targetNorm = norm(q);
@@ -364,17 +402,23 @@ export class CatalogService {
       }
     }
 
-    // 4. Fallback final a Supabase
+    // 4. Fallback a Supabase TOLERANTE AL FORMATO del id: id exacto, tmdb_id, slug embebido
+    //    en el id de la fuente y título derivado del slug. Cubre los ids "legacy" derivados
+    //    del título que la búsqueda devolvía antes ("madagascar-3-los-fugitivos").
     if (!result) {
-      try {
-        const { data } = await supabase
-          .from('media_items')
-          .select('*')
-          .or(`id.eq.${q},tmdb_id.eq.${isNaN(Number(q)) ? -1 : Number(q)}`)
-          .single();
-
-        if (data) result = await TmdbService.enrichMediaItem(this.mapDbItemToMediaItem(data));
-      } catch (err) {}
+      const dbRow = await this.findDbRowByAnyId(q);
+      if (dbRow) {
+        const mapped = this.mapDbItemToMediaItem(dbRow);
+        // El id REAL de la fila sí resuelve contra la fuente: recuperamos servidores/temporadas.
+        if (mapped.id && mapped.id !== q) {
+          const fromSource = await this.resolveFromSource(mapped.id);
+          if (fromSource) {
+            if (fromSource.servers && fromSource.servers.length) mapped.servers = fromSource.servers;
+            if (fromSource.seasons && fromSource.seasons.length) mapped.seasons = fromSource.seasons;
+          }
+        }
+        result = await TmdbService.enrichMediaItem(mapped);
+      }
     }
 
     // 5. Garantía y Fusión Multifuente de Servidores (TioPlus + FuegoCine).
@@ -705,13 +749,15 @@ export class CatalogService {
   }
 
   private static mapDbItemToMediaItem(dbRow: any): MediaItem {
-    const canonicalSlug = (dbRow.slug || dbRow.title || '')
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-|-$/g, '') || String(dbRow.id);
+    // El id de la fila ES el slug de la fuente (tioplus/fuegocine): el ÚNICO valor con el que
+    // getById puede volver a resolver el detalle y los servidores. Derivarlo del título
+    // ("Madagascar 3: Los Fugitivos" → "madagascar-3-los-fugitivos") devolvía en la búsqueda
+    // un id que no existía en ninguna fuente y el detalle respondía 404.
+    const sourceId = String(dbRow.id || '').trim();
+    const titleSlug = slugify(dbRow.slug || dbRow.title || '');
 
     return {
-      id: canonicalSlug,
+      id: sourceId || titleSlug || String(dbRow.tmdb_id || ''),
       tmdb_id: dbRow.tmdb_id || 0,
       imdb_id: dbRow.imdb_id || null,
       type: dbRow.type,
