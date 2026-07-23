@@ -9,6 +9,8 @@
  *   npm run repair:catalog -- --fuse --apply      # los funde bajo su ficha oficial de TMDB
  *   npm run repair:catalog -- --posters           # informa de poster/backdrop cruzados
  *   npm run repair:catalog -- --posters --apply   # los corrige con las imágenes de TMDB
+ *   npm run repair:catalog -- --unfuse            # informa de fusiones erróneas
+ *   npm run repair:catalog -- --unfuse --apply    # retira alias/fuentes que no corresponden
  *   npm run repair:catalog -- --reindex --apply   # reconstruye title_normalized
  *
  * Por qué existe: el catálogo se pobló con un matcher que, ante títulos con artículo
@@ -304,7 +306,7 @@ async function fuseSyntheticDuplicates(apply: boolean, limitArg?: number): Promi
       }
     }));
 
-    for (const { row, match } of results) {
+    for (const { row, type, match } of results) {
       if (!match || !match.matched || match.id <= 0) {
         stillUnmatched++;
         continue;
@@ -339,6 +341,18 @@ async function fuseSyntheticDuplicates(apply: boolean, limitArg?: number): Promi
       if (match.score < DELETE_SCORE) {
         skipped++;
         console.log(`   ! ${row.id}\n     "${row.title}" ~ ${twin.id} = "${twin.title}" (score ${match.score.toFixed(2)} < ${DELETE_SCORE}: no se funde)`);
+        continue;
+      }
+
+      // Segunda llave antes de borrar: que TMDB reconozca ESTE título como uno de los
+      // nombres de la ficha canónica. La puntuación del matcher sola no basta —puede
+      // acertar de más y arrastrar una película entera a la ficha equivocada—, y comparar
+      // los dos títulos entre sí tampoco, porque las variantes regionales legítimas no se
+      // parecen. Sin esta comprobación, "Solo en casa 4" acabó absorbida por "Yu-Gi-Oh! GX".
+      const confirmed = await TmdbService.confirmsTitle(match.id, type, row.title).catch(() => false);
+      if (!confirmed) {
+        skipped++;
+        console.log(`   ! ${row.id}\n     "${row.title}" → tmdb ${match.id} = "${twin.title}", pero TMDB no registra ese nombre para la ficha: no se funde`);
         continue;
       }
 
@@ -392,6 +406,95 @@ async function fuseSyntheticDuplicates(apply: boolean, limitArg?: number): Promi
     `${skipped} omitidas por parecido insuficiente, ${stillUnmatched} siguen sin match en TMDB`
   );
   if (!apply && (fused > 0 || adopted > 0)) console.log('   Ejecuta de nuevo con --apply para escribir los cambios.');
+}
+
+/**
+ * LIMPIEZA de fusiones erróneas (`--unfuse`).
+ *
+ * Al fundir duplicados, la ficha superviviente absorbe el nombre y la URL de origen de la
+ * absorbida. Si esa fusión no debió ocurrir, la ficha canónica se queda con un alias y una
+ * fuente que no le corresponden ("Yu-Gi-Oh! GX" con el alias "Solo en casa 4" y un enlace a
+ * /pelicula/solo-en-casa-4), lo que además contamina el índice de búsqueda.
+ *
+ * Se recorren las fichas fusionadas y se retira todo alias que TMDB NO reconozca como
+ * nombre de esa ficha, junto con la URL de origen que llegó con él. Los alias legítimos
+ * —las variantes regionales de verdad— los confirma TMDB y se conservan.
+ */
+async function unfuseWrongMerges(apply: boolean): Promise<void> {
+  console.log(`🧹 Buscando fusiones erróneas${apply ? '' : ' (dry-run: no se escribe nada)'}...`);
+  const withNormalized = await hasColumn('title_normalized');
+
+  const rows: any[] = [];
+  const PAGE = 1000;
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await db
+      .from('media_items')
+      .select('id,tmdb_id,type,title,original_title,aliases,source_urls,source_url')
+      .gt('tmdb_id', 0)
+      .range(from, from + PAGE - 1);
+    if (error) throw new Error(error.message);
+    if (!data || data.length === 0) break;
+    rows.push(...data);
+    if (data.length < PAGE) break;
+  }
+
+  const merged = rows.filter(r => (r.aliases || []).length > 1 || (r.source_urls || []).length > 1);
+  console.log(`   ${merged.length} fichas con señales de fusión`);
+
+  let cleaned = 0;
+  const CONCURRENCY = 5;
+  for (let i = 0; i < merged.length; i += CONCURRENCY) {
+    const chunk = merged.slice(i, i + CONCURRENCY);
+
+    const checked = await Promise.all(chunk.map(async row => {
+      const type: ContentType = row.type === 'tvseries' ? 'tvseries' : 'movie';
+      const orphans: string[] = [];
+      for (const alias of row.aliases || []) {
+        // El propio título nunca es huérfano, y una variante regional la confirma TMDB.
+        if (similarity(alias, row.title) >= 0.6 || similarity(alias, row.original_title || '') >= 0.6) continue;
+        const ok = await TmdbService.confirmsTitle(row.tmdb_id, type, alias).catch(() => true);
+        if (!ok) orphans.push(alias);
+      }
+      return { row, orphans };
+    }));
+
+    for (const { row, orphans } of checked) {
+      if (orphans.length === 0) continue;
+
+      const keptAliases = (row.aliases || []).filter((a: string) => !orphans.includes(a));
+      // La URL de origen que entró con el alias huérfano se reconoce por su slug.
+      const keptUrls = (row.source_urls || []).filter((u: string) => {
+        const slug = String(u).toLowerCase();
+        return !orphans.some(o => slug.includes(slugOf(o)));
+      });
+
+      const patch: Record<string, unknown> = { aliases: keptAliases };
+      if (keptUrls.length !== (row.source_urls || []).length) patch.source_urls = keptUrls;
+      if (withNormalized) patch.title_normalized = searchIndexKey(row.title, row.original_title, keptAliases);
+
+      console.log(
+        `   ␡ ${row.id} "${row.title}"\n     retira ${JSON.stringify(orphans)}` +
+        (patch.source_urls ? ` y ${(row.source_urls || []).length - keptUrls.length} fuente(s)` : '')
+      );
+
+      if (apply) {
+        const { error } = await db.from('media_items').update(patch).eq('id', row.id);
+        if (error) { console.warn(`     ⚠ ${error.message}`); continue; }
+      }
+      cleaned++;
+    }
+  }
+
+  console.log(`\n${apply ? '✅ Limpieza aplicada' : '📋 Dry-run'}: ${cleaned} fichas ${apply ? 'depuradas' : 'a depurar'}`);
+  if (cleaned > 0) {
+    console.log('   Las filas borradas por esas fusiones las recrea el próximo `npm run refresh:catalog`.');
+  }
+  if (!apply && cleaned > 0) console.log('   Ejecuta de nuevo con --apply para escribir los cambios.');
+}
+
+/** Slug de un título, para reconocer la URL de origen que llegó con él. */
+function slugOf(title: string): string {
+  return normalizeTitle(title).replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
 
 /** Nombre de fichero de una URL de imagen, ignorando el prefijo de tamaño de TMDB. */
@@ -517,6 +620,11 @@ async function main() {
 
   if (process.argv.includes('--posters')) {
     await repairCrossedImages(apply, Number.isFinite(limitArg) ? limitArg : undefined);
+    return;
+  }
+
+  if (process.argv.includes('--unfuse')) {
+    await unfuseWrongMerges(apply);
     return;
   }
 

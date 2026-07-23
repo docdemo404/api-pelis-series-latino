@@ -364,6 +364,23 @@ export class TmdbService {
   }
 
   /**
+   * ¿TMDB reconoce `title` como uno de los nombres de esta ficha?
+   *
+   * Es la comprobación que autoriza a FUNDIR dos filas del catálogo en una. No sirve pedir
+   * que los dos títulos se parezcan entre sí —"Minions: El origen de Gru" y "Minions: Nace
+   * un villano" son la misma película y apenas comparten palabras—, ni fiarse solo de la
+   * puntuación del matcher, que puede acertar de más: así fue como "Solo en casa 4" acabó
+   * absorbida dentro de "Yu-Gi-Oh! GX". La pregunta correcta es si el nombre está
+   * REGISTRADO en TMDB para ese id.
+   */
+  static async confirmsTitle(id: number, type: ContentType, title: string): Promise<boolean> {
+    if (!id || id <= 0 || !title) return false;
+    const endpoint = type === 'tvseries' ? 'tv' : 'movie';
+    const alt = await this.scoreAgainstKnownTitles(id, endpoint, cleanForSearch(title));
+    return alt.score >= ALT_TITLE_ACCEPT;
+  }
+
+  /**
    * Resuelve un título contra TMDB verificando que el resultado SEA el mismo título.
    * Prueba, en orden y parando en cuanto el match es inequívoco:
    *   endpoint+año → endpoint sin año → endpoint contrario → /search/multi → scraping de TMDB.
