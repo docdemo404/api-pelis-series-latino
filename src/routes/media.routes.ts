@@ -44,15 +44,23 @@ async function resolveDetail(req: Request, typeHint?: ContentType): Promise<Medi
   }
 }
 
-/** Adjunta el bloque `streams` y elimina los campos internos del ítem. */
+/**
+ * Adjunta el bloque `streams` y elimina los campos internos del ítem.
+ *
+ * `unavailable` es el veredicto de una búsqueda ya hecha a fondo en todas las fuentes:
+ * anunciarlo como `pending` dejaba a la app reintentando para siempre unos enlaces que
+ * no existen.
+ */
 function withStreamsBlock(item: MediaItem, basePath: 'media' | 'series') {
   const ready = Boolean(item.servers && item.servers.length > 0);
+  const status = ready ? 'ready' : (item.has_streams === false ? 'unavailable' : 'pending');
   return {
     ...CatalogService.toPublicItem(item),
     streams: {
-      status: ready ? 'ready' : 'pending',
+      status,
       url: `/api/v1/${basePath}/${item.id}/streams`,
-      updated_at: item.streams_updated_at || null
+      updated_at: item.streams_updated_at || null,
+      checked_at: item.streams_checked_at || null
     }
   };
 }

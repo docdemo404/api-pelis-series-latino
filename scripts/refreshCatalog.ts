@@ -2,13 +2,17 @@
  * Job de pre-scrape del catálogo → Supabase (Fase 4.1 del plan de rendimiento).
  *
  * Corre en background (GitHub Actions, o manual):
- *   npm run refresh:catalog                    # crawl COMPLETO del catálogo (miles de títulos)
- *   npm run refresh:catalog -- 20              # limitado (pruebas)
- *   npm run refresh:catalog -- --streams=300   # además pre-resuelve enlaces del home
+ *   npm run refresh:catalog                     # crawl COMPLETO del catálogo (miles de títulos)
+ *   npm run refresh:catalog -- 20               # limitado (pruebas)
+ *   npm run refresh:catalog -- --streams=300    # además pre-resuelve enlaces del home
+ *   npm run refresh:catalog -- --verify=500     # además comprueba disponibilidad real
+ *   npm run verify:catalog                      # SOLO comprobar disponibilidad (sin crawl)
  *
  * Con la DB poblada, la API sirve listados (getAll DB-first) y el pase de prefijo
  * de búsqueda desde Postgres en milisegundos, sin scraping dentro del request.
  * Con --streams, además, las fichas del home abren con los enlaces ya listos.
+ * Con --verify, las fichas que ninguna fuente puede reproducir quedan marcadas
+ * (`has_streams = false`) y dejan de anunciarse en el home y en la búsqueda.
  */
 import 'dotenv/config';
 import { RealScraperService } from '../src/services/realScraperService';
@@ -88,29 +92,61 @@ function isTmdbIdConflict(message: string): boolean {
  * por crawl), se aprovecha para COMPLETAR la ficha que ya está: se rellenan solo los huecos
  * (póster, sinopsis, duración, y sobre todo la url de origen si faltaba), sin pisar nunca
  * datos buenos ni cambiar el id de la fila existente.
+ *
+ * Además se ABSORBE lo que solo la copia aporta, que es justo lo que antes se tiraba:
+ *   · su página de origen, en `source_urls` — sin ella los servidores exclusivos de esa
+ *     fuente quedaban inalcanzables desde la ficha unificada (migración 005);
+ *   · sus alias, para que la búsqueda encuentre el título por CUALQUIERA de sus nombres
+ *     ("Minions: El origen de Gru" y "Minions: Nace un villano" son la misma película).
  */
-async function mergeIntoExisting(row: Record<string, unknown>): Promise<boolean> {
+async function mergeIntoExisting(
+  row: Record<string, unknown>,
+  opts: { withNormalized: boolean; withMultiSource: boolean }
+): Promise<boolean> {
   const tmdbId = row.tmdb_id as number;
   if (!tmdbId) return false;
 
-  const { data } = await db
-    .from('media_items')
-    .select('id,poster,backdrop,logo,overview,runtime,director,source_url,trailer')
-    .eq('tmdb_id', tmdbId)
-    .limit(1);
+  const columns =
+    'id,title,original_title,aliases,poster,backdrop,logo,overview,runtime,director,source_url,trailer' +
+    (opts.withMultiSource ? ',source_urls' : '');
 
-  const existing = data && data[0];
+  const { data } = await db.from('media_items').select(columns).eq('tmdb_id', tmdbId).limit(1);
+
+  const existing: any = data && data[0];
   if (!existing) return false;
 
   const patch: Record<string, unknown> = {};
   const fillIfEmpty = (field: string) => {
-    const current = (existing as any)[field];
+    const current = existing[field];
     const incoming = row[field];
     const isEmpty = current === null || current === undefined || current === '';
     if (isEmpty && incoming) patch[field] = incoming;
   };
 
   ['poster', 'backdrop', 'logo', 'overview', 'runtime', 'director', 'source_url', 'trailer'].forEach(fillIfEmpty);
+
+  // Página de origen de la fuente absorbida (se conserva junto a la que ya estaba).
+  if (opts.withMultiSource) {
+    const current: string[] = existing.source_urls || [];
+    const merged = Array.from(
+      new Set([...current, existing.source_url, row.source_url].filter(Boolean) as string[])
+    );
+    if (merged.length > current.length) patch.source_urls = merged;
+  }
+
+  // Alias de la otra fuente. Alimentan title_normalized, que es la única columna sobre la
+  // que busca el RPC: sin reindexar, el nombre absorbido no encontraría la ficha.
+  const currentAliases: string[] = existing.aliases || [];
+  const mergedAliases = Array.from(
+    new Set([...currentAliases, ...((row.aliases as string[]) || [])].filter(Boolean))
+  );
+  if (mergedAliases.length > currentAliases.length) {
+    patch.aliases = mergedAliases;
+    if (opts.withNormalized) {
+      patch.title_normalized = searchIndexKey(existing.title, existing.original_title, mergedAliases);
+    }
+  }
+
   if (Object.keys(patch).length === 0) return true; // nada que aportar: no es un fallo
 
   const { error } = await db.from('media_items').update(patch).eq('id', existing.id);
@@ -146,6 +182,59 @@ async function prewarmStreams(items: MediaItem[], max: number): Promise<void> {
 }
 
 /**
+ * Comprobación de DISPONIBILIDAD sobre las fichas que nunca se han verificado.
+ *
+ * El catálogo se puebla con metadata de TMDB sin saber todavía si alguna fuente tiene
+ * enlaces, así que hay títulos indexados que no se pueden reproducir. Esta pasada los
+ * resuelve a fondo (fusión multifuente) y deja anotado el veredicto en `has_streams`,
+ * que es lo que el home, el discover y la búsqueda usan para dejar de anunciarlos.
+ *
+ * Se prioriza lo NO comprobado y se avanza por lotes: pensada para ejecutarse a diario
+ * y ir cubriendo el catálogo, no para verificarlo entero de una sentada.
+ */
+async function verifyAvailability(max: number): Promise<void> {
+  const { data, error } = await db
+    .from('media_items')
+    .select('id,type,title')
+    .is('has_streams', null)
+    .order('updated_at', { ascending: false })
+    .limit(max);
+
+  if (error) {
+    console.warn(`   ⚠ No se puede verificar disponibilidad: ${error.message}`);
+    console.warn('     Ejecuta src/db/migrations/005_multisource_and_availability.sql en Supabase.');
+    return;
+  }
+  if (!data || data.length === 0) {
+    console.log('✔ No quedan fichas sin comprobar.');
+    return;
+  }
+
+  console.log(`🔍 Comprobando disponibilidad de ${data.length} fichas sin verificar...`);
+  const CONCURRENCY = 8;
+  let withStreams = 0;
+  let ghosts = 0;
+
+  for (let i = 0; i < data.length; i += CONCURRENCY) {
+    const chunk = data.slice(i, i + CONCURRENCY);
+    // getStreams(deep) escribe él mismo el veredicto (CatalogService.persistStreams).
+    const resolved = await Promise.all(
+      chunk.map(r => CatalogService.getStreams(r.id, r.type, { deep: true }).catch(() => null))
+    );
+    resolved.forEach((item, idx) => {
+      const ok = Boolean(item && item.has_streams);
+      if (ok) withStreams++;
+      else {
+        ghosts++;
+        console.log(`   ␀ sin enlaces: ${chunk[idx].id} — "${chunk[idx].title}"`);
+      }
+    });
+  }
+
+  console.log(`   ${withStreams} con enlaces · ${ghosts} fichas fantasma retiradas de los feeds`);
+}
+
+/**
  * `--streams` / `--streams=N`: cuántos títulos del home llevan sus enlaces pre-resueltos.
  * Sin el flag no se pre-calienta nada (crawl igual de rápido que antes).
  */
@@ -156,10 +245,26 @@ function parseStreamsFlag(argv: string[]): number {
   return Number.isFinite(value) && value > 0 ? value : 300;
 }
 
+/** `--verify` / `--verify=N`: cuántas fichas sin comprobar se verifican al final del crawl. */
+function parseVerifyFlag(argv: string[]): number {
+  const flag = argv.find(a => a === '--verify' || a.startsWith('--verify='));
+  if (!flag) return 0;
+  const value = flag.includes('=') ? parseInt(flag.split('=')[1], 10) : NaN;
+  return Number.isFinite(value) && value > 0 ? value : 500;
+}
+
 async function main() {
   const positional = process.argv.slice(2).filter(a => !a.startsWith('--'));
   const limitArg = parseInt(positional[0] || '', 10);
   const streamsLimit = parseStreamsFlag(process.argv);
+  const verifyLimit = parseVerifyFlag(process.argv);
+
+  // `--verify-only`: comprobar disponibilidad SIN volver a crawlear. Es la forma práctica
+  // de ir limpiando fichas fantasma del catálogo ya poblado, sin pagar el crawl entero.
+  if (process.argv.includes('--verify-only')) {
+    await verifyAvailability(verifyLimit || 500);
+    return;
+  }
 
   console.log('🔎 Recolectando catálogo desde las fuentes...');
   let items = await collectCatalog();
@@ -240,6 +345,10 @@ async function main() {
   if (!withRichMetadata) {
     console.warn('   ⚠ Columnas source_url/runtime/director ausentes — ejecuta src/db/migrations/004_streams_and_rich_metadata.sql para fichas instantáneas.');
   }
+  const withMultiSource = await hasColumn('source_urls');
+  if (!withMultiSource) {
+    console.warn('   ⚠ Columnas source_urls/has_streams ausentes — ejecuta src/db/migrations/005_multisource_and_availability.sql para unificar fuentes y ocultar fichas sin enlaces.');
+  }
 
   const rows = all.map(it => toRow(it, withNormalized, withMetadataSource, withRichMetadata));
   let ok = 0;
@@ -262,7 +371,7 @@ async function main() {
       }
 
       if (isTmdbIdConflict(rowError.message)) {
-        const merged = await mergeIntoExisting(row);
+        const merged = await mergeIntoExisting(row, { withNormalized, withMultiSource });
         if (merged) {
           mergedCount++;
           continue;
@@ -289,11 +398,31 @@ async function main() {
       await prewarmStreams(all, streamsLimit);
     }
   }
+
+  if (verifyLimit > 0) {
+    if (!withMultiSource) {
+      console.warn('   ⚠ Sin la migración 005 no hay dónde anotar el veredicto: se omite la comprobación.');
+    } else {
+      await verifyAvailability(verifyLimit);
+    }
+  }
+}
+
+/**
+ * Cierre del proceso. Supabase deja sockets HTTP cerrándose; llamar a process.exit() en el
+ * mismo turno del bucle de eventos aborta libuv en Windows ("UV_HANDLE_CLOSING") y convierte
+ * una ejecución correcta en un fallo — se nota en cuanto un modo termina rápido, como
+ * --verify-only sin fichas pendientes. El timer sin ref no retiene el proceso: si el bucle
+ * se vacía antes, sale solo con este código; si algo lo mantiene vivo, fuerza la salida.
+ */
+function exitWhenSettled(code: number): void {
+  process.exitCode = code;
+  setTimeout(() => process.exit(code), 250).unref();
 }
 
 main()
-  .then(() => process.exit(0))
+  .then(() => exitWhenSettled(0))
   .catch(err => {
     console.error('❌ refreshCatalog:', err);
-    process.exit(1);
+    exitWhenSettled(1);
   });

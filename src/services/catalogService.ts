@@ -337,6 +337,47 @@ export class CatalogService {
   }
 
   /**
+   * ¿Está aplicada la migración 005? Se comprueba UNA sola vez por proceso: sin ella las
+   * columnas de disponibilidad no existen y cualquier consulta que las filtre sería
+   * rechazada ENTERA, dejando el home y el discover vacíos. Ante la duda, no se filtra.
+   */
+  private static availabilityColumnProbe: Promise<boolean> | null = null;
+  private static hasAvailabilityColumn(): Promise<boolean> {
+    if (!this.availabilityColumnProbe) {
+      // Aquí SÍ queremos ejecutar la consulta: `await` sobre el builder la lanza y basta
+      // con mirar si Postgres se queja de que la columna no existe.
+      this.availabilityColumnProbe = (async () => {
+        try {
+          const { error } = await supabase.from('media_items').select('has_streams').limit(1);
+          return !error;
+        } catch {
+          return false;
+        }
+      })();
+    }
+    return this.availabilityColumnProbe;
+  }
+
+  /**
+   * Predicado que deja fuera de un listado las fichas FANTASMA: las que se comprobaron a
+   * fondo y no tienen ningún enlace reproducible (`has_streams = false`). Las que nunca se
+   * han comprobado (NULL) siguen apareciendo — son la mayor parte del catálogo, y ocultarlas
+   * por no estar verificadas vaciaría la API en vez de limpiarla. Devuelve null si la
+   * migración 005 no está aplicada: entonces no se filtra nada.
+   *
+   * Se devuelve el PREDICADO, no la consulta ya filtrada, y no es casual: un
+   * PostgrestFilterBuilder es "thenable", así que devolverlo desde una función `async` hace
+   * que la promesa lo adopte y EJECUTE la consulta a medio construir. El llamador recibía
+   * entonces un objeto de resultado en lugar del builder, los filtros siguientes se perdían
+   * y el home se quedaba sin una sola fila.
+   */
+  private static async ghostFilter(): Promise<string | null> {
+    return (await this.hasAvailabilityColumn())
+      ? 'has_streams.is.null,has_streams.eq.true'
+      : null;
+  }
+
+  /**
    * Pool de títulos para construir el home. Una sola query a Postgres (sin scraping),
    * cacheada, lo bastante ancha para alimentar ~15 carruseles temáticos. Cae a getAll()
    * (que sí sabe scrapear en vivo) cuando la DB todavía no está poblada.
@@ -351,13 +392,18 @@ export class CatalogService {
     if (cached) return cached;
 
     try {
-      const { data } = await supabase
+      let query = supabase
         .from('media_items')
         .select('*')
         .not('poster', 'is', null)
         .not('genres', 'eq', '{}')
         .order('updated_at', { ascending: false })
         .limit(limit);
+
+      const ghosts = await this.ghostFilter();
+      if (ghosts) query = query.or(ghosts);
+
+      const { data } = await query;
 
       if (data && data.length >= 30) {
         const items = data.map(this.mapDbItemToMediaItem);
@@ -417,6 +463,10 @@ export class CatalogService {
         .not('poster', 'is', null)
         .not('genres', 'eq', '{}');
 
+      // Los carruseles del home no anuncian títulos que ya sabemos que no se reproducen.
+      const ghosts = await this.ghostFilter();
+      if (ghosts) query = query.or(ghosts);
+
       if (spec.type) query = query.eq('type', spec.type);
       if (spec.genres && spec.genres.length > 0) query = query.overlaps('genres', spec.genres);
       if (spec.subcategory) query = query.contains('subcategories', [spec.subcategory]);
@@ -460,6 +510,10 @@ export class CatalogService {
         .select('*', { count: 'exact' })
         .order('updated_at', { ascending: false })
         .range(from, from + safeLimit - 1);
+
+      // El "ver todo" tampoco debe pasear fichas sin reproducción posible.
+      const ghosts = await this.ghostFilter();
+      if (ghosts) query = query.or(ghosts);
 
       if (type) query = query.eq('type', type);
       if (genre) query = query.contains('genres', [genre]);
@@ -577,25 +631,54 @@ export class CatalogService {
    * Escribe de vuelta en Supabase los enlaces recién resueltos (write-through). Se llama en
    * fire-and-forget: NUNCA debe retrasar ni tumbar la respuesta. Si la migración 004 aún no
    * se ejecutó, el update falla en silencio y todo sigue funcionando desde el caché.
+   *
+   * `verified` marca que la resolución fue EXHAUSTIVA (fusión multifuente incluida), lo
+   * único que autoriza a anotar un veredicto de disponibilidad: que un camino barato no
+   * encuentre enlaces no significa que la ficha sea un fantasma.
    */
-  private static async persistStreams(item: MediaItem): Promise<void> {
+  private static async persistStreams(item: MediaItem, verified: boolean = false): Promise<void> {
     if (!item.id) return;
+
+    const hasServers = Boolean(item.servers && item.servers.length > 0);
+    const update: Record<string, unknown> = {
+      servers: item.servers || [],
+      seasons: item.seasons || [],
+      source_url: item._source_url || null,
+      streams_updated_at: new Date().toISOString()
+    };
+    if (verified) {
+      update.has_streams = hasServers || this.hasEpisodeServers(item);
+      update.streams_checked_at = new Date().toISOString();
+    }
+    if (item._source_urls && item._source_urls.length > 0) {
+      update.source_urls = item._source_urls;
+    }
+
     try {
-      await getSupabaseAdmin()
-        .from('media_items')
-        .update({
-          servers: item.servers || [],
-          seasons: item.seasons || [],
-          source_url: item._source_url || null,
-          streams_updated_at: new Date().toISOString()
-        })
-        .eq('id', item.id);
+      const { error } = await getSupabaseAdmin().from('media_items').update(update).eq('id', item.id);
+      if (!error) return;
     } catch {}
+
+    // Sin la migración 005 las columnas nuevas no existen y el update entero se rechaza:
+    // se reintenta con el conjunto de campos de la 004 para no perder los enlaces.
+    try {
+      delete update.has_streams;
+      delete update.streams_checked_at;
+      delete update.source_urls;
+      await getSupabaseAdmin().from('media_items').update(update).eq('id', item.id);
+    } catch {}
+  }
+
+  /** ¿Algún episodio de la serie tiene enlaces propios? (una serie se reproduce por episodio). */
+  private static hasEpisodeServers(item: MediaItem): boolean {
+    return (item.seasons || []).some(season =>
+      (season.episodes || []).some(ep => (ep.servers || []).length > 0)
+    );
   }
 
   /** Copia pública de un ítem: elimina los campos internos (`_source_url`, `_tioplus_url`). */
   static toPublicItem<T extends Record<string, any>>(item: T): T {
-    const { _source_url, _tioplus_url, ...rest } = item as any;
+    const { _source_url, _source_urls, _tioplus_url, ...rest } = item as any;
     return rest as T;
   }
 
@@ -880,11 +963,24 @@ export class CatalogService {
       }
     };
 
-    // B. URL exacta de la fuente (persistida por el job): un único detalle, sin búsqueda.
-    if (result._source_url) {
-      const detail = await this.scrapeDetailWithTimeout(result._source_url);
-      addServers(detail?.servers);
-      adoptSeasons(detail?.seasons);
+    // Todas las páginas de origen conocidas de esta ficha. Cuando la misma película existe
+    // en TioPlus y en FuegoCine, el catálogo la guarda UNA sola vez (tmdb_id es UNIQUE)
+    // pero con las dos URLs: hay que visitarlas TODAS o los servidores de la fuente
+    // absorbida no aparecen nunca. Ver migración 005.
+    const knownSources = new Set<string>(
+      [...(result._source_urls || []), result._source_url].filter((u): u is string => Boolean(u))
+    );
+
+    // B. URLs exactas de las fuentes (persistidas por el job): un detalle por fuente,
+    //    en paralelo y sin búsqueda por título.
+    if (knownSources.size > 0) {
+      const details = await Promise.all(
+        Array.from(knownSources).slice(0, 4).map(u => this.scrapeDetailWithTimeout(u))
+      );
+      for (const detail of details) {
+        addServers(detail?.servers);
+        adoptSeasons(detail?.seasons);
+      }
     }
 
     // B-bis. Sin source_url: el id de la fila SÍ resuelve por categoría contra la fuente.
@@ -897,7 +993,10 @@ export class CatalogService {
     // C. Fusión multifuente (TioPlus + FuegoCine) por título. Es el camino caro: solo cuando
     //    no hemos conseguido enlaces por las vías baratas, o cuando se pide explícitamente
     //    (`deep`, que usa el job de pre-calentado para dejar el set completo en la DB).
-    if ((allServers.length === 0 && !opts.cheap) || opts.deep) {
+    //    Es también el ÚNICO camino lo bastante exhaustivo como para concluir que una ficha
+    //    no tiene enlaces en ninguna parte (ver `exhaustive` más abajo).
+    const exhaustive = (allServers.length === 0 && !opts.cheap) || Boolean(opts.deep);
+    if (exhaustive) {
       const targetStrict = strictKey(result.title);
       const targetCanonical = canonicalTitleKey(result.title);
 
@@ -925,11 +1024,16 @@ export class CatalogService {
         adoptSeasons(detail?.seasons);
       }
 
-      // Guardamos la URL de la fuente: la próxima resolución será un solo scrapeDetail.
+      // Guardamos TODAS las URLs descubiertas, no solo la primera: son las fuentes que
+      // aportan servidores a esta misma ficha, y la próxima resolución las reutiliza sin
+      // volver a buscar por título.
+      for (const url of sourceUrls) knownSources.add(url);
       if (!result._source_url && sourceUrls.length > 0) {
         result._source_url = sourceUrls[0];
       }
     }
+
+    result._source_urls = Array.from(knownSources);
 
     // D. Serie sin servidores → resolver activamente S1:E1.
     const isSeries = result.type === 'tvseries' || (result.total_seasons != null && result.total_seasons > 0);
@@ -950,6 +1054,14 @@ export class CatalogService {
     await this.ensureSeasons(result);
     this.inheritServersToEpisodes(result);
 
+    // Veredicto de disponibilidad: solo una resolución EXHAUSTIVA puede concluir que una
+    // ficha no tiene enlaces en ninguna fuente. Es lo que permite dejar de anunciar en el
+    // home y en la búsqueda títulos que nunca podrán reproducirse (fichas fantasma).
+    if (exhaustive) {
+      result.has_streams = result.servers.length > 0 || this.hasEpisodeServers(result);
+      result.streams_checked_at = new Date().toISOString();
+    }
+
     if (result.servers.length > 0 || (result.seasons && result.seasons.length > 0)) {
       await this.cacheItem('byid', cacheKey, result, CACHE_TTL_SECONDS);
       if (result.servers.length > 0) {
@@ -958,9 +1070,15 @@ export class CatalogService {
         // seguía anunciando `streams.status: "pending"` durante horas para un título cuyos
         // servidores ya conocemos.
         await this.cacheItem('meta', cacheKey, result, METADATA_TTL_SECONDS);
-        // Write-through: la próxima apertura (incluso desde otra lambda) sale de la DB.
-        void this.persistStreams(result).catch(() => {});
       }
+    }
+
+    // Write-through: la próxima apertura (incluso desde otra lambda) sale de la DB. Se
+    // escribe TAMBIÉN cuando la búsqueda exhaustiva terminó sin enlaces: es justo ese
+    // resultado negativo el que marca la ficha como fantasma, y sin guardarlo la API
+    // repetiría la fusión multifuente completa en cada petición del mismo título.
+    if (result.servers.length > 0 || exhaustive) {
+      void this.persistStreams(result, exhaustive).catch(() => {});
     }
 
     return result;
@@ -1238,7 +1356,15 @@ export class CatalogService {
       // se resuelve sin scraping en vivo.
       seasons: Array.isArray(dbRow.seasons) && dbRow.seasons.length > 0 ? dbRow.seasons : undefined,
       streams_updated_at: dbRow.streams_updated_at || null,
+      // `has_streams` es TRI-estado: false ⇒ verificada sin enlaces; null/undefined ⇒ sin
+      // comprobar. Traducirlo a booleano con `|| false` borraría justo esa distinción.
+      has_streams: typeof dbRow.has_streams === 'boolean' ? dbRow.has_streams : undefined,
+      streams_checked_at: dbRow.streams_checked_at || null,
       _source_url: dbRow.source_url || undefined,
+      // Migración 005. Sin ella la columna no existe y se degrada a la URL única.
+      _source_urls: Array.isArray(dbRow.source_urls) && dbRow.source_urls.length > 0
+        ? dbRow.source_urls.filter(Boolean)
+        : (dbRow.source_url ? [dbRow.source_url] : []),
       primary_stream: getPrimaryStream((dbRow.servers || []).map((s: any) => ({ ...s, source_id: s.source_id || 'supabase' }))),
       servers: sortServersBySourcePriority((dbRow.servers || []).map((s: any) => ({ ...s, source_id: s.source_id || 'supabase' }))),
     };

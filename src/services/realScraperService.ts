@@ -166,7 +166,12 @@ export class RealScraperService {
           release_date: year,
           genres: [],
           subcategories: ['Destacado', 'Latino HD'],
-          poster: backdrop ? backdrop.replace('w1280', 'w342') : null,
+          // El slider SOLO expone la imagen apaisada de fondo. Antes se fabricaba un
+          // "póster" con ella cambiándole el tamaño (w1280 → w342), pero los prefijos de
+          // tamaño de TMDB no recortan: w342 de un backdrop sigue siendo el mismo
+          // apaisado, así que el campo poster acababa sirviendo una captura horizontal.
+          // Sin póster vertical real se deja en null y el cliente cae a `backdrop`.
+          poster: null,
           backdrop,
           logo: null,
           trailer: null,

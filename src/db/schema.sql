@@ -32,6 +32,13 @@ CREATE TABLE IF NOT EXISTS media_items (
     seasons JSONB DEFAULT '[]'::jsonb,
     source_url TEXT,
     streams_updated_at TIMESTAMP WITH TIME ZONE,
+    -- Todas las páginas de origen de la MISMA ficha (una por fuente). Permite unificar
+    -- los servidores de TioPlus y FuegoCine bajo un único registro. Ver migración 005.
+    source_urls TEXT[] DEFAULT '{}',
+    -- Disponibilidad verificada: TRUE con enlaces, FALSE fantasma (se oculta de los
+    -- feeds), NULL sin comprobar (se sigue mostrando). Ver migración 005.
+    has_streams BOOLEAN,
+    streams_checked_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -55,3 +62,7 @@ CREATE INDEX IF NOT EXISTS idx_media_updated_at ON media_items (updated_at DESC)
 CREATE INDEX IF NOT EXISTS idx_media_type_rating ON media_items (type, rating DESC NULLS LAST);
 CREATE INDEX IF NOT EXISTS idx_media_genres ON media_items USING gin (genres);
 CREATE INDEX IF NOT EXISTS idx_media_streams_updated ON media_items (streams_updated_at DESC NULLS LAST);
+
+-- Feeds sin fichas fantasma. Ver src/db/migrations/005_multisource_and_availability.sql
+CREATE INDEX IF NOT EXISTS idx_media_playable ON media_items (updated_at DESC) WHERE has_streams IS DISTINCT FROM false;
+CREATE INDEX IF NOT EXISTS idx_media_streams_checked ON media_items (streams_checked_at DESC NULLS FIRST);

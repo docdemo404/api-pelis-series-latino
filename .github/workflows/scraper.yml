@@ -32,6 +32,11 @@ jobs:
       # --streams=300 pre-resuelve además los enlaces de los títulos que alimentan el home,
       # para que su ficha emergente abra con los servidores ya listos (requiere la
       # migración 004; sin ella el paso se omite con un aviso).
+      #
+      # --verify=500 comprueba a fondo 500 fichas nunca verificadas y anota si tienen
+      # enlaces reales (`has_streams`). Las que no los tienen dejan de anunciarse en el
+      # home y en la búsqueda. Al ir por tandas, cada corrida diaria avanza sobre lo que
+      # queda sin comprobar en vez de repetir el catálogo entero (requiere la migración 005).
       - name: Refrescar catálogo pre-scrapeado en Supabase
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
@@ -39,4 +44,4 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           # Necesaria para escribir en media_items (la tabla tiene RLS activado)
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: npx ts-node scripts/refreshCatalog.ts --streams=300
+        run: npx ts-node scripts/refreshCatalog.ts --streams=300 --verify=500

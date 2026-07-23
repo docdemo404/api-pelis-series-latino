@@ -10,6 +10,8 @@ const UA = USER_AGENT;
 
 const tmdbIdCache = new Map<string, TmdbMatch>();
 const tmdbDetailCache = new Map<string, any>();
+/** Títulos alternativos/traducciones + año por ficha, para el rescate de resolveTmdb. */
+const knownTitlesCache = new Map<string, { titles: string[]; year: string | null }>();
 
 /** Resultado de resolver un título contra TMDB. `matched: false` ⇒ id sintético (negativo). */
 export interface TmdbMatch {
@@ -23,6 +25,13 @@ export interface TmdbMatch {
 const MATCH_THRESHOLD = 0.6;
 // A partir de aquí el match es inequívoco y dejamos de probar más estrategias de búsqueda.
 const CONFIDENT_SCORE = 0.9;
+
+// Rescate por título alternativo (ver scoreAgainstKnownTitles). La precisión NO la da
+// filtrar candidatos por puntuación —el título regional correcto puede puntuar 0.10—, sino
+// exigir que uno de los nombres que TMDB tiene registrados para la ficha coincida casi al
+// pie de la letra con el buscado. Se revisan unos pocos candidatos para acotar el coste.
+const ALT_TITLE_ACCEPT = 0.9;
+const ALT_TITLE_MAX_CANDIDATES = 4;
 
 // Ruido de scraping al principio/final del título ("Ver X online gratis HD Latino").
 const LEAD_NOISE = /^(ver|descargar|pelicula|película|serie|anime)\s+/i;
@@ -176,17 +185,37 @@ function similarity(a: string, b: string): number {
   return (2 * inter) / (ta.size + tb.size);
 }
 
-/** Puntúa un resultado de TMDB frente al título (y año) buscados. */
+/**
+ * Puntúa un resultado de TMDB frente al título (y año) buscados.
+ *
+ * El año NO es un desempate menor: los títulos regionales chocan de lleno con películas
+ * ajenas que se llaman exactamente igual. "Solo en casa" (el título de España de Home
+ * Alone, 1990) coincide al 100% con "Gambling House", una película de 1944, y con una
+ * penalización simbólica esa coincidencia exacta ganaba y se guardaba como match seguro.
+ * Un desfase grande de estreno descarta el candidato salvo que el título alternativo lo
+ * confirme después (ver scoreAgainstKnownTitles).
+ */
 function scoreResult(result: any, query: string, year?: string): number {
   const candidates = [result.title, result.name, result.original_title, result.original_name].filter(Boolean);
   let best = 0;
   for (const c of candidates) best = Math.max(best, similarity(query, c));
 
   const date: string = result.release_date || result.first_air_date || '';
-  if (year && date) {
-    const diff = Math.abs(parseInt(date.substring(0, 4), 10) - parseInt(year, 10));
-    if (diff === 0) best += 0.1;
-    else if (diff > 2) best -= 0.1;
+  if (year) {
+    if (!date) {
+      // Ficha sin fecha de estreno: TMDB está lleno de entradas vacías (cero votos, sin
+      // datos) cuyo título calca al buscado. Sabiendo el año y no pudiendo confirmarlo,
+      // el candidato no puede tratarse como si encajara.
+      best -= 0.25;
+    } else {
+      const diff = Math.abs(parseInt(date.substring(0, 4), 10) - parseInt(year, 10));
+      if (diff === 0) best += 0.1;
+      else if (diff <= 2) { /* reestrenos y desfases de distribución: ni premia ni penaliza */ }
+      else if (diff <= 5) best -= 0.15;
+      // Con más de un lustro de diferencia ya no es la misma película: se hunde por debajo
+      // del umbral aunque el título calce al pie de la letra.
+      else best -= 0.45;
+    }
   }
   return Math.max(0, Math.min(1, best));
 }
@@ -207,12 +236,26 @@ function syntheticTmdbId(seed: string): number {
 }
 
 export class TmdbService {
-  /** Una consulta a /search/{endpoint} puntuada contra el título buscado. */
-  private static async searchScored(
+  /**
+   * Una consulta a /search/{endpoint} con TODOS sus resultados puntuados.
+   *
+   * Se devuelve la lista entera, no solo el ganador, porque el buscador de TMDB SÍ indexa
+   * los títulos alternativos: al buscar "Zootrópolis" devuelve Zootopia, pero rotulada con
+   * su título es-MX ("Zootopia"), que apenas se parece. El candidato correcto está ahí,
+   * hundido en la puntuación, y es el rescate por título alternativo quien lo reconoce.
+   */
+  private static async searchCandidates(
     endpoint: 'movie' | 'tv' | 'multi',
     query: string,
-    year?: string
-  ): Promise<{ id: number; score: number } | null> {
+    opts: { filterYear?: string; knownYear?: string } = {}
+  ): Promise<Array<{ id: number; score: number; credibility: number; endpoint: 'movie' | 'tv' }>> {
+    // Los dos usos del año son distintos y confundirlos costaba matches equivocados:
+    //  · filterYear → se manda a TMDB para acotar la búsqueda;
+    //  · knownYear  → se usa SIEMPRE para puntuar, incluso en las consultas sin filtrar.
+    // Cuando el año solo servía de filtro, las consultas sin él no penalizaban nada y una
+    // coincidencia exacta de título de otra época ganaba: "Solo en casa" (Home Alone, 1990)
+    // se resolvía como "Gambling House" (1944) con puntuación perfecta.
+    const { filterYear, knownYear } = opts;
     try {
       const res = await axios.get(`https://api.themoviedb.org/3/search/${endpoint}`, {
         params: {
@@ -220,38 +263,104 @@ export class TmdbService {
           query,
           language: 'es-MX',
           include_adult: false,
-          ...(year ? (endpoint === 'tv' ? { first_air_date_year: year } : { year }) : {})
+          ...(filterYear ? (endpoint === 'tv' ? { first_air_date_year: filterYear } : { year: filterYear }) : {})
         },
         timeout: 4000
       });
 
       const results: any[] = (res.data?.results || [])
         .filter((r: any) => endpoint !== 'multi' || r.media_type === 'movie' || r.media_type === 'tv');
-      if (!results.length) return null;
 
-      // Ante similitud MUY parecida (p. ej. anime original vs. remake homónimo, o una
-      // parodia con nombre casi idéntico al original) gana la ficha con respaldo real de
-      // público: la parodia "Vengadores Chiflados" tiene 1 voto frente a los 24.000 del
-      // título auténtico. Se compara con margen, no solo en el empate exacto.
-      const TIE_MARGIN = 0.06;
-      const credibility = (r: any) => (r.vote_count || 0) * 1000 + (r.popularity || 0);
-
-      let best: { id: number; score: number; credibility: number } | null = null;
-      for (const r of results.slice(0, 10)) {
-        const score = scoreResult(r, query, year);
-        const cred = credibility(r);
-        const beatsBest = !best
-          || score > best.score + TIE_MARGIN
-          || (Math.abs(score - best.score) <= TIE_MARGIN && cred > best.credibility);
-        if (beatsBest) {
-          best = { id: r.id, score, credibility: cred };
-        }
-      }
-      return best;
+      return results.slice(0, 10).map((r: any) => ({
+        id: r.id,
+        score: scoreResult(r, query, knownYear),
+        credibility: (r.vote_count || 0) * 1000 + (r.popularity || 0),
+        // En /search/multi el tipo lo dice cada resultado; en el resto, el propio endpoint.
+        endpoint: (endpoint === 'multi' ? (r.media_type === 'tv' ? 'tv' : 'movie') : endpoint) as 'movie' | 'tv'
+      }));
     } catch (err: any) {
       console.warn(`[TMDB API Search Warning]: ${err.message}`);
-      return null;
+      return [];
     }
+  }
+
+  /** El mejor candidato de una consulta, con el desempate por respaldo de público. */
+  private static pickBest(
+    candidates: Array<{ id: number; score: number; credibility: number }>
+  ): { id: number; score: number } | null {
+    // Ante similitud MUY parecida (p. ej. anime original vs. remake homónimo, o una
+    // parodia con nombre casi idéntico al original) gana la ficha con respaldo real de
+    // público: la parodia "Vengadores Chiflados" tiene 1 voto frente a los 24.000 del
+    // título auténtico. Se compara con margen, no solo en el empate exacto.
+    const TIE_MARGIN = 0.06;
+
+    let best: { id: number; score: number; credibility: number } | null = null;
+    for (const c of candidates) {
+      const beatsBest = !best
+        || c.score > best.score + TIE_MARGIN
+        || (Math.abs(c.score - best.score) <= TIE_MARGIN && c.credibility > best.credibility);
+      if (beatsBest) best = c;
+    }
+    return best ? { id: best.id, score: best.score } : null;
+  }
+
+  /**
+   * Segunda opinión para un candidato que se quedó corto: la mejor similitud entre el
+   * título buscado y los títulos ALTERNATIVOS y TRADUCCIONES registrados en TMDB.
+   *
+   * `/search` devuelve el título LOCALIZADO (pedimos es-MX), así que una película
+   * distribuida con nombres distintos a cada lado del Atlántico puntúa bajo aunque sea
+   * exactamente la misma ficha: "Minions: El origen de Gru" (España) frente a
+   * "Minions: Nace un villano" (Latinoamérica), ambos TMDB 438148. Sin esta comprobación
+   * el título se quedaba sin match, recibía un id sintético negativo y entraba en el
+   * catálogo como una ficha DUPLICADA, con sus enlaces separados de los de la original.
+   *
+   * Devuelve 0 si la ficha no declara otros títulos o la consulta falla.
+   */
+  private static async scoreAgainstKnownTitles(
+    id: number,
+    endpoint: 'movie' | 'tv',
+    query: string
+  ): Promise<{ score: number; year: string | null }> {
+    const cacheKey = `${endpoint}:${id}`;
+    let entry = knownTitlesCache.get(cacheKey);
+
+    if (!entry) {
+      try {
+        const res = await axios.get(`https://api.themoviedb.org/3/${endpoint}/${id}`, {
+          params: { api_key: API_KEY, append_to_response: 'alternative_titles,translations' },
+          timeout: 3000
+        });
+        const data = res.data || {};
+        // Películas: alternative_titles.titles[] · Series: alternative_titles.results[]
+        const alt: any[] = data.alternative_titles?.titles || data.alternative_titles?.results || [];
+        const translations: any[] = data.translations?.translations || [];
+        const date: string = data.release_date || data.first_air_date || '';
+        entry = {
+          titles: [
+            data.title,
+            data.name,
+            data.original_title,
+            data.original_name,
+            ...alt.map(t => t?.title),
+            ...translations.map(t => t?.data?.title || t?.data?.name)
+          ].filter((t): t is string => Boolean(t)),
+          // El año viaja con los títulos: se necesita para no aceptar un homónimo de otra
+          // época, y sale de la MISMA llamada (sin coste añadido).
+          year: date ? date.substring(0, 4) : null
+        };
+        knownTitlesCache.set(cacheKey, entry);
+      } catch {
+        // Un id que no existe en este endpoint (el match vino de /search/multi) responde
+        // 404: se cachea el vacío para no repetir la consulta.
+        knownTitlesCache.set(cacheKey, { titles: [], year: null });
+        return { score: 0, year: null };
+      }
+    }
+
+    let best = 0;
+    for (const t of entry.titles) best = Math.max(best, similarity(query, t));
+    return { score: best, year: entry.year };
   }
 
   /**
@@ -277,11 +386,18 @@ export class TmdbService {
 
     let bestId = 0;
     let bestScore = 0;
-    /** Guarda el candidato si mejora al actual; devuelve true si ya es inequívoco (parar). */
-    const consider = (c: { id: number; score: number } | null) => {
-      if (c && c.score > bestScore) {
-        bestId = c.id;
-        bestScore = c.score;
+    // Todos los candidatos vistos en la escalera, para el rescate por título alternativo:
+    // el correcto puede estar hundido en la puntuación y no ser nunca "el mejor".
+    const pool = new Map<number, { id: number; score: number; credibility: number; endpoint: 'movie' | 'tv' }>();
+    const collect = (candidates: Array<{ id: number; score: number; credibility: number; endpoint: 'movie' | 'tv' }>) => {
+      for (const c of candidates) {
+        const prev = pool.get(c.id);
+        if (!prev || c.score > prev.score) pool.set(c.id, c);
+      }
+      const best = this.pickBest(candidates);
+      if (best && best.score > bestScore) {
+        bestId = best.id;
+        bestScore = best.score;
       }
       return bestScore >= CONFIDENT_SCORE;
     };
@@ -290,12 +406,46 @@ export class TmdbService {
     // es inequívoco, así que para los títulos "normales" el coste no cambia: la primera
     // variante es el título limpio de siempre.
     for (const variant of queryVariants(cleanTitle)) {
-      if (consider(year ? await this.searchScored(endpoint, variant, year) : null)) break;
-      if (consider(await this.searchScored(endpoint, variant))) break;
-      if (consider(await this.searchScored(opposite, variant))) break;
-      if (consider(await this.searchScored('multi', variant))) break;
+      if (year && collect(await this.searchCandidates(endpoint, variant, { filterYear: year, knownYear: year }))) break;
+      if (collect(await this.searchCandidates(endpoint, variant, { knownYear: year }))) break;
+      if (collect(await this.searchCandidates(opposite, variant, { knownYear: year }))) break;
+      if (collect(await this.searchCandidates('multi', variant, { knownYear: year }))) break;
       // Con un match ya aceptable no merece la pena seguir reescribiendo la consulta.
       if (bestScore >= MATCH_THRESHOLD) break;
+    }
+
+    // Rescate por título alternativo. Los títulos regionales son el punto ciego del
+    // matcher: /search sí encuentra la ficha —indexa los nombres alternativos— pero la
+    // devuelve rotulada con su título es-MX, que puede no parecerse en nada al buscado
+    // ("Zootrópolis" → "Zootopia", "Bitelchús" → "Beetlejuice"). Por eso NO se filtra por
+    // puntuación mínima: se revisan los candidatos más plausibles y se acepta solo si uno
+    // de sus títulos registrados en TMDB calca al buscado (ALT_TITLE_ACCEPT).
+    //
+    // Se intenta mientras el match no sea INEQUÍVOCO, no solo cuando está por debajo del
+    // umbral: un parecido parcial puede colarse por encima del umbral y aun así ser la
+    // ficha equivocada. "Rápidos y furiosos" puntuaba 0.85 contra un cortometraje sin
+    // votos titulado "Rápidos y Furiosos: Hobbs y Reyes", mientras la película de verdad
+    // lleva ese mismo nombre como título alternativo registrado. Un nombre oficial que
+    // calca es mejor prueba que un parecido a medias.
+    if (bestScore < CONFIDENT_SCORE && pool.size > 0) {
+      const byPromise = Array.from(pool.values()).sort((a, b) =>
+        (b.score - a.score) || (b.credibility - a.credibility)
+      );
+
+      for (const cand of byPromise.slice(0, ALT_TITLE_MAX_CANDIDATES)) {
+        const alt = await this.scoreAgainstKnownTitles(cand.id, cand.endpoint, cleanTitle);
+        if (alt.score < ALT_TITLE_ACCEPT) continue;
+
+        // Un título alternativo que calca NO basta por sí solo: los nombres se reciclan
+        // entre épocas. "Gambling House" (1950) tiene registrado "Solo en casa", el mismo
+        // título con el que España estrenó Home Alone (1990), así que sin este control el
+        // rescate confirmaba con total seguridad la película equivocada.
+        if (year && alt.year && Math.abs(Number(alt.year) - Number(year)) > 5) continue;
+
+        bestId = cand.id;
+        bestScore = alt.score;
+        break;
+      }
     }
 
     // Fallback a scraping del buscador de TMDB (útil cuando la API limita por rate),
@@ -310,8 +460,25 @@ export class TmdbService {
         const idMatch = href.match(/\/(movie|tv)\/(\d+)/);
         const cardTitle = (card.attr('title') || card.find('h2').first().text() || card.text() || '').trim();
         if (idMatch) {
-          const score = similarity(cleanTitle, cardTitle);
-          consider({ id: parseInt(idMatch[2], 10), score });
+          const scrapedId = parseInt(idMatch[2], 10);
+          const scrapedEndpoint = idMatch[1] === 'tv' ? 'tv' : 'movie';
+          // La tarjeta de la web solo da el título, así que aceptar por parecido dejaba
+          // pasar homónimos de otra época sin ningún control: "Solo en casa" (Home Alone,
+          // 1990) acababa resuelto como "Gambling House" (1950) con puntuación perfecta.
+          // Se confirma contra la ficha real, con el mismo baremo de año que el resto.
+          const details = await this.getTmdbDetails(
+            scrapedId,
+            scrapedEndpoint === 'tv' ? 'tvseries' : 'movie'
+          ).catch(() => null);
+
+          const score = details
+            ? scoreResult(details, cleanTitle, year)
+            : Math.min(similarity(cleanTitle, cardTitle), MATCH_THRESHOLD - 0.01);
+
+          if (score > bestScore) {
+            bestId = scrapedId;
+            bestScore = score;
+          }
         }
       } catch {}
     }
@@ -441,7 +608,6 @@ export class TmdbService {
    * Conserva el slug como id y marca metadata_source='source' para poder auditarlo.
    */
   static fromSourceMetadata(item: MediaItem, tmdbId?: number): MediaItem {
-    const poster = item.poster || item.backdrop || null;
     // Sin id válido generamos uno sintético negativo y estable por slug (nunca 0: rompería el UNIQUE).
     const id = tmdbId && tmdbId !== 0 ? tmdbId : syntheticTmdbId(item.id || item.title);
     return {
@@ -451,8 +617,12 @@ export class TmdbService {
       original_title: item.original_title || item.title,
       aliases: item.aliases && item.aliases.length ? item.aliases : [item.title],
       overview: item.overview || `Ver ${item.title} online en HD con audio Latino.`,
-      poster,
-      backdrop: item.backdrop || poster,
+      // Los dos campos NO son intercambiables y rellenar uno con el otro era la causa de
+      // que la API sirviera capturas apaisadas en `poster` (y pósters verticales en
+      // `backdrop`). Cada uno vale lo que traiga la fuente, o null: una imagen ausente es
+      // mejor contrato que una imagen con la orientación equivocada.
+      poster: item.poster || null,
+      backdrop: item.backdrop || null,
       metadata_source: 'source' as const
     };
   }

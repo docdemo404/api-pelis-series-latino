@@ -79,8 +79,24 @@ export interface MediaItem {
   servers?: ServerOption[];
   /** ISO de la última resolución de enlaces (columna streams_updated_at). */
   streams_updated_at?: string | null;
+  /**
+   * Veredicto de disponibilidad: `true` = se le conocen enlaces, `false` = se comprobó a
+   * fondo y NO tiene ninguno (ficha fantasma), `undefined` = nunca se ha comprobado.
+   * La distinción importa: solo lo verificado como vacío se oculta de home y búsqueda;
+   * lo no comprobado se sigue mostrando.
+   */
+  has_streams?: boolean;
+  /** ISO de la última COMPROBACIÓN de disponibilidad (haya dado enlaces o no). */
+  streams_checked_at?: string | null;
   /** URL del detalle en la fuente. Interno: no se serializa al cliente. */
   _source_url?: string;
+  /**
+   * TODAS las URLs de origen de la ficha (una por fuente). La misma película existe en
+   * TioPlus y en FuegoCine con slugs distintos; al unificarlas en una sola entidad hay que
+   * conservar las dos, o los servidores de la fuente absorbida se pierden.
+   * Interno: no se serializa al cliente.
+   */
+  _source_urls?: string[];
   // Solo para series
   total_seasons?: number;
   total_episodes?: number;
@@ -91,11 +107,20 @@ export interface MediaItem {
  * Estado de los enlaces en una respuesta de detalle. La metadata se devuelve al
  * instante; si los servidores todavía no están resueltos el cliente los pide a
  * `url` en el momento de reproducir (ver src/routes/media.routes.ts).
+ *
+ * Son TRES estados, no dos:
+ *   ready       → hay servidores en la respuesta.
+ *   pending     → aún no se han resuelto; pídelos a `url`.
+ *   unavailable → ya se buscaron a fondo en todas las fuentes y no hay ninguno.
+ * Devolver `pending` para este último caso dejaba a la app esperando indefinidamente
+ * unos enlaces que no existen.
  */
 export interface StreamsStatus {
-  status: 'ready' | 'pending';
+  status: 'ready' | 'pending' | 'unavailable';
   url: string;
   updated_at: string | null;
+  /** ISO de la última comprobación a fondo, o null si nunca se ha hecho. */
+  checked_at?: string | null;
 }
 
 /** Pista de render para el cliente: cómo debe dibujarse el carrusel. */
