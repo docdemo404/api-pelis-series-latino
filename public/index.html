@@ -63,7 +63,7 @@
             <span class="badge bg-primary badge-method me-3">GET</span>
             <code class="fs-5 text-white">/api/v1/search?q=avatar</code>
           </div>
-          <p class="text-secondary"><strong>Búsqueda General:</strong> Busca en tiempo real todo tipo de contenidos (Películas, Series, Animes y Doramas) en una sola consulta. Extrae reproductores embeds funcionales resueltos y reporta <code>total_results</code> como el total global recuperado para la consulta, junto con <code>has_more</code> para scroll infinito.</p>
+          <p class="text-secondary"><strong>Búsqueda General:</strong> Busca todo tipo de contenidos (Películas, Series, Animes y Doramas) sobre el catálogo indexado con coincidencia por <em>substring</em> (ej. <code>ma</code> encuentra <code>Matilda</code>). Respuesta <strong>lean</strong> por defecto (sin cast ni reproductores) para máxima velocidad — el detalle se obtiene en <code>/api/v1/media/{id}</code>; usa <code>?full=true</code> para el objeto completo. Reporta <code>total_results</code> como el total real del catálogo, con <code>has_more</code> y <code>next_page</code> para scroll infinito.</p>
         </div>
 
         <!-- Endpoint OpenAPI Spec -->

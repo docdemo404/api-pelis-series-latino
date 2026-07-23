@@ -10,6 +10,38 @@ import { CacheStore } from '../cache/store';
 // se comparten entre lambdas y sobreviven cold starts; sin Redis degrada a memoria local.
 const CACHE_TTL_SECONDS = 10 * 60;
 
+/**
+ * Clave canónica de título para AGRUPAR variantes del mismo contenido entre fuentes
+ * (regionalizaciones ES/EN, sufijos "HD"/"La Película", casos Spider-Man). Insensible a
+ * acentos y puntuación. Reutilizada por la fusión multifuente y el agrupamiento de búsqueda.
+ */
+function canonicalTitleKey(t: string): string {
+  const norm = (t || '')
+    .toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/\s*\(\d{4}\)\s*$/, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return norm
+    .replace(/\b(la pelicula|pelicula|the movie|hd)\b/g, '')
+    .replace(/\bspiderman\b/g, 'spider man')
+    .replace(/\bspider man 1\b/g, 'spider man')
+    .replace(/sin camino a casa/g, 'no way home')
+    .replace(/lejos de casa/g, 'far from home')
+    .replace(/de regreso a casa/g, 'homecoming')
+    .replace(/un nuevo universo/g, 'into the spider verse')
+    .replace(/traves del spider verso/g, 'across the spider verse')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Normalización estricta alfanumérica para comparación EXACTA de títulos/slugs. */
+function strictKey(t: string): string {
+  return (t || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/g, '').trim();
+}
+
 export class CatalogService {
   private static dedupeById(items: MediaItem[]): MediaItem[] {
     const seen = new Set<string>();
@@ -34,7 +66,7 @@ export class CatalogService {
    * Cada episodio usa sus PROPIOS servidores (reales, por episodio) si los tiene; si no,
    * hereda los de nivel serie como fallback reproducible en la portada. Los enlaces reales
    * por episodio se obtienen bajo demanda vía /series/:id/season/:s/episode/:e.
-   * Consolida la lógica antes duplicada en getById y unifyMediaItems.
+   * Consolida la lógica antes duplicada en getById y la unificación de búsqueda.
    */
   private static inheritServersToEpisodes(item: MediaItem | null | undefined): void {
     if (!item || !item.seasons || item.seasons.length === 0) return;
@@ -69,6 +101,27 @@ export class CatalogService {
       subcategories: item.subcategories,
       primary_stream: item.primary_stream,
       servers: item.servers
+    };
+  }
+
+  /**
+   * Proyección LEAN para resultados de BÚSQUEDA: solo lo necesario para pintar una tarjeta.
+   * Sin cast, servers, seasons ni overview → payload pequeño y respuesta ultrarrápida.
+   * El detalle completo se obtiene al abrir el título (getById).
+   */
+  static toSearchItem(item: MediaItem): Partial<MediaItem> {
+    return {
+      id: item.id,
+      tmdb_id: item.tmdb_id,
+      type: item.type,
+      title: item.title,
+      original_title: item.original_title,
+      poster: item.poster,
+      backdrop: item.backdrop,
+      release_date: item.release_date,
+      rating: item.rating,
+      genres: item.genres,
+      subcategories: item.subcategories
     };
   }
 
@@ -269,8 +322,6 @@ export class CatalogService {
               servers: []
             });
 
-            // Disparar resolución de servidores en segundo plano sin bloquear la API
-            this.search(title).catch(() => {});
           }
         }
       }
@@ -326,43 +377,63 @@ export class CatalogService {
       } catch (err) {}
     }
 
-    // 5. Garantía y Fusión Multifuente de Servidores (TioPlus + FuegoCine + Supabase DB)
+    // 5. Garantía y Fusión Multifuente de Servidores (TioPlus + FuegoCine).
+    //    La búsqueda pública es LEAN (sin servidores); aquí resolvemos AMBAS fuentes
+    //    directamente. scrapeRealMovies ya devuelve candidatos de tioplus Y fuegocine
+    //    (cada uno con su _tioplus_url), y traemos el detalle/servidores de cada uno.
     if (result) {
-      const normTitle = (t: string) => t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "").trim();
-      const targetTitleKey = normTitle(result.title);
-
+      const targetStrict = strictKey(result.title);
+      const targetCanonical = canonicalTitleKey(result.title);
       const allServers: ServerOption[] = [...(result.servers || [])];
       const existingUrls = new Set(allServers.map(s => s.embed_url));
 
-      // Buscar servidores adicionales en paralelo de TioPlus y FuegoCine
-      const searchResults = await this.search(result.title).catch(() => []);
-      for (const item of searchResults) {
-        if (item.tmdb_id === result.tmdb_id || normTitle(item.title) === targetTitleKey) {
-          if (item.servers && item.servers.length > 0) {
-            for (const s of item.servers) {
-              if (!existingUrls.has(s.embed_url)) {
-                allServers.push(s);
-                existingUrls.add(s.embed_url);
-              }
-            }
+      const matchesTarget = (it: MediaItem) =>
+        (!!it.tmdb_id && !!result!.tmdb_id && it.tmdb_id === result!.tmdb_id) ||
+        strictKey(it.title) === targetStrict ||
+        (!!targetCanonical && canonicalTitleKey(it.title) === targetCanonical);
+
+      // Candidatos por título de AMBAS fuentes (scrapeRealMovies itera tioplus + fuegocine).
+      const candidates = await RealScraperService.scrapeRealMovies(result.title, 8).catch(() => [] as MediaItem[]);
+
+      const sourceUrls: string[] = [];
+      for (const cand of candidates) {
+        if (!matchesTarget(cand)) continue;
+        const url = (cand as any)._tioplus_url;
+        if (url && !sourceUrls.includes(url)) sourceUrls.push(url);
+        if (cand.servers && cand.servers.length > 0) {
+          for (const s of cand.servers) {
+            if (!existingUrls.has(s.embed_url)) { allServers.push(s); existingUrls.add(s.embed_url); }
           }
-          if (item.seasons && item.seasons.length > 0 && (!result.seasons || result.seasons.length === 0)) {
-            result.seasons = item.seasons;
-          }
+        }
+        if (cand.seasons && cand.seasons.length > 0 && (!result.seasons || result.seasons.length === 0)) {
+          result.seasons = cand.seasons;
         }
       }
 
-      // Si es una serie de TV y aún no tiene servidores cargados, resolver activamente los reproductores de S1:E1
+      // Detalle (servidores) de cada URL de fuente en paralelo (tioplus + fuegocine), timeout acotado.
+      const details = await Promise.all(sourceUrls.slice(0, 4).map(u => {
+        const timeout = new Promise<any>(resolve => setTimeout(() => resolve(null), 2500));
+        return Promise.race([RealScraperService.scrapeDetail(u), timeout]);
+      }));
+      for (const detail of details) {
+        if (detail && detail.servers && detail.servers.length > 0) {
+          for (const s of detail.servers) {
+            if (!existingUrls.has(s.embed_url)) { allServers.push(s); existingUrls.add(s.embed_url); }
+          }
+        }
+        if (detail && detail.seasons && detail.seasons.length > 0 && (!result.seasons || result.seasons.length === 0)) {
+          result.seasons = detail.seasons;
+        }
+      }
+
+      // Serie sin servidores → resolver activamente S1:E1.
       if ((result.type === 'tvseries' || (result.total_seasons && result.total_seasons > 0)) && allServers.length === 0) {
         try {
-          const titleSlug = (result.title || '').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+          const titleSlug = normalizeTitle(result.title || '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
           const ep1Detail = await RealScraperService.scrapeEpisodeDetail(titleSlug, 1, 1);
           if (ep1Detail && ep1Detail.servers && ep1Detail.servers.length > 0) {
             for (const s of ep1Detail.servers) {
-              if (!existingUrls.has(s.embed_url)) {
-                allServers.push(s);
-                existingUrls.add(s.embed_url);
-              }
+              if (!existingUrls.has(s.embed_url)) { allServers.push(s); existingUrls.add(s.embed_url); }
             }
           }
         } catch {}
@@ -436,67 +507,92 @@ export class CatalogService {
     return [];
   }
 
+  /**
+   * Búsqueda pública (compat): devuelve solo la primera página de ítems.
+   * Callers internos (getById) y scripts de dev siguen usando esta firma.
+   */
   static async search(query: string, maxResults: number = 25): Promise<MediaItem[]> {
+    const { items } = await this.searchPaged(query, 1, maxResults);
+    return items;
+  }
+
+  /**
+   * Búsqueda paginada DB-FIRST con total exacto (habilita el scroll infinito).
+   *  - Catálogo poblado: sirve del RPC `search_media` (substring + prefijo, rankeado,
+   *    con COUNT total) en milisegundos, SIN scraping ni TMDB en el request.
+   *  - DB vacía / sin migrar: cae a un scrape en vivo LEAN (sin enriquecer ni resolver
+   *    servidores por ítem) y pagina en memoria.
+   */
+  static async searchPaged(query: string, page: number = 1, limit: number = 25): Promise<{ items: MediaItem[]; total: number }> {
     const q = query.toLowerCase().trim();
-    if (!q) return [];
+    if (!q) return { items: [], total: 0 };
 
-    const normalizedMaxResults = Math.max(1, maxResults);
-    const cacheKey = `search:${q}:${normalizedMaxResults}`;
+    const nq = normalizeTitle(q).trim();
+    const safeLimit = Math.max(1, Math.min(limit, 100));
+    const safePage = Math.max(1, page);
+    const offset = (safePage - 1) * safeLimit;
 
-    // Verificación de caché (compartida entre lambdas si hay Redis)
-    const cached = await CacheStore.get<MediaItem[]>(cacheKey);
+    const cacheKey = `searchp:${nq}:${safePage}:${safeLimit}`;
+    const cached = await CacheStore.get<{ items: MediaItem[]; total: number }>(cacheKey);
     if (cached) return cached;
 
-    // 1. Scraping en vivo de fuentes activas + pase de PREFIJO local en Supabase, EN PARALELO.
-    //    El pase local garantiza que los títulos que EMPIEZAN con el término aparezcan
-    //    aunque la fuente scrapeada no los devuelva (aporta 0 si la DB está vacía).
+    // 1. DB-FIRST: RPC rankeado sobre el catálogo poblado (prefijo-primero + rating).
+    const dbResult = await this.searchDbPaged(nq, safeLimit, offset);
+    if (dbResult && dbResult.total > 0) {
+      await CacheStore.set(cacheKey, dbResult, CACHE_TTL_SECONDS);
+      return dbResult;
+    }
+
+    // 2. FALLBACK: DB vacía o RPC ausente → scrape en vivo LEAN, paginado en memoria.
+    const pool = await this.liveSearch(q, 150);
+    const ranked = this.scoreAndSortResults(pool, q);
+    const out = { items: ranked.slice(offset, offset + safeLimit), total: ranked.length };
+    await CacheStore.set(cacheKey, out, CACHE_TTL_SECONDS);
+    return out;
+  }
+
+  /**
+   * Pase DB paginado vía RPC `search_media(q, lim, off)` (migración 002). Devuelve null
+   * si el RPC no existe (DB sin migrar) o no hay coincidencias, para caer al scrape en vivo.
+   */
+  private static async searchDbPaged(nq: string, limit: number, offset: number): Promise<{ items: MediaItem[]; total: number } | null> {
+    if (!nq) return null;
+    try {
+      const { data, error } = await supabase.rpc('search_media', { q: nq, lim: limit, off: offset });
+      if (error || !data || (data as any[]).length === 0) return null;
+      const rows = data as any[];
+      const total = Number(rows[0].total) || rows.length;
+      const items = rows.map(row => this.mapDbItemToMediaItem(row.item));
+      return { items, total };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Scrape en vivo LEAN para el fallback de búsqueda: une fuentes activas + pase de prefijo
+   * en DB + substring del catálogo homepage, y agrupa SIN enriquecer con TMDB ni resolver
+   * servidores por ítem (eso encarecía cada búsqueda). Ver unifyForSearch.
+   */
+  private static async liveSearch(q: string, max: number): Promise<MediaItem[]> {
+    const normalizedMax = Math.max(1, max);
     const [realScraped, dbPrefixMatches] = await Promise.all([
-      RealScraperService.scrapeRealMovies(q, normalizedMaxResults),
+      RealScraperService.scrapeRealMovies(q, normalizedMax),
       this.searchDbByPrefix(q)
     ]);
-    realScraped.push(...dbPrefixMatches);
+    const pool = [...realScraped, ...dbPrefixMatches];
 
-    if (realScraped.length < normalizedMaxResults) {
-      // Match del catálogo insensible a acentos (usa la utilidad compartida).
+    if (pool.length < normalizedMax) {
+      // Substring insensible a acentos sobre el catálogo homepage (aporta 0 si está vacío).
       const nq = normalizeTitle(q);
       const catalogMatches = (await this.getAll()).filter(item => {
-        const haystack = normalizeTitle(
-          [item.title, item.original_title, ...(item.aliases || [])].join(' ')
-        );
+        const haystack = normalizeTitle([item.title, item.original_title, ...(item.aliases || [])].join(' '));
         return haystack.includes(nq);
       });
-      realScraped.push(...catalogMatches);
+      pool.push(...catalogMatches);
     }
 
-    // 2. Unificar catálogo para eliminar títulos duplicados y fusionar servidores
-    let unified = await this.unifyMediaItems(realScraped, normalizedMaxResults);
-    
-    // 3. Fallback a Supabase si no hay resultados del scraping
-    if (unified.length === 0) {
-      try {
-        // Búsqueda con prefijos en title y original_title (ILIKE 'query%')
-        // También incluye búsqueda por substring para coincidencias parciales
-        const { data } = await supabase
-          .from('media_items')
-          .select('*')
-          .or(`title.ilike.%${q}%,original_title.ilike.%${q}%,title.ilike.${q}%`);
-
-        if (data && data.length > 0) {
-          const dbItems = data.map(this.mapDbItemToMediaItem);
-          unified = await this.unifyMediaItems(dbItems, normalizedMaxResults);
-        }
-      } catch (err) {}
-    }
-
-    // 4. Aplicar scoring y ordenamiento por relevancia
-    if (unified.length > 0) {
-      unified = this.scoreAndSortResults(unified, q);
-      const limited = unified.slice(0, normalizedMaxResults);
-      await CacheStore.set(cacheKey, limited, CACHE_TTL_SECONDS);
-      return limited;
-    }
-
-    return [];
+    return this.unifyForSearch(pool, normalizedMax);
   }
   /**
    * Calcula el score de relevancia para cada resultado y ordena por puntaje descendente
@@ -577,121 +673,35 @@ export class CatalogService {
     return scored.filter(s => s.score > 0).map(s => s.item);
   }
   /**
-   * Unifica y agrupa elementos multimedia que corresponden al mismo título o TMDB ID,
-   * fusionando SERVIDORES DE TODAS LAS FUENTES ACTIVAS en paralelo y enriqueciendo con TMDB en sub-segundos.
+   * Agrupa/dedup ítems de BÚSQUEDA por clave canónica (o tmdb_id si ya viene resuelto),
+   * fusionando metadatos básicos. NO enriquece con TMDB ni resuelve servidores por ítem:
+   * la búsqueda debe ser ultraligera (sin cast ni reproductores). El detalle completo
+   * (servidores multifuente, temporadas, cast) se resuelve bajo demanda en getById.
    */
-  private static async unifyMediaItems(items: MediaItem[], maxResults: number = 25): Promise<MediaItem[]> {
-    const grouped = new Map<string, { item: MediaItem; sourceUrls: string[] }>();
+  private static unifyForSearch(items: MediaItem[], maxResults: number = 25): MediaItem[] {
+    const grouped = new Map<string, MediaItem>();
 
-    const getCanonicalKey = (t: string) => {
-      let norm = t
-        .toLowerCase()
-        .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-        .replace(/\s*\(\d{4}\)\s*$/, "")
-        .replace(/[^a-z0-9\s]/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
-
-      return norm
-        .replace(/\b(la pelicula|pelicula|the movie|hd)\b/g, "")
-        .replace(/\bspiderman\b/g, "spider man")
-        .replace(/\bspider man 1\b/g, "spider man")
-        .replace(/sin camino a casa/g, "no way home")
-        .replace(/lejos de casa/g, "far from home")
-        .replace(/de regreso a casa/g, "homecoming")
-        .replace(/un nuevo universo/g, "into the spider verse")
-        .replace(/traves del spider verso/g, "across the spider verse")
-        .replace(/\s+/g, " ")
-        .trim();
-    };
-
-    // 1. Resolver TMDB ID en paralelo para cada ítem scraped
-    const itemsWithTmdb = await Promise.all(
-      items.map(async (item) => {
-        const tmdbId = item.tmdb_id && item.tmdb_id > 0
-          ? item.tmdb_id
-          : await TmdbService.getTmdbId(item.title, item.type, item.release_date ? item.release_date.substring(0, 4) : undefined);
-        return { ...item, tmdb_id: tmdbId };
-      })
-    );
-
-    // 2. Agrupar por tmdb_id (si es > 0) o por clave canónica
-    for (const item of itemsWithTmdb) {
+    for (const item of items) {
       const key = (item.tmdb_id && item.tmdb_id > 0)
         ? `${item.type}:${item.tmdb_id}`
-        : getCanonicalKey(item.title);
-      const url = (item as any)._tioplus_url;
+        : (canonicalTitleKey(item.title) || strictKey(item.title) || item.id);
+      if (!key) continue;
 
-      if (!grouped.has(key)) {
-        grouped.set(key, {
-          item: { ...item, servers: [...(item.servers || [])] },
-          sourceUrls: url ? [url] : []
-        });
+      const existing = grouped.get(key);
+      if (!existing) {
+        grouped.set(key, { ...item });
       } else {
-        const entry = grouped.get(key)!;
-        entry.item.overview = entry.item.overview || item.overview;
-        entry.item.poster = entry.item.poster || item.poster;
-        entry.item.backdrop = entry.item.backdrop || item.backdrop;
-        entry.item.subcategories = Array.from(new Set([...(entry.item.subcategories || []), ...(item.subcategories || [])]));
-        if (item.servers && item.servers.length > 0) {
-          entry.item.servers = entry.item.servers || [];
-          for (const s of item.servers) {
-            if (!entry.item.servers.some(existing => existing.embed_url === s.embed_url)) {
-              entry.item.servers.push(s);
-            }
-          }
-        }
-        if (url && !entry.sourceUrls.includes(url)) {
-          entry.sourceUrls.push(url);
-        }
+        existing.overview = existing.overview || item.overview;
+        existing.poster = existing.poster || item.poster;
+        existing.backdrop = existing.backdrop || item.backdrop;
+        existing.release_date = existing.release_date || item.release_date;
+        existing.rating = existing.rating || item.rating;
+        existing.subcategories = Array.from(new Set([...(existing.subcategories || []), ...(item.subcategories || [])]));
+        existing.aliases = Array.from(new Set([...(existing.aliases || []), ...(item.aliases || [])]));
       }
     }
 
-    // 3. Procesamiento PARALELO ultrarrápido de todas las entradas unificadas
-    const entries = Array.from(grouped.values()).slice(0, maxResults);
-
-    const unifiedList = await Promise.all(
-      entries.map(async (entry) => {
-        const targetItem = entry.item;
-        const allServers: ServerOption[] = [...(targetItem.servers || [])];
-        const existingUrls = new Set(allServers.map(s => s.embed_url));
-
-        // Resolver fuentes adicionales en paralelo con timeout de 1.2s
-        if (entry.sourceUrls.length > 0) {
-          const fetchPromises = entry.sourceUrls.slice(0, 3).map(sourceUrl => {
-            const timeout = new Promise<any>((resolve) => setTimeout(() => resolve(null), 1200));
-            return Promise.race([RealScraperService.scrapeDetail(sourceUrl), timeout]);
-          });
-
-          const details = await Promise.all(fetchPromises);
-          for (const detail of details) {
-            if (detail && detail.servers && detail.servers.length > 0) {
-              for (const s of detail.servers) {
-                if (!existingUrls.has(s.embed_url)) {
-                  allServers.push(s);
-                  existingUrls.add(s.embed_url);
-                }
-              }
-            }
-          }
-        }
-
-        targetItem.servers = sortServersBySourcePriority(allServers);
-        if (targetItem.servers.length > 0) {
-          targetItem.primary_stream = getPrimaryStream(targetItem.servers);
-        }
-
-        // Enriquecer con metadatos oficiales completos de TMDB
-        const enriched = await TmdbService.enrichMediaItem(targetItem);
-
-        // Herencia de servidores a episodios si es una serie
-        this.inheritServersToEpisodes(enriched);
-
-        return enriched;
-      })
-    );
-
-    return unifiedList;
+    return Array.from(grouped.values()).slice(0, maxResults);
   }
 
   private static mapDbItemToMediaItem(dbRow: any): MediaItem {

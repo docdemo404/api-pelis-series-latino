@@ -2,8 +2,10 @@ name: Catalog Refresh & Pre-scrape a Supabase
 
 on:
   schedule:
-    # Se ejecuta automáticamente cada 6 horas (00:00, 06:00, 12:00, 18:00 UTC)
-    - cron: '0 */6 * * *'
+    # Crawl COMPLETO del catálogo una vez al día (04:00 UTC). Es más pesado que el antiguo
+    # refresh de home/últimos, así que se corre a diario en lugar de cada 6 h para no saturar
+    # las fuentes; los listados (getAll) ya se auto-refrescan en vivo entre corridas.
+    - cron: '0 4 * * *'
   workflow_dispatch: # Permite ejecución manual desde la interfaz de GitHub
 
 jobs:
@@ -23,9 +25,9 @@ jobs:
       - name: Instalar dependencias
         run: npm ci
 
-      # Pre-scrapea el catálogo (homepage + últimos películas/series/animes) y lo
-      # persiste en Supabase. La API sirve búsqueda/listados desde la DB (DB-first)
-      # en milisegundos en lugar de scrapear dentro del request.
+      # Crawl COMPLETO del catálogo (todas las categorías de tioplus paginadas hasta agotar +
+      # todo FuegoCine) y lo persiste en Supabase. La API sirve búsqueda/listados desde la DB
+      # (DB-first) en milisegundos, con recuperación total y scroll infinito.
       - name: Refrescar catálogo pre-scrapeado en Supabase
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}

@@ -143,7 +143,7 @@
     "/api/v1/search": {
       "get": {
         "summary": "Búsqueda general en tiempo real",
-        "description": "Busca películas, series, animes y doramas por título u alias. Si es una película (`type: movie`), incluye sus servidores embed. Si es una serie (`type: tvseries`), incluye `seasons` con la estructura de temporadas y episodios. Los resultados de FuegoCine agrupan automáticamente los episodios individuales (patrón SxE) bajo un único MediaItem de serie con sus temporadas y capítulos consolidados. La paginación calcula `total_results` sobre el conjunto global recuperado para la consulta, no sobre el acumulado hasta la página solicitada, e incluye `has_more` para scroll infinito.",
+        "description": "Busca películas, series, animes y doramas por título o alias sobre el catálogo indexado, con coincidencia por SUBSTRING (ej. `ma` encuentra `Matilda`). El ranking prioriza los títulos que EMPIEZAN con el término. Respuesta LEAN por defecto (id, título, póster, año, rating, géneros) para máxima velocidad: los servidores, el cast y las temporadas se obtienen al abrir el detalle (`/api/v1/media/{id}` o `/api/v1/series/{id}`). Usa `full=true` para el objeto completo, o `compact=true` para la proyección compacta. `total_results` es el total REAL de coincidencias en el catálogo (no el acumulado de la página) y junto con `has_more` y `next_page` habilita el scroll infinito.",
         "parameters": [
           {
             "name": "q",
@@ -182,6 +182,24 @@
               "type": "integer",
               "default": 25,
               "maximum": 100
+            }
+          },
+          {
+            "name": "full",
+            "in": "query",
+            "description": "Si es true, devuelve el MediaItem completo (con cast, servers y seasons) en lugar de la proyección lean por defecto.",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "compact",
+            "in": "query",
+            "description": "Si es true, devuelve la proyección compacta (incluye primary_stream y servers).",
+            "schema": {
+              "type": "boolean",
+              "default": false
             }
           }
         ],
@@ -562,7 +580,7 @@
     "/api/v1/movies/search": {
       "get": {
         "summary": "Búsqueda general en tiempo real",
-        "description": "Busca películas, series, animes y doramas por título u alias. Si es una película (`type: movie`), incluye sus servidores embed. Si es una serie (`type: tvseries`), incluye `seasons` con la estructura de temporadas y episodios. Los resultados de FuegoCine agrupan automáticamente los episodios individuales (patrón SxE) bajo un único MediaItem de serie con sus temporadas y capítulos consolidados. La paginación calcula `total_results` sobre el conjunto global recuperado para la consulta, no sobre el acumulado hasta la página solicitada, e incluye `has_more` para scroll infinito.",
+        "description": "Busca películas, series, animes y doramas por título o alias sobre el catálogo indexado, con coincidencia por SUBSTRING (ej. `ma` encuentra `Matilda`). El ranking prioriza los títulos que EMPIEZAN con el término. Respuesta LEAN por defecto (id, título, póster, año, rating, géneros) para máxima velocidad: los servidores, el cast y las temporadas se obtienen al abrir el detalle (`/api/v1/media/{id}` o `/api/v1/series/{id}`). Usa `full=true` para el objeto completo, o `compact=true` para la proyección compacta. `total_results` es el total REAL de coincidencias en el catálogo (no el acumulado de la página) y junto con `has_more` y `next_page` habilita el scroll infinito.",
         "parameters": [
           {
             "name": "q",
@@ -601,6 +619,24 @@
               "type": "integer",
               "default": 25,
               "maximum": 100
+            }
+          },
+          {
+            "name": "full",
+            "in": "query",
+            "description": "Si es true, devuelve el MediaItem completo (con cast, servers y seasons) en lugar de la proyección lean por defecto.",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "compact",
+            "in": "query",
+            "description": "Si es true, devuelve la proyección compacta (incluye primary_stream y servers).",
+            "schema": {
+              "type": "boolean",
+              "default": false
             }
           }
         ],
@@ -881,6 +917,7 @@
           },
           "results": {
             "type": "array",
+            "description": "Por defecto, proyección LEAN de cada título (id, tmdb_id, type, title, original_title, poster, backdrop, release_date, rating, genres, subcategories) — SIN cast, servers ni seasons. Con full=true cada elemento es el MediaItem completo referenciado aquí.",
             "items": {
               "$ref": "#/components/schemas/MediaItem"
             }
@@ -895,11 +932,16 @@
           },
           "total_results": {
             "type": "integer",
-            "description": "Total global de coincidencias recuperadas para la consulta antes de paginar; no es el conteo acumulado de la página actual."
+            "description": "Total REAL de coincidencias en el catálogo indexado para la consulta (substring), antes de paginar. Habilita el scroll infinito; no es el conteo acumulado de la página actual."
           },
           "has_more": {
             "type": "boolean",
             "description": "Indica si existen más resultados después de la página actual."
+          },
+          "next_page": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Número de la siguiente página cuando has_more es true; null si es la última."
           }
         }
       },

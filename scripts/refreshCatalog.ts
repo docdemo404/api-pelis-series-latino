@@ -1,13 +1,14 @@
 /**
  * Job de pre-scrape del catálogo → Supabase (Fase 4.1 del plan de rendimiento).
  *
- * Corre en background (GitHub Actions cada 6 h, o manual):
- *   npm run refresh:catalog          # completo (~180 títulos)
+ * Corre en background (GitHub Actions, o manual):
+ *   npm run refresh:catalog          # crawl COMPLETO del catálogo (miles de títulos)
  *   npm run refresh:catalog -- 20    # limitado (pruebas)
  *
  * Con la DB poblada, la API sirve listados (getAll DB-first) y el pase de prefijo
  * de búsqueda desde Postgres en milisegundos, sin scraping dentro del request.
  */
+import 'dotenv/config';
 import { RealScraperService } from '../src/services/realScraperService';
 import { TmdbService } from '../src/services/tmdbService';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
@@ -19,18 +20,9 @@ import { MediaItem } from '../src/types';
 const db = getSupabaseAdmin();
 
 async function collectCatalog(): Promise<MediaItem[]> {
-  const [home, movies, series, animes] = await Promise.all([
-    RealScraperService.scrapeHomepage(),
-    RealScraperService.scrapeLatest('peliculas', 60),
-    RealScraperService.scrapeLatest('series', 60),
-    RealScraperService.scrapeLatest('animes', 60)
-  ]);
-  const seen = new Set<string>();
-  return [...home, ...movies, ...series, ...animes].filter(it => {
-    if (!it.id || seen.has(it.id)) return false;
-    seen.add(it.id);
-    return true;
-  });
+  // Crawl COMPLETO (todas las categorías de tioplus paginadas hasta agotar + todo FuegoCine),
+  // no solo home/últimos. Es lo que da recuperación total y scroll infinito en la búsqueda.
+  return RealScraperService.crawlFullCatalog();
 }
 
 /** Comprueba si la columna title_normalized ya existe (migración 001 aplicada). */
@@ -82,23 +74,32 @@ async function main() {
   console.log(`   ${items.length} títulos recolectados`);
 
   // La tabla exige tmdb_id UNIQUE NOT NULL: resolver IDs reales y deduplicar por tmdb_id.
+  // Con miles de títulos, resolver TMDB con concurrencia ACOTADA (no en serie, no todo a la vez).
+  const CONCURRENCY = 10;
   let skipped = 0;
   const byTmdb = new Map<number, MediaItem>();
-  for (const item of items) {
-    let tmdbId = item.tmdb_id || 0;
-    if (!tmdbId) {
-      try {
-        tmdbId = (await TmdbService.getTmdbId(item.title, item.type)) || 0;
-      } catch {
-        tmdbId = 0;
+  for (let i = 0; i < items.length; i += CONCURRENCY) {
+    const chunk = items.slice(i, i + CONCURRENCY);
+    const resolved = await Promise.all(chunk.map(async (item) => {
+      let tmdbId = item.tmdb_id || 0;
+      if (!tmdbId) {
+        try {
+          tmdbId = (await TmdbService.getTmdbId(item.title, item.type)) || 0;
+        } catch {
+          tmdbId = 0;
+        }
       }
+      return { item, tmdbId };
+    }));
+    for (const { item, tmdbId } of resolved) {
+      if (!tmdbId) {
+        skipped++;
+        continue;
+      }
+      item.tmdb_id = tmdbId;
+      if (!byTmdb.has(tmdbId)) byTmdb.set(tmdbId, item);
     }
-    if (!tmdbId) {
-      skipped++;
-      continue;
-    }
-    item.tmdb_id = tmdbId;
-    if (!byTmdb.has(tmdbId)) byTmdb.set(tmdbId, item);
+    if (i > 0 && i % 500 === 0) console.log(`   ...TMDB resueltos ${i}/${items.length}`);
   }
   console.log(`   TMDB resueltos: ${byTmdb.size} | sin TMDB (omitidos): ${skipped}`);
 

@@ -23,6 +23,13 @@ app.use((req: Request, res: Response, next: NextFunction) => {
     if (req.path.includes('/panel') || req.path.includes('/stream/resolve') || req.path.includes('/revalidate') || req.path.includes('/cache')) {
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+    } else if (req.path.includes('/search')) {
+      // Búsqueda: cacheable en borde (Vercel/Cloudflare) por variante de ?q=&page=&limit=.
+      // TTL medio + stale-while-revalidate: respuestas instantáneas y refresco en segundo
+      // plano, para que los títulos recién crawleados aparezcan pronto.
+      res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=600, stale-while-revalidate=86400');
+      res.setHeader('CDN-Cache-Control', 'public, max-age=600, stale-while-revalidate=86400');
+      res.setHeader('Vercel-CDN-Cache-Control', 'public, max-age=600, stale-while-revalidate=86400');
     } else if (req.path.includes('/media/') || req.path.includes('/series/')) {
       res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=3600');
       res.setHeader('CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=3600');

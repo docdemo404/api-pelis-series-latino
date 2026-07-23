@@ -688,138 +688,192 @@ export class RealScraperService {
       const feedUrl = `https://www.fuegocine.com/feeds/posts/summary?q=${encodeURIComponent(query)}&alt=json&max-results=30`;
       const res = await axios.get(feedUrl, { headers: { 'User-Agent': UA }, timeout: 6000 });
       const entries = res.data?.feed?.entry || [];
+      return this.parseFuegocineEntries(entries);
+    } catch {
+      return [];
+    }
+  }
 
-      const movieItems: MediaItem[] = [];
-      // Map: bloggerSeriesId -> { seriesName, episodes[] }
-      const seriesMap = new Map<string, {
-        seriesName: string;
-        poster: string | null;
-        episodes: Array<{ season: number; episode: number; title: string; link: string }>;
-      }>();
-
-      for (const e of entries) {
-        const titleRaw = e.title?.$t || '';
-        const link = e.link?.find((l: any) => l.rel === 'alternate')?.href || '';
-        if (!titleRaw || !link) continue;
-
-        const categories = (e.category || []).map((c: any) => c.term as string);
-        const isEpisode = categories.includes('Episode');
-        const bloggerIdCat = categories.find((c: string) => /^id-\d+$/.test(c));
-        const sxeMatch = titleRaw.match(/^(.+?)\s+(\d+)x(\d+)\s*$/i);
-
-        if (isEpisode && bloggerIdCat && sxeMatch) {
-          // --- Es un episodio de serie ---
-          const seriesName = sxeMatch[1].trim();
-          const seasonNum = parseInt(sxeMatch[2], 10);
-          const episodeNum = parseInt(sxeMatch[3], 10);
-
-          let group = seriesMap.get(bloggerIdCat);
-          if (!group) {
-            const poster = e.media$thumbnail?.url ? e.media$thumbnail.url.replace(/\/s\d+(-c)?\//, '/s500/') : null;
-            group = { seriesName, poster, episodes: [] };
-            seriesMap.set(bloggerIdCat, group);
-          }
-          group.episodes.push({ season: seasonNum, episode: episodeNum, title: titleRaw, link });
-        } else {
-          // --- Es una película u otro contenido no-episódico ---
-          const slug = link.replace(/^https?:\/\/[^\/]+/, '').replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase();
-          const poster = e.media$thumbnail?.url ? e.media$thumbnail.url.replace(/\/s\d+(-c)?\//, '/s500/') : null;
-          const yearMatch = titleRaw.match(/\((\d{4})\)/);
-          const year = yearMatch ? yearMatch[1] : '';
-          const cleanTitle = titleRaw.replace(/\s*\(\d{4}\)\s*$/, '').trim();
-          const isTv = titleRaw.toLowerCase().includes('temporada') || titleRaw.toLowerCase().includes('serie');
-
-          movieItems.push({
-            id: slug,
-            tmdb_id: 0,
-            imdb_id: null,
-            type: isTv ? 'tvseries' as const : 'movie' as const,
-            title: cleanTitle,
-            original_title: cleanTitle,
-            aliases: [cleanTitle],
-            overview: `Ver ${cleanTitle} online gratis en FuegoCine con audio Latino.`,
-            rating: 0,
-            release_date: year,
-            genres: [],
-            subcategories: ['Latino HD', 'FuegoCine'],
-            poster,
-            backdrop: poster,
-            logo: null,
-            trailer: null,
-            cast: [],
-            dubbing_cast: [],
-            _tioplus_url: link
-          } as any);
-        }
+  /**
+   * Enumera TODO el catálogo de FuegoCine paginando el feed Blogger (sin q) por start-index,
+   * hasta agotar entradas o alcanzar el tope de seguridad. Junta todas las entradas antes de
+   * parsear para agrupar correctamente las series que abarcan varias páginas del feed.
+   */
+  static async scrapeAllFuegocine(maxItems = 5000): Promise<MediaItem[]> {
+    const PAGE = 150;
+    const allEntries: any[] = [];
+    for (let start = 1; allEntries.length < maxItems; start += PAGE) {
+      const feedUrl = `https://www.fuegocine.com/feeds/posts/summary?alt=json&max-results=${PAGE}&start-index=${start}`;
+      try {
+        const res = await axios.get(feedUrl, { headers: { 'User-Agent': UA }, timeout: 8000 });
+        const entries = res.data?.feed?.entry || [];
+        if (entries.length === 0) break;
+        allEntries.push(...entries);
+        if (entries.length < PAGE) break;
+      } catch {
+        break;
       }
+    }
+    return this.parseFuegocineEntries(allEntries);
+  }
 
-      // Convertir series agrupadas a MediaItems con estructura de temporadas/episodios
-      for (const [bloggerIdCat, group] of seriesMap) {
-        const seriesSlug = `fc-${group.seriesName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}`;
+  /** Parser compartido de entradas del feed Blogger de FuegoCine (películas + series agrupadas). */
+  private static parseFuegocineEntries(entries: any[]): MediaItem[] {
+    const movieItems: MediaItem[] = [];
+    // Map: bloggerSeriesId -> { seriesName, episodes[] }
+    const seriesMap = new Map<string, {
+      seriesName: string;
+      poster: string | null;
+      episodes: Array<{ season: number; episode: number; title: string; link: string }>;
+    }>();
 
-        // Organizar episodios por temporada
-        const seasonMap = new Map<number, Array<{ episode: number; title: string; link: string }>>();
-        for (const ep of group.episodes) {
-          let seasonEps = seasonMap.get(ep.season);
-          if (!seasonEps) {
-            seasonEps = [];
-            seasonMap.set(ep.season, seasonEps);
-          }
-          seasonEps.push({ episode: ep.episode, title: ep.title, link: ep.link });
+    for (const e of entries) {
+      const titleRaw = e.title?.$t || '';
+      const link = e.link?.find((l: any) => l.rel === 'alternate')?.href || '';
+      if (!titleRaw || !link) continue;
+
+      const categories = (e.category || []).map((c: any) => c.term as string);
+      const isEpisode = categories.includes('Episode');
+      const bloggerIdCat = categories.find((c: string) => /^id-\d+$/.test(c));
+      const sxeMatch = titleRaw.match(/^(.+?)\s+(\d+)x(\d+)\s*$/i);
+
+      if (isEpisode && bloggerIdCat && sxeMatch) {
+        // --- Es un episodio de serie ---
+        const seriesName = sxeMatch[1].trim();
+        const seasonNum = parseInt(sxeMatch[2], 10);
+        const episodeNum = parseInt(sxeMatch[3], 10);
+
+        let group = seriesMap.get(bloggerIdCat);
+        if (!group) {
+          const poster = e.media$thumbnail?.url ? e.media$thumbnail.url.replace(/\/s\d+(-c)?\//, '/s500/') : null;
+          group = { seriesName, poster, episodes: [] };
+          seriesMap.set(bloggerIdCat, group);
         }
-
-        const seasons: import('../types').Season[] = [];
-        for (const [sNum, eps] of [...seasonMap.entries()].sort((a, b) => a[0] - b[0])) {
-          eps.sort((a, b) => a.episode - b.episode);
-          seasons.push({
-            season_number: sNum,
-            name: `Temporada ${sNum}`,
-            episodes_count: eps.length,
-            poster: group.poster,
-            episodes: eps.map(ep => ({
-              episode_number: ep.episode,
-              name: ep.title,
-              overview: `Ver ${ep.title} en FuegoCine con audio Latino.`,
-              still_path: null,
-              air_date: null,
-              servers: [],
-              _fuegocine_url: ep.link,
-            } as any)),
-          });
-        }
-
-        const totalEps = group.episodes.length;
+        group.episodes.push({ season: seasonNum, episode: episodeNum, title: titleRaw, link });
+      } else {
+        // --- Es una película u otro contenido no-episódico ---
+        const slug = link.replace(/^https?:\/\/[^\/]+/, '').replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase();
+        const poster = e.media$thumbnail?.url ? e.media$thumbnail.url.replace(/\/s\d+(-c)?\//, '/s500/') : null;
+        const yearMatch = titleRaw.match(/\((\d{4})\)/);
+        const year = yearMatch ? yearMatch[1] : '';
+        const cleanTitle = titleRaw.replace(/\s*\(\d{4}\)\s*$/, '').trim();
+        const isTv = titleRaw.toLowerCase().includes('temporada') || titleRaw.toLowerCase().includes('serie');
 
         movieItems.push({
-          id: seriesSlug,
+          id: slug,
           tmdb_id: 0,
           imdb_id: null,
-          type: 'tvseries' as const,
-          title: group.seriesName,
-          original_title: group.seriesName,
-          aliases: [group.seriesName],
-          overview: `Ver ${group.seriesName} online gratis en FuegoCine con audio Latino.`,
+          type: isTv ? 'tvseries' as const : 'movie' as const,
+          title: cleanTitle,
+          original_title: cleanTitle,
+          aliases: [cleanTitle],
+          overview: `Ver ${cleanTitle} online gratis en FuegoCine con audio Latino.`,
           rating: 0,
-          release_date: '',
+          release_date: year,
           genres: [],
           subcategories: ['Latino HD', 'FuegoCine'],
-          poster: group.poster,
-          backdrop: group.poster,
+          poster,
+          backdrop: poster,
           logo: null,
           trailer: null,
           cast: [],
           dubbing_cast: [],
-          total_seasons: seasons.length,
-          total_episodes: totalEps,
-          seasons,
-          _fuegocine_blogger_id: bloggerIdCat,
+          _tioplus_url: link
         } as any);
       }
-
-      return movieItems;
-    } catch {
-      return [];
     }
+
+    // Convertir series agrupadas a MediaItems con estructura de temporadas/episodios
+    for (const [bloggerIdCat, group] of seriesMap) {
+      const seriesSlug = `fc-${group.seriesName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}`;
+
+      // Organizar episodios por temporada
+      const seasonMap = new Map<number, Array<{ episode: number; title: string; link: string }>>();
+      for (const ep of group.episodes) {
+        let seasonEps = seasonMap.get(ep.season);
+        if (!seasonEps) {
+          seasonEps = [];
+          seasonMap.set(ep.season, seasonEps);
+        }
+        seasonEps.push({ episode: ep.episode, title: ep.title, link: ep.link });
+      }
+
+      const seasons: import('../types').Season[] = [];
+      for (const [sNum, eps] of [...seasonMap.entries()].sort((a, b) => a[0] - b[0])) {
+        eps.sort((a, b) => a.episode - b.episode);
+        seasons.push({
+          season_number: sNum,
+          name: `Temporada ${sNum}`,
+          episodes_count: eps.length,
+          poster: group.poster,
+          episodes: eps.map(ep => ({
+            episode_number: ep.episode,
+            name: ep.title,
+            overview: `Ver ${ep.title} en FuegoCine con audio Latino.`,
+            still_path: null,
+            air_date: null,
+            servers: [],
+            _fuegocine_url: ep.link,
+          } as any)),
+        });
+      }
+
+      const totalEps = group.episodes.length;
+
+      movieItems.push({
+        id: seriesSlug,
+        tmdb_id: 0,
+        imdb_id: null,
+        type: 'tvseries' as const,
+        title: group.seriesName,
+        original_title: group.seriesName,
+        aliases: [group.seriesName],
+        overview: `Ver ${group.seriesName} online gratis en FuegoCine con audio Latino.`,
+        rating: 0,
+        release_date: '',
+        genres: [],
+        subcategories: ['Latino HD', 'FuegoCine'],
+        poster: group.poster,
+        backdrop: group.poster,
+        logo: null,
+        trailer: null,
+        cast: [],
+        dubbing_cast: [],
+        total_seasons: seasons.length,
+        total_episodes: totalEps,
+        seasons,
+        _fuegocine_blogger_id: bloggerIdCat,
+      } as any);
+    }
+
+    return movieItems;
+  }
+
+  /**
+   * Crawl PROFUNDO de una categoría tioplus. Reutiliza scrapeLatest, que ya pagina el índice
+   * y corta cuando una página no aporta títulos nuevos; con un límite alto recorre todo.
+   */
+  static async scrapeAllOfType(type: 'peliculas' | 'series' | 'animes', maxItems = 20000): Promise<MediaItem[]> {
+    return this.scrapeLatest(type, maxItems);
+  }
+
+  /**
+   * Crawl COMPLETO del catálogo de todas las fuentes activas para scripts/refreshCatalog.ts.
+   * Deduplica por id. La resolución de TMDB y la escritura las hace el job de refresh.
+   */
+  static async crawlFullCatalog(): Promise<MediaItem[]> {
+    const [peliculas, series, animes, fuego] = await Promise.all([
+      this.scrapeAllOfType('peliculas').catch(() => [] as MediaItem[]),
+      this.scrapeAllOfType('series').catch(() => [] as MediaItem[]),
+      this.scrapeAllOfType('animes').catch(() => [] as MediaItem[]),
+      this.scrapeAllFuegocine().catch(() => [] as MediaItem[])
+    ]);
+    const seen = new Set<string>();
+    return [...peliculas, ...series, ...animes, ...fuego].filter(it => {
+      if (!it.id || seen.has(it.id)) return false;
+      seen.add(it.id);
+      return true;
+    });
   }
 
   /**
