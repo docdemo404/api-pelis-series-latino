@@ -51,7 +51,7 @@ function toRow(item: MediaItem, withNormalized: boolean) {
     backdrop: item.backdrop,
     logo: item.logo,
     trailer: item.trailer,
-    cast_data: item.cast || [],
+    cast_data: (item.cast_details && item.cast_details.length ? item.cast_details : item.cast) || [],
     dubbing_cast_data: item.dubbing_cast || [],
     total_seasons: item.total_seasons || 0,
     total_episodes: item.total_episodes || 0,
@@ -73,35 +73,36 @@ async function main() {
   }
   console.log(`   ${items.length} títulos recolectados`);
 
-  // La tabla exige tmdb_id UNIQUE NOT NULL: resolver IDs reales y deduplicar por tmdb_id.
-  // Con miles de títulos, resolver TMDB con concurrencia ACOTADA (no en serie, no todo a la vez).
+  // Enriquecer con TMDB (géneros, rating, sinopsis, póster/backdrop, tráiler, cast con fotos)
+  // y resolver el tmdb_id real, con concurrencia ACOTADA. skipSeasons: no bajamos temporadas
+  // (no se guardan en el catálogo y triplicarían las llamadas). La tabla exige tmdb_id UNIQUE,
+  // así que deduplicamos por tmdb_id. Los títulos sin match en TMDB quedan con su id-hash y
+  // metadata mínima (inherente: TMDB no los tiene).
   const CONCURRENCY = 10;
   let skipped = 0;
+  let enrichedCount = 0;
   const byTmdb = new Map<number, MediaItem>();
   for (let i = 0; i < items.length; i += CONCURRENCY) {
     const chunk = items.slice(i, i + CONCURRENCY);
-    const resolved = await Promise.all(chunk.map(async (item) => {
-      let tmdbId = item.tmdb_id || 0;
-      if (!tmdbId) {
-        try {
-          tmdbId = (await TmdbService.getTmdbId(item.title, item.type)) || 0;
-        } catch {
-          tmdbId = 0;
-        }
+    const enriched = await Promise.all(chunk.map(async (item) => {
+      try {
+        return await TmdbService.enrichMediaItem(item, { skipSeasons: true });
+      } catch {
+        return item;
       }
-      return { item, tmdbId };
     }));
-    for (const { item, tmdbId } of resolved) {
+    for (const item of enriched) {
+      const tmdbId = item.tmdb_id || 0;
       if (!tmdbId) {
         skipped++;
         continue;
       }
-      item.tmdb_id = tmdbId;
+      if ((item.genres && item.genres.length > 0) || (item.rating && item.rating > 0)) enrichedCount++;
       if (!byTmdb.has(tmdbId)) byTmdb.set(tmdbId, item);
     }
-    if (i > 0 && i % 500 === 0) console.log(`   ...TMDB resueltos ${i}/${items.length}`);
+    if (i > 0 && i % 500 === 0) console.log(`   ...enriquecidos ${i}/${items.length}`);
   }
-  console.log(`   TMDB resueltos: ${byTmdb.size} | sin TMDB (omitidos): ${skipped}`);
+  console.log(`   Únicos por TMDB: ${byTmdb.size} | con metadata TMDB: ${enrichedCount} | sin TMDB: ${skipped}`);
 
   const withNormalized = await hasNormalizedColumn();
   if (!withNormalized) {

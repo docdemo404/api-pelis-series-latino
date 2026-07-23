@@ -190,7 +190,7 @@ export class TmdbService {
    * Enriquece un MediaItem con metadatos oficiales de TMDB:
    * sinopsis completa en español, trailers oficiales de YouTube, imágenes HD, reparto con fotos, géneros, temporadas, etc.
    */
-  static async enrichMediaItem(item: MediaItem): Promise<MediaItem> {
+  static async enrichMediaItem(item: MediaItem, opts: { skipSeasons?: boolean } = {}): Promise<MediaItem> {
     try {
       const year = item.release_date ? item.release_date.substring(0, 4) : undefined;
       const tmdbId = item.tmdb_id && item.tmdb_id > 0
@@ -235,7 +235,7 @@ export class TmdbService {
 
       // Mapear temporadas y episodios si es una serie de TV
       let seasons = item.seasons || [];
-      if (isTv && (!seasons || seasons.length === 0) && tmdbData.number_of_seasons > 0) {
+      if (!opts.skipSeasons && isTv && (!seasons || seasons.length === 0) && tmdbData.number_of_seasons > 0) {
         seasons = await this.getTmdbSeasons(tmdbData.id, tmdbData.number_of_seasons, tmdbData.poster_path ? `https://image.tmdb.org/t/p/w500${tmdbData.poster_path}` : item.poster, item.servers || []);
       }
 
