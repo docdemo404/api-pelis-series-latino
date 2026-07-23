@@ -12,16 +12,36 @@ import { ContentType, MediaItem } from '../types';
  * la ficha (sinopsis, reparto, imágenes, temporadas) sale de la DB/caché en milisegundos,
  * mientras que resolver los servidores implica scraping en vivo. Por eso el detalle
  * responde de inmediato con un bloque `streams` que indica dónde pedir los enlaces, y la
- * app los solicita al pulsar Reproducir. `?streams=wait` mantiene el comportamiento
- * bloqueante de siempre para clientes que esperan todo en una sola respuesta.
+ * app los solicita al pulsar Reproducir.
+ *
+ * Para clientes que prefieren una sola respuesta hay dos modos:
+ *   ?streams=wait  → resolución COMPLETA (incluida la fusión multifuente). Lento pero total.
+ *   ?streams=fast  → solo los caminos baratos (enlaces persistidos + un scrapeDetail contra
+ *                    la URL de origen ya guardada). Cubre la práctica totalidad del catálogo
+ *                    sin la latencia de la búsqueda por título.
  */
 const router = Router();
 
-/** ¿El cliente pide esperar a que los enlaces estén resueltos? */
-function wantsBlockingStreams(req: Request): boolean {
+/** Modo de resolución de enlaces pedido por el cliente para el DETALLE. */
+function streamsMode(req: Request): 'none' | 'fast' | 'wait' {
   const streams = String(req.query.streams || '').toLowerCase();
   const include = String(req.query.include || '').toLowerCase();
-  return streams === 'wait' || streams === 'true' || streams === '1' || include === 'streams';
+  if (streams === 'wait' || streams === 'true' || streams === '1' || include === 'streams') return 'wait';
+  if (streams === 'fast' || streams === 'cheap') return 'fast';
+  return 'none';
+}
+
+/** Resuelve la ficha según el modo pedido: metadata sola, enlaces baratos o todo. */
+async function resolveDetail(req: Request, typeHint?: ContentType): Promise<MediaItem | null> {
+  const id = req.params.id;
+  switch (streamsMode(req)) {
+    case 'wait':
+      return CatalogService.getStreams(id, typeHint);
+    case 'fast':
+      return CatalogService.getStreams(id, typeHint, { cheap: true });
+    default:
+      return CatalogService.getMetadata(id, typeHint);
+  }
 }
 
 /** Adjunta el bloque `streams` y elimina los campos internos del ítem. */
@@ -131,9 +151,7 @@ router.get('/api/v1/series/:id', async (req: Request, res: Response, next: NextF
       if (epDetail) return res.json({ status: 'success', data: epDetail });
     }
 
-    const item = wantsBlockingStreams(req)
-      ? await CatalogService.getStreams(req.params.id, 'tvseries')
-      : await CatalogService.getMetadata(req.params.id, 'tvseries');
+    const item = await resolveDetail(req, 'tvseries');
 
     if (!item) {
       return sendErrorResponse(res, 404, 'RESOURCE_NOT_FOUND', 'La serie solicitada no existe o no está disponible.');
@@ -153,9 +171,7 @@ router.get('/api/v1/media/:id', async (req: Request, res: Response, next: NextFu
       if (epDetail) return res.json({ status: 'success', data: epDetail });
     }
 
-    const item = wantsBlockingStreams(req)
-      ? await CatalogService.getStreams(req.params.id)
-      : await CatalogService.getMetadata(req.params.id);
+    const item = await resolveDetail(req);
 
     if (!item) {
       return sendErrorResponse(res, 404, 'RESOURCE_NOT_FOUND', 'El contenido solicitado no existe o no está disponible.');

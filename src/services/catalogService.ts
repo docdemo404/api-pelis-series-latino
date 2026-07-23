@@ -121,36 +121,119 @@ export class CatalogService {
   }
 
   /**
-   * Localiza una fila del catálogo aceptando CUALQUIER forma de id que la API haya podido
-   * emitir: el id de la fuente, el tmdb_id, un slug contenido dentro del id de la fuente
-   * (fuegocine antepone fecha y añade año + "-html") o un slug derivado del título.
-   * Sin esto, un id válido de la búsqueda podía responder 404 en el detalle.
+   * Puntuación mínima para tratar una fila como LA ficha pedida. Por debajo de este umbral
+   * la coincidencia es solo parcial y se prefiere resolver contra las fuentes en vivo.
    */
-  private static async findDbRowByAnyId(id: string): Promise<any | null> {
-    const slug = id.trim();
+  private static readonly DB_MATCH_CONFIDENT = 70;
+
+  /**
+   * Todas las formas de slug bajo las que puede pedirse una fila, derivadas de su id.
+   * FuegoCine antepone la fecha del post y añade el año + "-html":
+   *   2025-04-shrek-2-2004-html  →  {id completo, "shrek-2-2004", "shrek-2"}
+   * Es lo que permite reconocer "shrek-2" como EXACTAMENTE esa fila, y no como un trozo
+   * suelto de "2025-04-shrek-2001-html" (donde "shrek-2" solo aparece dentro del año).
+   */
+  private static idSlugVariants(rowId: string): Set<string> {
+    const variants = new Set<string>();
+    const base = String(rowId || '').toLowerCase().trim();
+    if (!base) return variants;
+
+    variants.add(base);
+    const fuegocine = base.match(/^\d{4}-\d{2}-(.+)-html$/);
+    if (fuegocine) {
+      variants.add(fuegocine[1]);
+      variants.add(fuegocine[1].replace(/-\d{4}$/, ''));
+    }
+    return variants;
+  }
+
+  /**
+   * Cuánto se parece una fila al slug pedido. Solo cuentan las coincidencias de UNIDAD
+   * COMPLETA (id canónico, título, título original, alias); el "contiene" suelto puntúa
+   * por debajo del umbral de confianza porque es justo lo que cruzaba fichas distintas
+   * ("shrek" → Shrek Tercero, "shrek-2" → Shrek).
+   */
+  private static scoreDbCandidate(row: any, slug: string, typeHint?: ContentType): number {
+    const idVariants = this.idSlugVariants(row?.id);
+    const titleSlug = slugify(row?.title);
+    let score = 0;
+
+    if (idVariants.has(slug)) score = 100;
+    else if (titleSlug && titleSlug === slug) score = 95;
+    else if (slugify(row?.original_title) === slug && slug) score = 80;
+    else if ((row?.aliases || []).some((a: string) => slugify(a) === slug)) score = 70;
+    else {
+      // Prefijo de segmento completo ("shrek" ⊂ "shrek-2"): plausible, nunca concluyente.
+      const isSegmentPrefix = (v: string) => v === slug || v.startsWith(`${slug}-`);
+      if (Array.from(idVariants).some(isSegmentPrefix) || (titleSlug && isSegmentPrefix(titleSlug))) score = 30;
+      else if (Array.from(idVariants).some(v => v.includes(slug))) score = 10;
+    }
+
+    if (score === 0) return 0;
+
+    // Desempates: no cruzan de nivel, solo ordenan dentro del mismo tipo de coincidencia.
+    if (typeHint && row?.type === typeHint) score += 3;
+    if (row?.poster) score += 2;
+    if (row?.overview && String(row.overview).length > 20) score += 1;
+    return score;
+  }
+
+  /**
+   * Localiza la fila del catálogo que corresponde a CUALQUIER forma de id que la API haya
+   * podido emitir: el id de la fuente, el tmdb_id, el slug corto de TioPlus, el slug
+   * embebido en el id de FuegoCine o un slug derivado del título.
+   *
+   * Devuelve la mejor candidata JUNTO CON su puntuación: el llamador decide si la acepta
+   * como definitiva (>= DB_MATCH_CONFIDENT) o si primero intenta resolver en vivo. Antes se
+   * devolvía el primer `ilike '%slug%'` que apareciera, sin orden ni verificación, y los
+   * slugs cortos acababan apuntando a la película equivocada.
+   */
+  private static async findDbRowScored(id: string, typeHint?: ContentType): Promise<{ row: any; score: number } | null> {
+    const slug = id.trim().toLowerCase();
     if (!slug) return null;
-    // Solo [a-z0-9-] llega a los patrones LIKE, así que no hay riesgo de inyección de comodines.
-    const safeSlug = slugify(slug);
 
-    const attempts: Array<() => PromiseLike<{ data: any[] | null }>> = [
-      // a) id exacto de la fuente
-      () => supabase.from('media_items').select('*').eq('id', slug).limit(1),
-      // b) tmdb_id numérico
-      ...(isNaN(Number(slug)) ? [] : [() => supabase.from('media_items').select('*').eq('tmdb_id', Number(slug)).limit(1)]),
-      // c) slug contenido en el id de la fuente (2025-04-<slug>-2012-html)
-      ...(safeSlug ? [() => supabase.from('media_items').select('*').ilike('id', `%${safeSlug}%`).limit(1)] : []),
-      // d) título derivado del slug: los guiones cubren espacios y puntuación ("3: los" ← "3-los")
-      ...(safeSlug ? [() => supabase.from('media_items').select('*').ilike('title_normalized', safeSlug.replace(/-/g, '%')).limit(1)] : [])
-    ];
+    // a) id exacto de la fuente: no hay nada más que verificar.
+    try {
+      const { data } = await supabase.from('media_items').select('*').eq('id', slug).limit(1);
+      if (data && data.length > 0) return { row: data[0], score: 100 };
+    } catch {}
 
-    for (const attempt of attempts) {
+    // b) tmdb_id numérico.
+    if (!isNaN(Number(slug))) {
       try {
-        const { data } = await attempt();
-        if (data && data.length > 0) return data[0];
+        const { data } = await supabase.from('media_items').select('*').eq('tmdb_id', Number(slug)).limit(1);
+        if (data && data.length > 0) return { row: data[0], score: 100 };
       } catch {}
     }
 
-    return null;
+    // Solo [a-z0-9-] llega a los patrones LIKE, así que no hay riesgo de inyección de comodines.
+    const safeSlug = slugify(slug);
+    if (!safeSlug) return null;
+    const deslugged = safeSlug.replace(/-/g, ' ');
+
+    // Los pases van EN PARALELO. Los dos primeros están anclados a la gramática de los ids
+    // de FuegoCine (`_` = un carácter en LIKE, `____` = el año), así que traen la fila
+    // correcta aunque el pase suelto se quede corto por el límite de filas. El cuarto usa
+    // `%` como separador para que la puntuación que el slug perdió ("9: el" ← "9-el") no
+    // impida encontrar el título. Todos son CANDIDATOS: quien decide es la puntuación.
+    const candidateSets = await Promise.all([
+      supabase.from('media_items').select('*').ilike('id', `%-${safeSlug}-html`).limit(10),
+      supabase.from('media_items').select('*').ilike('id', `%-${safeSlug}-____-html`).limit(10),
+      supabase.from('media_items').select('*').ilike('title_normalized', `${deslugged}%`).limit(25),
+      supabase.from('media_items').select('*').ilike('title_normalized', `${safeSlug.replace(/-/g, '%')}%`).limit(25),
+      supabase.from('media_items').select('*').ilike('id', `%${safeSlug}%`).limit(25)
+    ].map(p => Promise.resolve(p).then((r: any) => (r?.data as any[]) || []).catch(() => [] as any[])));
+
+    let best: { row: any; score: number } | null = null;
+    const seen = new Set<string>();
+    for (const row of candidateSets.flat()) {
+      if (!row?.id || seen.has(row.id)) continue;
+      seen.add(row.id);
+      const score = this.scoreDbCandidate(row, safeSlug, typeHint);
+      if (score > 0 && (!best || score > best.score)) best = { row, score };
+    }
+
+    return best;
   }
 
   /**
@@ -549,17 +632,29 @@ export class CatalogService {
     let result: MediaItem | null = null;
 
     // 1. DB-FIRST: el catálogo pre-scrapeado ya trae la ficha completa (job de refresh).
-    const dbRow = await this.findDbRowByAnyId(q);
-    if (dbRow) {
-      const mapped = this.mapDbItemToMediaItem(dbRow);
-      result = this.isMetadataComplete(mapped)
+    //    Solo se acepta directamente si la coincidencia es inequívoca; una parcial se
+    //    guarda como red de seguridad para el paso 3.
+    const dbMatch = await this.findDbRowScored(q, typeHint);
+    const fromDbRow = async (row: any): Promise<MediaItem> => {
+      const mapped = this.mapDbItemToMediaItem(row);
+      return this.isMetadataComplete(mapped)
         ? mapped
         : await TmdbService.enrichMediaItem(mapped, { skipSeasons: true });
+    };
+
+    if (dbMatch && dbMatch.score >= CatalogService.DB_MATCH_CONFIDENT) {
+      result = await fromDbRow(dbMatch.row);
     }
 
     // 2. Fuera de la DB: resolver contra TMDB / las fuentes reales.
     if (!result) {
       result = await this.resolveMetadataLive(q, typeHint);
+    }
+
+    // 3. Ni la DB ni las fuentes en vivo dieron una ficha exacta: se usa la mejor
+    //    coincidencia parcial de la DB antes que devolver 404.
+    if (!result && dbMatch) {
+      result = await fromDbRow(dbMatch.row);
     }
 
     if (!result) return null;
@@ -748,8 +843,11 @@ export class CatalogService {
    *   C. Fusión multifuente (búsqueda por título en tioplus + fuegocine) — el camino
    *      histórico, ahora reservado para cuando A y B no dan enlaces o se pide `deep`.
    * Lo resuelto se escribe de vuelta en la DB para que la próxima apertura sea instantánea.
+   *
+   * `cheap` corta en B: sirve para que el DETALLE pueda intentar traer los enlaces en la
+   * misma respuesta sin arriesgar la latencia de la fusión multifuente.
    */
-  static async getStreams(id: string, typeHint?: ContentType, opts: { deep?: boolean } = {}): Promise<MediaItem | null> {
+  static async getStreams(id: string, typeHint?: ContentType, opts: { deep?: boolean; cheap?: boolean } = {}): Promise<MediaItem | null> {
     const q = id.toLowerCase().trim();
     if (!q) return null;
     const cacheKey = this.cacheKeyFor(q, typeHint);
@@ -799,7 +897,7 @@ export class CatalogService {
     // C. Fusión multifuente (TioPlus + FuegoCine) por título. Es el camino caro: solo cuando
     //    no hemos conseguido enlaces por las vías baratas, o cuando se pide explícitamente
     //    (`deep`, que usa el job de pre-calentado para dejar el set completo en la DB).
-    if (allServers.length === 0 || opts.deep) {
+    if ((allServers.length === 0 && !opts.cheap) || opts.deep) {
       const targetStrict = strictKey(result.title);
       const targetCanonical = canonicalTitleKey(result.title);
 
@@ -835,7 +933,7 @@ export class CatalogService {
 
     // D. Serie sin servidores → resolver activamente S1:E1.
     const isSeries = result.type === 'tvseries' || (result.total_seasons != null && result.total_seasons > 0);
-    if (isSeries && allServers.length === 0) {
+    if (isSeries && allServers.length === 0 && !opts.cheap) {
       try {
         const titleSlug = normalizeTitle(result.title || '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
         const ep1Detail = await RealScraperService.scrapeEpisodeDetail(titleSlug, 1, 1);
@@ -854,8 +952,13 @@ export class CatalogService {
 
     if (result.servers.length > 0 || (result.seasons && result.seasons.length > 0)) {
       await this.cacheItem('byid', cacheKey, result, CACHE_TTL_SECONDS);
-      // Write-through: la próxima apertura (incluso desde otra lambda) sale de la DB.
       if (result.servers.length > 0) {
+        // Coherencia de caché: la ficha ya cacheada como metadata (TTL de 6 h) se escribió
+        // ANTES de resolver los enlaces, con `servers: []`. Sin refrescarla aquí, el detalle
+        // seguía anunciando `streams.status: "pending"` durante horas para un título cuyos
+        // servidores ya conocemos.
+        await this.cacheItem('meta', cacheKey, result, METADATA_TTL_SECONDS);
+        // Write-through: la próxima apertura (incluso desde otra lambda) sale de la DB.
         void this.persistStreams(result).catch(() => {});
       }
     }

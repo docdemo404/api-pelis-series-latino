@@ -220,13 +220,13 @@
     "/api/v1/media/{id}": {
       "get": {
         "summary": "Obtener detalle por Slug o ID (metadata instantánea)",
-        "description": "Devuelve la ficha completa (sinopsis, imágenes, reparto, temporadas) desde la base de datos o la caché, sin esperar a la resolución de enlaces. El bloque `streams` indica si los servidores ya están listos o dónde pedirlos (`GET /api/v1/media/{id}/streams`), lo que permite abrir una ficha emergente al instante y resolver la reproducción solo cuando el usuario pulsa Reproducir. Usa `streams=wait` para el comportamiento bloqueante clásico (metadata + servidores en una sola respuesta).",
+        "description": "Devuelve la ficha completa (sinopsis, imágenes, reparto, temporadas) desde la base de datos o la caché, sin esperar a la resolución de enlaces. El bloque `streams` indica si los servidores ya están listos o dónde pedirlos (`GET /api/v1/media/{id}/streams`), lo que permite abrir una ficha emergente al instante y resolver la reproducción solo cuando el usuario pulsa Reproducir.\n\nSi prefieres una sola respuesta con servidores incluidos: `streams=fast` resuelve por los caminos baratos (enlaces ya persistidos + un scrape contra la URL de origen guardada, disponible para casi todo el catálogo) y `streams=wait` fuerza la resolución completa con fusión multifuente.",
         "parameters": [
           {
             "name": "id",
             "in": "path",
             "required": true,
-            "description": "Slug o ID del contenido (ej. scary-movie-6, la-casa-del-dragon)",
+            "description": "Slug o ID del contenido. Acepta el id de la fuente (2025-04-shrek-2001-html), el slug corto (shrek, shrek-2), el slug del título o el tmdb_id.",
             "schema": {
               "type": "string"
             }
@@ -235,10 +235,12 @@
             "name": "streams",
             "in": "query",
             "required": false,
-            "description": "wait | true | 1 → espera a que los servidores estén resueltos y los incluye en la respuesta (más lento). Por defecto la respuesta es instantánea y `streams.status` vale 'pending'.",
+            "description": "fast | cheap → incluye los servidores resolviendo solo por los caminos baratos (recomendado si quieres ficha + enlaces en una petición). wait | true | 1 → resolución completa, incluida la fusión multifuente (más lento). Por defecto la respuesta es instantánea y `streams.status` vale 'pending'.",
             "schema": {
               "type": "string",
               "enum": [
+                "fast",
+                "cheap",
                 "wait",
                 "true",
                 "1"
@@ -332,7 +334,7 @@
             "name": "streams",
             "in": "query",
             "required": false,
-            "description": "wait | true | 1 → espera a la resolución de servidores.",
+            "description": "fast | cheap → incluye los servidores resolviendo solo por los caminos baratos. wait | true | 1 → resolución completa (más lento).",
             "schema": {
               "type": "string"
             }
