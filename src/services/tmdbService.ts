@@ -3,94 +3,208 @@ import * as cheerio from 'cheerio';
 import { MediaItem, ContentType, CastMember } from '../types';
 import { OverrideService } from './overrideService';
 import { USER_AGENT } from '../utils/httpClient';
+import { canonicalTitle, normalizeTitle } from '../utils/text';
 
 const API_KEY = '99b8bc99e85e79fabd52b64513c9780d';
 const UA = USER_AGENT;
 
-const tmdbIdCache = new Map<string, number>();
+const tmdbIdCache = new Map<string, TmdbMatch>();
 const tmdbDetailCache = new Map<string, any>();
 
+/** Resultado de resolver un título contra TMDB. `matched: false` ⇒ id sintético (negativo). */
+export interface TmdbMatch {
+  id: number;
+  matched: boolean;
+  score: number;
+}
+
+// Puntuación mínima de similitud para aceptar un resultado de TMDB como el mismo título.
+// Por debajo preferimos NO emparejar (mejor metadata de la fuente que metadata de otra peli).
+const MATCH_THRESHOLD = 0.6;
+// A partir de aquí el match es inequívoco y dejamos de probar más estrategias de búsqueda.
+const CONFIDENT_SCORE = 0.9;
+
+// Ruido de scraping al principio/final del título ("Ver X online gratis HD Latino").
+const LEAD_NOISE = /^(ver|descargar|pelicula|película|serie|anime)\s+/i;
+const TAIL_NOISE = /\s+(online|gratis|completa|hd|full\s*hd|4k|1080p|720p|480p|latino|castellano|subtitulado|sub\s*espa(n|ñ)ol|audio\s*latino|espa(n|ñ)ol\s*latino|en\s*espa(n|ñ)ol|mega|torrent)$/i;
+
+/** Limpia un título de listado para buscarlo en TMDB (sin año, sin ruido, sin temporada). */
+function cleanForSearch(title: string): string {
+  let t = (title || '')
+    .replace(/\s*\(\d{4}\)\s*$/, '')
+    .replace(/\[[^\]]*\]/g, '')
+    .replace(/\b(temporada|season|capitulo|capítulo|episodio)\s*\d+\b/gi, '')
+    .trim();
+
+  t = t.replace(/^gru\s*(\d+)\s*/i, 'Mi villano favorito $1 ');
+
+  let prev = '';
+  while (prev !== t) {
+    prev = t;
+    t = t.replace(LEAD_NOISE, '').replace(TAIL_NOISE, '').replace(/[\s\-–—:,.]+$/, '').trim();
+  }
+
+  return t || title.trim();
+}
+
+/** Similitud 0..1 entre dos títulos: exacto > prefijo > substring > solapamiento de palabras. */
+function similarity(a: string, b: string): number {
+  const ca = canonicalTitle(a);
+  const cb = canonicalTitle(b);
+  if (!ca || !cb) return 0;
+  if (ca === cb) return 1;
+  if (ca.startsWith(cb) || cb.startsWith(ca)) return 0.85;
+  if (ca.includes(cb) || cb.includes(ca)) return 0.7;
+
+  const tokens = (s: string) => new Set(normalizeTitle(s).split(/[^a-z0-9]+/).filter(Boolean));
+  const ta = tokens(a);
+  const tb = tokens(b);
+  if (!ta.size || !tb.size) return 0;
+  let inter = 0;
+  ta.forEach(t => { if (tb.has(t)) inter++; });
+  return (2 * inter) / (ta.size + tb.size);
+}
+
+/** Puntúa un resultado de TMDB frente al título (y año) buscados. */
+function scoreResult(result: any, query: string, year?: string): number {
+  const candidates = [result.title, result.name, result.original_title, result.original_name].filter(Boolean);
+  let best = 0;
+  for (const c of candidates) best = Math.max(best, similarity(query, c));
+
+  const date: string = result.release_date || result.first_air_date || '';
+  if (year && date) {
+    const diff = Math.abs(parseInt(date.substring(0, 4), 10) - parseInt(year, 10));
+    if (diff === 0) best += 0.1;
+    else if (diff > 2) best -= 0.1;
+  }
+  return Math.max(0, Math.min(1, best));
+}
+
+/**
+ * ID sintético DETERMINISTA y NEGATIVO para títulos sin match en TMDB.
+ * Al ser negativo nunca colisiona con un tmdb_id real, así que no genera duplicados
+ * ni choca con el UNIQUE de media_items.tmdb_id (el antiguo hash 100000-999999 sí lo hacía).
+ */
+function syntheticTmdbId(seed: string): number {
+  let hash = 2166136261;
+  const clean = canonicalTitle(seed) || seed.toLowerCase();
+  for (let i = 0; i < clean.length; i++) {
+    hash ^= clean.charCodeAt(i);
+    hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+  }
+  return -(1 + ((hash >>> 0) % 2000000000));
+}
+
 export class TmdbService {
-  /**
-   * Obtiene el TMDB ID real numérico utilizando la API oficial de TMDB con fallback
-   */
-  static async getTmdbId(title: string, type: ContentType = 'movie', year?: string): Promise<number> {
-    // Normalización de título eliminando prefijos de scraping (ej. "gru 3 mi villano favorito" -> "Mi villano favorito 3")
-    let cleanTitle = title.replace(/\s*\(\d{4}\)\s*$/, '').trim();
-    cleanTitle = cleanTitle.replace(/^gru\s*(\d+)\s*/i, 'Mi villano favorito $1 ');
-    cleanTitle = cleanTitle.replace(/^ver\s+/i, '').trim();
-
-    const cacheKey = `${type}:${cleanTitle.toLowerCase()}:${year || ''}`;
-
-    if (tmdbIdCache.has(cacheKey)) {
-      return tmdbIdCache.get(cacheKey)!;
-    }
-
-    const endpoint = type === 'tvseries' ? 'tv' : 'movie';
-    const numMatch = cleanTitle.match(/\b(\d+)\b/);
-    const targetNum = numMatch ? numMatch[1] : null;
-
-    // 1. Consulta a la API oficial de TMDB v3
+  /** Una consulta a /search/{endpoint} puntuada contra el título buscado. */
+  private static async searchScored(
+    endpoint: 'movie' | 'tv' | 'multi',
+    query: string,
+    year?: string
+  ): Promise<{ id: number; score: number } | null> {
     try {
-      const searchRes = await axios.get(`https://api.themoviedb.org/3/search/${endpoint}`, {
+      const res = await axios.get(`https://api.themoviedb.org/3/search/${endpoint}`, {
         params: {
           api_key: API_KEY,
-          query: cleanTitle,
+          query,
           language: 'es-MX',
-          ...(year ? (type === 'movie' ? { year } : { first_air_date_year: year }) : {})
+          include_adult: false,
+          ...(year ? (endpoint === 'tv' ? { first_air_date_year: year } : { year }) : {})
         },
         timeout: 4000
       });
 
-      const results = searchRes.data?.results || [];
-      if (results.length > 0) {
-        let bestMatch = results[0];
-        if (targetNum) {
-          const matchedResult = results.find((r: any) => {
-            const resTitle = (r.title || r.name || '').toLowerCase();
-            return resTitle.includes(` ${targetNum}`) || resTitle.includes(`:${targetNum}`) || resTitle.endsWith(` ${targetNum}`);
-          });
-          if (matchedResult) bestMatch = matchedResult;
-        }
+      const results: any[] = (res.data?.results || [])
+        .filter((r: any) => endpoint !== 'multi' || r.media_type === 'movie' || r.media_type === 'tv');
+      if (!results.length) return null;
 
-        const tmdbId = bestMatch.id;
-        tmdbIdCache.set(cacheKey, tmdbId);
-        return tmdbId;
+      // Ante empate de similitud (p. ej. anime original vs. remake homónimo) gana el más popular.
+      let best: { id: number; score: number; popularity: number } | null = null;
+      for (const r of results.slice(0, 10)) {
+        const score = scoreResult(r, query, year);
+        const popularity = r.popularity || 0;
+        if (!best || score > best.score || (score === best.score && popularity > best.popularity)) {
+          best = { id: r.id, score, popularity };
+        }
       }
+      return best;
     } catch (err: any) {
       console.warn(`[TMDB API Search Warning]: ${err.message}`);
+      return null;
     }
+  }
 
-    // 2. Fallback a Web Scraping de TMDB Search
-    try {
-      const url = `https://www.themoviedb.org/search/${endpoint}?query=${encodeURIComponent(cleanTitle)}&language=es-MX`;
-      const res = await axios.get(url, {
-        headers: { 'User-Agent': UA, 'Accept': 'text/html' },
-        timeout: 4000
-      });
+  /**
+   * Resuelve un título contra TMDB verificando que el resultado SEA el mismo título.
+   * Prueba, en orden y parando en cuanto el match es inequívoco:
+   *   endpoint+año → endpoint sin año → endpoint contrario → /search/multi → scraping de TMDB.
+   * Si nada supera el umbral devuelve `matched: false` con un id sintético negativo,
+   * para que el llamador conserve la metadata original de la fuente.
+   */
+  static async resolveTmdb(
+    title: string,
+    type: ContentType = 'movie',
+    year?: string,
+    seed?: string
+  ): Promise<TmdbMatch> {
+    const cleanTitle = cleanForSearch(title);
+    const cacheKey = `${type}:${cleanTitle.toLowerCase()}:${year || ''}`;
+    const cached = tmdbIdCache.get(cacheKey);
+    if (cached) return cached;
 
-      const $ = cheerio.load(res.data);
-      const firstLink = $('a[data-id], .card.style_1 a[href*="/movie/"], .card.style_1 a[href*="/tv/"], .results .item a[href*="/movie/"], .results .item a[href*="/tv/"]').first();
-      const href = firstLink.attr('href') || '';
-      const match = href.match(/\/(movie|tv)\/(\d+)/);
+    const endpoint = type === 'tvseries' ? 'tv' : 'movie';
+    const opposite = endpoint === 'tv' ? 'movie' : 'tv';
 
-      if (match) {
-        const tmdbId = parseInt(match[2]);
-        tmdbIdCache.set(cacheKey, tmdbId);
-        return tmdbId;
+    let bestId = 0;
+    let bestScore = 0;
+    /** Guarda el candidato si mejora al actual; devuelve true si ya es inequívoco (parar). */
+    const consider = (c: { id: number; score: number } | null) => {
+      if (c && c.score > bestScore) {
+        bestId = c.id;
+        bestScore = c.score;
       }
-    } catch {}
+      return bestScore >= CONFIDENT_SCORE;
+    };
 
-    // 3. Fallback a ID numérico determinista estilo TMDB
-    let hash = 2166136261;
-    const cleanStr = cleanTitle.toLowerCase().replace(/[^a-z0-9]/g, '');
-    for (let i = 0; i < cleanStr.length; i++) {
-      hash ^= cleanStr.charCodeAt(i);
-      hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+    if (!consider(year ? await this.searchScored(endpoint, cleanTitle, year) : null)) {
+      if (!consider(await this.searchScored(endpoint, cleanTitle))) {
+        if (!consider(await this.searchScored(opposite, cleanTitle))) {
+          consider(await this.searchScored('multi', cleanTitle));
+        }
+      }
     }
-    const fallbackId = (hash >>> 0) % 900000 + 100000;
-    tmdbIdCache.set(cacheKey, fallbackId);
-    return fallbackId;
+
+    // Fallback a scraping del buscador de TMDB (útil cuando la API limita por rate),
+    // aceptado solo si el título de la ficha se parece de verdad al buscado.
+    if (bestScore < MATCH_THRESHOLD) {
+      try {
+        const url = `https://www.themoviedb.org/search/${endpoint}?query=${encodeURIComponent(cleanTitle)}&language=es-MX`;
+        const res = await axios.get(url, { headers: { 'User-Agent': UA, 'Accept': 'text/html' }, timeout: 4000 });
+        const $ = cheerio.load(res.data);
+        const card = $('.card.style_1 a[href*="/movie/"], .card.style_1 a[href*="/tv/"], .results .item a[href*="/movie/"], .results .item a[href*="/tv/"]').first();
+        const href = card.attr('href') || '';
+        const idMatch = href.match(/\/(movie|tv)\/(\d+)/);
+        const cardTitle = (card.attr('title') || card.find('h2').first().text() || card.text() || '').trim();
+        if (idMatch) {
+          const score = similarity(cleanTitle, cardTitle);
+          consider({ id: parseInt(idMatch[2], 10), score });
+        }
+      } catch {}
+    }
+
+    const result: TmdbMatch = bestScore >= MATCH_THRESHOLD && bestId > 0
+      ? { id: bestId, matched: true, score: bestScore }
+      : { id: syntheticTmdbId(seed || `${type}:${cleanTitle}`), matched: false, score: bestScore };
+
+    tmdbIdCache.set(cacheKey, result);
+    return result;
+  }
+
+  /**
+   * Obtiene el TMDB ID numérico de un título (id sintético negativo si no hay match real).
+   */
+  static async getTmdbId(title: string, type: ContentType = 'movie', year?: string): Promise<number> {
+    return (await this.resolveTmdb(title, type, year)).id;
   }
 
   /**
@@ -190,18 +304,40 @@ export class TmdbService {
    * Enriquece un MediaItem con metadatos oficiales de TMDB:
    * sinopsis completa en español, trailers oficiales de YouTube, imágenes HD, reparto con fotos, géneros, temporadas, etc.
    */
+  /**
+   * ÚLTIMO RECURSO: completa el item con la metadata que traía del sitio de origen
+   * (póster, sinopsis y año del scraping) para que ninguna ficha quede vacía.
+   * Conserva el slug como id y marca metadata_source='source' para poder auditarlo.
+   */
+  static fromSourceMetadata(item: MediaItem, tmdbId?: number): MediaItem {
+    const poster = item.poster || item.backdrop || null;
+    // Sin id válido generamos uno sintético negativo y estable por slug (nunca 0: rompería el UNIQUE).
+    const id = tmdbId && tmdbId !== 0 ? tmdbId : syntheticTmdbId(item.id || item.title);
+    return {
+      ...item,
+      id: item.id || String(Math.abs(id)),
+      tmdb_id: id,
+      original_title: item.original_title || item.title,
+      aliases: item.aliases && item.aliases.length ? item.aliases : [item.title],
+      overview: item.overview || `Ver ${item.title} online en HD con audio Latino.`,
+      poster,
+      backdrop: item.backdrop || poster,
+      metadata_source: 'source' as const
+    };
+  }
+
   static async enrichMediaItem(item: MediaItem, opts: { skipSeasons?: boolean } = {}): Promise<MediaItem> {
     try {
       const year = item.release_date ? item.release_date.substring(0, 4) : undefined;
-      const tmdbId = item.tmdb_id && item.tmdb_id > 0
-        ? item.tmdb_id
-        : await this.getTmdbId(item.title, item.type, year);
+      const match: TmdbMatch = item.tmdb_id && item.tmdb_id > 0
+        ? { id: item.tmdb_id, matched: true, score: 1 }
+        : await this.resolveTmdb(item.title, item.type, year, item.id);
 
-      const tmdbData = await this.getTmdbDetails(tmdbId, item.type);
+      // Sin match fiable en TMDB no pedimos detalles (traerían metadata de OTRO título):
+      // nos quedamos con la del sitio de origen.
+      const tmdbData = match.matched ? await this.getTmdbDetails(match.id, item.type) : null;
       if (!tmdbData) {
-        item.tmdb_id = tmdbId;
-        item.id = String(tmdbId);
-        return item;
+        return OverrideService.applyOverridesToItem(this.fromSourceMetadata(item, match.id));
       }
 
       const isTv = (tmdbData.number_of_seasons && tmdbData.number_of_seasons > 0) || item.type === 'tvseries' || tmdbData.first_air_date !== undefined;
@@ -260,13 +396,14 @@ export class TmdbService {
         cast_details: castMembers.length > 0 ? castMembers : item.cast_details,
         total_seasons: tmdbData.number_of_seasons || item.total_seasons,
         total_episodes: tmdbData.number_of_episodes || item.total_episodes,
-        seasons: seasons.length > 0 ? seasons : item.seasons
+        seasons: seasons.length > 0 ? seasons : item.seasons,
+        metadata_source: 'tmdb' as const
       };
 
       return OverrideService.applyOverridesToItem(enrichedItem);
     } catch (err: any) {
       console.warn(`[TMDB Enrich Error]: ${err.message}`);
-      return OverrideService.applyOverridesToItem(item);
+      return OverrideService.applyOverridesToItem(this.fromSourceMetadata(item, item.tmdb_id));
     }
   }
 

@@ -67,6 +67,8 @@ export interface MediaItem {
   cast: string[];
   cast_details?: CastMember[];
   dubbing_cast: DubbingMember[];
+  /** Origen de la metadata: 'tmdb' (match verificado) o 'source' (fallback al sitio scrapeado). */
+  metadata_source?: 'tmdb' | 'source';
   // Solo para películas
   primary_stream?: ServerOption;
   servers?: ServerOption[];

@@ -12,7 +12,7 @@ import 'dotenv/config';
 import { RealScraperService } from '../src/services/realScraperService';
 import { TmdbService } from '../src/services/tmdbService';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
-import { normalizeTitle } from '../src/utils/text';
+import { canonicalTitle, normalizeTitle } from '../src/utils/text';
 import { MediaItem } from '../src/types';
 
 // Con RLS activado en media_items, escribir requiere la SUPABASE_SERVICE_ROLE_KEY
@@ -25,13 +25,13 @@ async function collectCatalog(): Promise<MediaItem[]> {
   return RealScraperService.crawlFullCatalog();
 }
 
-/** Comprueba si la columna title_normalized ya existe (migración 001 aplicada). */
-async function hasNormalizedColumn(): Promise<boolean> {
-  const { error } = await db.from('media_items').select('title_normalized').limit(1);
+/** Comprueba si una columna opcional ya existe (migración aplicada). */
+async function hasColumn(column: string): Promise<boolean> {
+  const { error } = await db.from('media_items').select(column).limit(1);
   return !error;
 }
 
-function toRow(item: MediaItem, withNormalized: boolean) {
+function toRow(item: MediaItem, withNormalized: boolean, withMetadataSource: boolean) {
   const row: Record<string, unknown> = {
     id: item.id,
     tmdb_id: item.tmdb_id,
@@ -60,6 +60,9 @@ function toRow(item: MediaItem, withNormalized: boolean) {
   if (withNormalized) {
     row.title_normalized = normalizeTitle(item.title).trim();
   }
+  if (withMetadataSource) {
+    row.metadata_source = item.metadata_source || 'tmdb';
+  }
   return row;
 }
 
@@ -75,41 +78,74 @@ async function main() {
 
   // Enriquecer con TMDB (géneros, rating, sinopsis, póster/backdrop, tráiler, cast con fotos)
   // y resolver el tmdb_id real, con concurrencia ACOTADA. skipSeasons: no bajamos temporadas
-  // (no se guardan en el catálogo y triplicarían las llamadas). La tabla exige tmdb_id UNIQUE,
-  // así que deduplicamos por tmdb_id. Los títulos sin match en TMDB quedan con su id-hash y
-  // metadata mínima (inherente: TMDB no los tiene).
+  // (no se guardan en el catálogo y triplicarían las llamadas).
+  //
+  // COBERTURA 100%: los títulos SIN match fiable en TMDB ya no se descartan; se guardan con la
+  // metadata del sitio de origen (póster + sinopsis del scraping) y un tmdb_id sintético
+  // NEGATIVO, que nunca colisiona con un id real. Como ese fallback sí puede repetir un título
+  // ya presente, se deduplica por título canónico + tipo y cede siempre ante la ficha de TMDB.
   const CONCURRENCY = 10;
-  let skipped = 0;
-  let enrichedCount = 0;
   const byTmdb = new Map<number, MediaItem>();
+  const fallbacks: MediaItem[] = [];
   for (let i = 0; i < items.length; i += CONCURRENCY) {
     const chunk = items.slice(i, i + CONCURRENCY);
     const enriched = await Promise.all(chunk.map(async (item) => {
       try {
         return await TmdbService.enrichMediaItem(item, { skipSeasons: true });
       } catch {
-        return item;
+        return TmdbService.fromSourceMetadata(item);
       }
     }));
     for (const item of enriched) {
-      const tmdbId = item.tmdb_id || 0;
-      if (!tmdbId) {
-        skipped++;
+      if (item.metadata_source === 'source' || !item.tmdb_id || item.tmdb_id < 0) {
+        fallbacks.push(item);
         continue;
       }
-      if ((item.genres && item.genres.length > 0) || (item.rating && item.rating > 0)) enrichedCount++;
-      if (!byTmdb.has(tmdbId)) byTmdb.set(tmdbId, item);
+      if (!byTmdb.has(item.tmdb_id)) byTmdb.set(item.tmdb_id, item);
     }
     if (i > 0 && i % 500 === 0) console.log(`   ...enriquecidos ${i}/${items.length}`);
   }
-  console.log(`   Únicos por TMDB: ${byTmdb.size} | con metadata TMDB: ${enrichedCount} | sin TMDB: ${skipped}`);
 
-  const withNormalized = await hasNormalizedColumn();
+  // Índice de títulos ya cubiertos por TMDB, para no duplicarlos con una ficha de fallback.
+  const key = (it: MediaItem) => `${it.type}:${canonicalTitle(it.title)}`;
+  const covered = new Set(Array.from(byTmdb.values()).map(key));
+  const byFallback = new Map<string, MediaItem>();
+  let droppedDupes = 0;
+  for (const item of fallbacks) {
+    const k = key(item);
+    if (!canonicalTitle(item.title)) continue;
+    if (covered.has(k)) {
+      droppedDupes++;
+      continue;
+    }
+    const existing = byFallback.get(k);
+    if (!existing) {
+      byFallback.set(k, item);
+      continue;
+    }
+    droppedDupes++;
+    // Entre dos fallbacks del mismo título nos quedamos con el que trae más metadata.
+    if (!existing.poster && item.poster) byFallback.set(k, item);
+  }
+
+  const all = [...byTmdb.values(), ...byFallback.values()];
+  const withoutPoster = all.filter(it => !it.poster).length;
+  console.log(
+    `   Con metadata TMDB: ${byTmdb.size} | con metadata de la fuente: ${byFallback.size} | ` +
+    `duplicados descartados: ${droppedDupes} | sin póster: ${withoutPoster}`
+  );
+  console.log(`   Cobertura de metadata: ${all.length}/${all.length} (100%) — ${(byTmdb.size / (all.length || 1) * 100).toFixed(1)}% desde TMDB`);
+
+  const withNormalized = await hasColumn('title_normalized');
   if (!withNormalized) {
     console.warn('   ⚠ Columna title_normalized ausente — ejecuta src/db/migrations/001_search_prefix_index.sql para búsqueda por prefijo instantánea.');
   }
+  const withMetadataSource = await hasColumn('metadata_source');
+  if (!withMetadataSource) {
+    console.warn('   ⚠ Columna metadata_source ausente — ejecuta src/db/migrations/003_metadata_source.sql para auditar el origen de la metadata.');
+  }
 
-  const rows = Array.from(byTmdb.values()).map(it => toRow(it, withNormalized));
+  const rows = all.map(it => toRow(it, withNormalized, withMetadataSource));
   let ok = 0;
   let fail = 0;
   const BATCH = 50;

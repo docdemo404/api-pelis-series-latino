@@ -732,6 +732,7 @@ export class CatalogService {
       cast: Array.isArray(dbRow.cast_data) ? dbRow.cast_data.map((c: any) => (typeof c === 'string' ? c : (c.name || ''))) : [],
       cast_details: Array.isArray(dbRow.cast_data) && typeof dbRow.cast_data[0] === 'object' ? dbRow.cast_data : undefined,
       dubbing_cast: dbRow.dubbing_cast_data || [],
+      metadata_source: dbRow.metadata_source === 'source' ? 'source' : 'tmdb',
       total_seasons: dbRow.total_seasons || 0,
       total_episodes: dbRow.total_episodes || 0,
       primary_stream: getPrimaryStream((dbRow.servers || []).map((s: any) => ({ ...s, source_id: s.source_id || 'supabase' }))),
