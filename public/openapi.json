@@ -790,6 +790,71 @@
         }
       }
     },
+    "/api/v1/stream/direct": {
+      "get": {
+        "summary": "Vídeo directo de un embed (lo que apunta `direct_stream`)",
+        "description": "Resuelve el vídeo real que hay detrás de un reproductor embebido y lo sirve. Es la URL a la que apunta el campo `direct_stream` de cada servidor: permanente y sin token de cara al cliente, aunque por dentro se acuñe en cada reproducción, porque los CDN firman la URL entera y la atan a la red que la pidió.\n\nCon HLS devuelve el manifiesto ya reescrito para que los segmentos también pasen por aquí; con MP4 reenvía los bytes con soporte de Range (seek). Si el embed no es extraíble responde 502 `DIRECT_UNAVAILABLE` y el cliente debe reproducir con `embed_url`.",
+        "parameters": [
+          {
+            "name": "e",
+            "in": "query",
+            "required": true,
+            "description": "URL del embed en base64url. Viene ya montada dentro de `direct_stream`; no hay que construirla a mano.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Manifiesto HLS reescrito, o flujo de vídeo"
+          },
+          "206": {
+            "description": "Respuesta parcial de vídeo (Range Request / seek)"
+          },
+          "302": {
+            "description": "Presupuesto mensual de tránsito agotado: se redirige a la URL acuñada del CDN. Puede fallar por la atadura de IP; en ese caso, usar `embed_url`."
+          },
+          "502": {
+            "description": "No se pudo extraer el vídeo de este embed. Reproduce con `embed_url`."
+          }
+        }
+      }
+    },
+    "/api/v1/stream/direct/seg": {
+      "get": {
+        "summary": "Segmento o playlist anidada de un manifiesto HLS reescrito",
+        "description": "Uso interno del reproductor: estas URLs las genera `/api/v1/stream/direct` dentro del manifiesto. No hay que construirlas a mano. Reintenta con un token recién acuñado si el CDN responde 403 a mitad de reproducción.",
+        "parameters": [
+          {
+            "name": "u",
+            "in": "query",
+            "required": true,
+            "description": "URL del segmento en base64url",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "e",
+            "in": "query",
+            "required": false,
+            "description": "URL del embed en base64url, para poder re-acuñar el token si caduca",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Segmento de vídeo o playlist anidada ya reescrita"
+          },
+          "206": {
+            "description": "Respuesta parcial del segmento (Range Request)"
+          }
+        }
+      }
+    },
     "/api/v1/stream/proxy": {
       "get": {
         "summary": "Proxy de Streaming de Video con soporte nativo HTTP Range Requests (206 Partial Content)",
@@ -970,7 +1035,34 @@
           },
           "embed_url": {
             "type": "string",
+            "description": "Reproductor de terceros. Es el ÚLTIMO RECURSO: úsalo solo si `direct_stream` no existe o falla.",
             "example": "https://vidhideplus.com/v/f1kgebbi5bly"
+          },
+          "direct_stream": {
+            "type": "string",
+            "description": "FUENTE PRIORITARIA: el vídeo real (HLS/MP4). Intenta SIEMPRE esta antes que `embed_url`. Ningún host permite publicar la URL cruda de su CDN —la firman entera y la atan a la IP que la pidió—, así que normalmente apunta a esta misma API, que la resuelve en el momento de reproducir. Para el cliente es una URL permanente y sin token. Si devuelve error, cae a `embed_url`.",
+            "example": "/api/v1/stream/direct?e=aHR0cHM6Ly92aWRoaWRlcGx1cy5jb20vdi8zMHdyMGd1Mzhxc2I"
+          },
+          "direct_kind": {
+            "type": "string",
+            "enum": [
+              "hls",
+              "mp4"
+            ],
+            "description": "Formato de `direct_stream`."
+          },
+          "direct_mode": {
+            "type": "string",
+            "enum": [
+              "public",
+              "proxy"
+            ],
+            "description": "`public` = URL libre del CDN, servida tal cual. `proxy` = se acuña y se sirve desde esta API."
+          },
+          "direct_host": {
+            "type": "string",
+            "description": "Host del CDN que entrega el vídeo. Informativo.",
+            "example": "acek-cdn.com"
           },
           "status": {
             "type": "string",

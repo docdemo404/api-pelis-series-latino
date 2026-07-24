@@ -9,6 +9,7 @@
     "start": "node dist/api/index.js",
     "refresh:catalog": "ts-node scripts/refreshCatalog.ts",
     "verify:catalog": "ts-node scripts/refreshCatalog.ts --verify-only",
+    "direct:catalog": "ts-node scripts/refreshCatalog.ts --direct-only",
     "repair:catalog": "ts-node scripts/repairCatalog.ts",
     "check:catalog": "ts-node scripts/checkCatalog.ts",
     "check:sources": "ts-node scripts/checkSources.ts"

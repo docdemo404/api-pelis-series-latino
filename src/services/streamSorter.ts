@@ -16,11 +16,15 @@ export function getSourceId(server: ServerOption): string {
 /**
  * Ordena la lista de servidores respetando las prioridades configuradas en SourceManager (/panel):
  * 1. Status 'online' primero
- * 2. Prioridad de Fuente de Servidor (Prioridad 1 primero, luego 2, etc.)
- * 3. Idioma Latino preferido
- * 4. Calidad más alta (4K > 1080p > 720p > 480p)
- * 5. Direct Stream (HLS/mp4)
- * 
+ * 2. Vídeo directo (m3u8/mp4) antes que embed, y URL libre antes que proxeada
+ * 3. Prioridad de Fuente de Servidor (Prioridad 1 primero, luego 2, etc.)
+ * 4. Idioma Latino preferido
+ * 5. Calidad más alta (4K > 1080p > 720p > 480p)
+ *
+ * El criterio 2 es lo que hace que reproducir signifique "vídeo directo" y que el iframe de
+ * terceros quede como último recurso. Antes era el último desempate, así que un embed de una
+ * fuente prioritaria adelantaba siempre a un servidor con vídeo directo de otra fuente.
+ *
  * También filtra servidores pertenecientes a fuentes deshabilitadas (enabled: false).
  */
 export function sortServersBySourcePriority(servers: ServerOption[], sourcesConfig?: SourceConfig[]): ServerOption[] {
@@ -49,35 +53,45 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
     '480p': 1
   };
 
+  // Un servidor con vídeo directo vale más que cualquier embed; y entre dos directos, la URL
+  // libre (persistida, sin caducidad) vale más que la que hay que acuñar y proxear.
+  const directScore = (s: ServerOption): number => {
+    if (!s.direct_stream) return 0;
+    return s.direct_mode === 'public' ? 2 : 1;
+  };
+
   return [...activeServers].sort((a, b) => {
     // 1. Status online primero
     if (a.status === 'online' && b.status !== 'online') return -1;
     if (b.status === 'online' && a.status !== 'online') return 1;
 
-    // 2. Prioridad de Fuente (1 primero, 2 después, 3 después...)
+    // 2. Vídeo directo antes que embed
+    const directA = directScore(a);
+    const directB = directScore(b);
+    if (directA !== directB) return directB - directA;
+
+    // 3. Prioridad de Fuente (1 primero, 2 después, 3 después...)
     const prioA = priorityMap[getSourceId(a)] ?? 99;
     const prioB = priorityMap[getSourceId(b)] ?? 99;
     if (prioA !== prioB) return prioA - prioB;
 
-    // 3. Idioma Latino preferido
+    // 4. Idioma Latino preferido
     if (a.language === 'latino' && b.language !== 'latino') return -1;
     if (b.language === 'latino' && a.language !== 'latino') return 1;
 
-    // 4. Calidad más alta
+    // 5. Calidad más alta
     const scoreA = qualityScore[a.quality] || 0;
     const scoreB = qualityScore[b.quality] || 0;
     if (scoreA !== scoreB) return scoreB - scoreA;
-
-    // 5. Presencia de direct_stream
-    if (a.direct_stream && !b.direct_stream) return -1;
-    if (b.direct_stream && !a.direct_stream) return 1;
 
     return 0;
   });
 }
 
 /**
- * Selecciona el mejor enlace (Primary Stream) usando el servidor #1 tras ordenar por prioridad
+ * Selecciona el mejor enlace (Primary Stream) usando el servidor #1 tras ordenar por prioridad.
+ * El orden ya antepone lo que está online y, dentro de eso, lo que trae vídeo directo, así que
+ * el primero online es también el que mejor reproduce.
  */
 export function getPrimaryStream(servers: ServerOption[]): ServerOption | undefined {
   if (!servers || servers.length === 0) return undefined;

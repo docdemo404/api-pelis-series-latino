@@ -4,7 +4,9 @@ import { MediaItem, ServerOption, CastMember } from '../types';
 import { SourceManager } from './sourceManager';
 import { TmdbService } from './tmdbService';
 import { USER_AGENT, httpClient } from '../utils/httpClient';
-import { verifyEmbedStatus, getServerName } from '../scrapers/embedHealth';
+import { inspectEmbed, getServerName } from '../scrapers/embedHealth';
+import { extractDirect, describeDirect, deferredDirectFields, unwrapRedirector } from '../scrapers/directStream';
+import { yearFromSlug } from '../utils/text';
 
 const BASE_URL = 'https://tioplus.app';
 const UA = USER_AGENT;
@@ -272,7 +274,13 @@ export class RealScraperService {
       if (!h1 || h1.toLowerCase().includes('404') || h1.toLowerCase().includes('no encontrada')) return null;
 
       const yearMatch = h1.match(/\((\d{4})\)/);
-      const year = yearMatch ? yearMatch[1] : '';
+      let year = yearMatch ? yearMatch[1] : '';
+      // Fallback: la página muestra "Año: 2016" en un span aparte cuando el h1 no trae (YYYY).
+      // El año es clave para no confundir homónimos de otra época al emparejar con TMDB.
+      if (!year) {
+        const yearLabel = $('span:contains("Año:")').first().text().match(/A[ñn]o:\s*([12]\d{3})/);
+        if (yearLabel) year = yearLabel[1];
+      }
       const title = h1.replace(/\s*\(\d{4}\)\s*$/, '').trim();
       const slug = tioplusUrl.split('/').filter(Boolean).pop() || title.toLowerCase().replace(/[^a-z0-9]+/g, '-');
 
@@ -341,20 +349,24 @@ export class RealScraperService {
         resolvedUrls.map(async (result, i) => {
           const embedUrl = result.status === 'fulfilled' ? result.value : null;
           if (!embedUrl) return null;
-          const status = await verifyEmbedStatus(embedUrl);
-          return { embedUrl, status, label: tokensToResolve[i].label };
+          // inspectEmbed devuelve el HTML que de todas formas hacía falta para comprobar la
+          // salud del embed, así que extraer el vídeo directo no cuesta una petición extra.
+          const { status, html } = await inspectEmbed(embedUrl);
+          const direct = await extractDirect(embedUrl, html);
+          return { embedUrl, status, direct, label: tokensToResolve[i].label };
         })
       );
 
       serverVerifications.forEach((res, i) => {
         if (res.status === 'fulfilled' && res.value && res.value.embedUrl) {
-          const { embedUrl, status, label } = res.value;
+          const { embedUrl, status, direct, label } = res.value;
           servers.push({
             id: `srv_tio_${slug}_${i + 1}`,
             name: `${getServerName(embedUrl, '')} - ${label}`,
-            quality: '1080p',
+            quality: direct?.quality || '1080p',
             language: 'latino',
             embed_url: embedUrl,
+            ...(direct ? describeDirect(embedUrl, direct) : deferredDirectFields(embedUrl)),
             status: status,
             last_checked: new Date().toISOString(),
             source_id: 'tioplus',
@@ -486,7 +498,9 @@ export class RealScraperService {
     if (!detail) return null;
 
     const tmdbId = isNaN(Number(seriesSlug))
-      ? await TmdbService.getTmdbId(detail.title || seriesSlug, 'tvseries')
+      ? await TmdbService.getTmdbId(detail.title || seriesSlug, 'tvseries',
+          detail.release_date ? detail.release_date.substring(0, 4) : undefined,
+          { originalTitle: detail.original_title, imageHint: detail.poster })
       : Number(seriesSlug);
     return {
       id: `${tmdbId}-${season}-${episode}`,
@@ -637,6 +651,10 @@ export class RealScraperService {
       if (!titleRaw) return null;
 
       const slug = fuegocineUrl.replace(/^https?:\/\/[^\/]+/, '').replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase();
+      // El año viene en el título ("… (2016)") o embebido en el slug de FuegoCine (`…-2016-html`).
+      // Antes se guardaba release_date:'' y el emparejado con TMDB se hacía a ciegas de época.
+      const fcYearMatch = titleRaw.match(/\((\d{4})\)/);
+      const year = fcYearMatch ? fcYearMatch[1] : (yearFromSlug(slug) || '');
       const poster = $('meta[property="og:image"]').attr('content') || $('img').first().attr('src') || null;
       const overview = $('.post-body, .entry-content').text().trim().substring(0, 300);
       const isMovie = !titleRaw.toLowerCase().includes('temporada') && !/\d+x\d+/.test(titleRaw);
@@ -652,16 +670,21 @@ export class RealScraperService {
           const lang = m[1];
           const rawName = m[2].replace(/&#9989;/g, ' (Verificado)').trim();
           const quality = m[3] || '1080p';
-          const embedUrl = m[4];
+          // FuegoCine no enlaza el reproductor: enlaza un redirector de Blogger que lleva el
+          // destino real en base64. Se decodifica antes de nada, así que hasta el embed que se
+          // guarda deja de ser el intermediario con publicidad.
+          const embedUrl = unwrapRedirector(m[4]);
 
           if (embedUrl) {
-            const status = await verifyEmbedStatus(embedUrl);
+            const { status, html: embedHtml } = await inspectEmbed(embedUrl, 'https://www.fuegocine.com');
+            const direct = await extractDirect(embedUrl, embedHtml);
             servers.push({
               id: `srv_fc_${slug}_${idx++}`,
               name: `FuegoCine - ${rawName}`,
-              quality: '1080p',
+              quality: direct?.quality || '1080p',
               language: lang.includes('sub') ? 'subtitulado' : lang.includes('cas') ? 'castellano' : 'latino',
               embed_url: embedUrl,
+              ...(direct ? describeDirect(embedUrl, direct) : deferredDirectFields(embedUrl)),
               status,
               last_checked: new Date().toISOString(),
               source_id: 'fuegocine'
@@ -681,7 +704,7 @@ export class RealScraperService {
         overview: overview || `Ver ${titleRaw} online gratis en FuegoCine con audio Latino.`,
         rating: 0,
         content_rating: 'PG-13',
-        release_date: '',
+        release_date: year,
         genres: [],
         subcategories: ['Latino HD', 'FuegoCine'],
         poster,
@@ -840,6 +863,9 @@ export class RealScraperService {
       }
 
       const totalEps = group.episodes.length;
+      // Año si la serie lo trae en el nombre ("Doctor Who (2005)") o en el slug; si no, ''.
+      const seriesYearMatch = group.seriesName.match(/\((\d{4})\)/);
+      const seriesYear = seriesYearMatch ? seriesYearMatch[1] : (yearFromSlug(seriesSlug) || '');
 
       movieItems.push({
         id: seriesSlug,
@@ -851,7 +877,7 @@ export class RealScraperService {
         aliases: [group.seriesName],
         overview: `Ver ${group.seriesName} online gratis en FuegoCine con audio Latino.`,
         rating: 0,
-        release_date: '',
+        release_date: seriesYear,
         genres: [],
         subcategories: ['Latino HD', 'FuegoCine'],
         poster: group.poster,

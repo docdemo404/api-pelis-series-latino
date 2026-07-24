@@ -20,7 +20,9 @@ app.use(express.json());
 // Cabeceras HTTP de Caché en Borde (Edge CDN & Stale-While-Revalidate)
 app.use((req: Request, res: Response, next: NextFunction) => {
   if (req.path.startsWith('/api/v1')) {
-    if (req.path.includes('/panel') || req.path.includes('/stream/resolve') || req.path.includes('/revalidate') || req.path.includes('/cache')) {
+    // `/stream/direct` NO puede cachearse en el borde: sirve manifiestos acuñados al vuelo,
+    // que caducan en horas y solo valen desde la IP que los pidió.
+    if (req.path.includes('/panel') || req.path.includes('/stream/resolve') || req.path.includes('/stream/direct') || req.path.includes('/revalidate') || req.path.includes('/cache')) {
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
     } else if (req.path.includes('/search')) {

@@ -5,6 +5,7 @@ import { TmdbService } from './tmdbService';
 import { sortServersBySourcePriority, getPrimaryStream } from './streamSorter';
 import { normalizeTitle, slugify } from '../utils/text';
 import { CacheStore } from '../cache/store';
+import { unwrapRedirector } from '../scrapers/directStream';
 
 // TTL del caché de catálogo/búsqueda. Con Redis (KV_REST_API_* / UPSTASH_*) las entradas
 // se comparten entre lambdas y sobreviven cold starts; sin Redis degrada a memoria local.
@@ -16,6 +17,11 @@ const METADATA_TTL_SECONDS = 6 * 60 * 60;
 
 // Enlaces persistidos por debajo de esta antigüedad se sirven de la DB sin volver a scrapear.
 const STREAMS_FRESH_MS = 24 * 60 * 60 * 1000;
+
+// Fecha en que se empezó a extraer el vídeo directo (src/scrapers/directStream.ts). Los
+// enlaces guardados antes solo tienen embed, así que se consideran caducos aunque sean
+// recientes: hay que volver a resolverlos una vez para que ganen su `direct_stream`.
+const DIRECT_EXTRACTION_SINCE = Date.parse('2026-07-23T00:00:00Z');
 
 /**
  * Clave canónica de título para AGRUPAR variantes del mismo contenido entre fuentes
@@ -619,12 +625,20 @@ export class CatalogService {
     return Boolean(item.title && item.poster && item.overview && item.overview.length > 20);
   }
 
-  /** ¿Los enlaces persistidos siguen siendo válidos (menos de 24 h)? */
+  /**
+   * ¿Los enlaces persistidos siguen siendo válidos (menos de 24 h)?
+   *
+   * Además se descartan los resueltos ANTES de que existiera la extracción de vídeo directo:
+   * sin esto, cualquier ficha ya guardada seguiría sirviendo solo embeds hasta que caducara
+   * por su cuenta. Es una re-resolución única por título, no una invalidación permanente.
+   */
   private static hasFreshStreams(item: MediaItem): boolean {
     if (!item.servers || item.servers.length === 0) return false;
     if (!item.streams_updated_at) return false;
     const ts = Date.parse(item.streams_updated_at);
-    return Number.isFinite(ts) && Date.now() - ts < STREAMS_FRESH_MS;
+    if (!Number.isFinite(ts)) return false;
+    if (ts < DIRECT_EXTRACTION_SINCE) return false;
+    return Date.now() - ts < STREAMS_FRESH_MS;
   }
 
   /**
@@ -948,12 +962,37 @@ export class CatalogService {
     }
 
     const allServers: ServerOption[] = [...(result.servers || [])];
-    const existingUrls = new Set(allServers.map(s => s.embed_url));
+    // Se indexa por la URL YA DECODIFICADA. Las fichas antiguas guardaron el redirector de
+    // Blogger y el re-scrapeo devuelve el host real: sin normalizar, el mismo servidor entraba
+    // dos veces —el redirector viejo sin vídeo directo y el bueno— y la lista se iba llenando
+    // de duplicados muertos.
+    const keyOf = (s: ServerOption) => unwrapRedirector(s.embed_url);
+    const byUrl = new Map<string, ServerOption>(allServers.map(s => [keyOf(s), s]));
     const addServers = (servers?: ServerOption[] | null) => {
       for (const s of servers || []) {
-        if (s && !existingUrls.has(s.embed_url)) {
+        if (!s) continue;
+        const key = keyOf(s);
+        const existing = byUrl.get(key);
+        if (!existing) {
           allServers.push(s);
-          existingUrls.add(s.embed_url);
+          byUrl.set(key, s);
+          continue;
+        }
+        // El embed guardado era el redirector: nos quedamos con el host real, que es el que
+        // el cliente puede incrustar sin pasar por una página de publicidad.
+        if (existing.embed_url !== key && s.embed_url === key) {
+          existing.embed_url = s.embed_url;
+        }
+        // Mismo embed ya conocido. Si el recién scrapeado trae vídeo directo y el guardado no,
+        // se le trasplantan esos campos: de lo contrario una ficha que se persistió antes de
+        // existir la extracción se quedaría para siempre sin `direct_stream`, porque el
+        // duplicado se descartaba sin mirar qué aportaba.
+        if (s.direct_stream && !existing.direct_stream) {
+          existing.direct_stream = s.direct_stream;
+          existing.direct_kind = s.direct_kind;
+          existing.direct_mode = s.direct_mode;
+          existing.direct_host = s.direct_host;
+          existing.quality = s.quality;
         }
       }
     };
@@ -974,8 +1013,12 @@ export class CatalogService {
     // B. URLs exactas de las fuentes (persistidas por el job): un detalle por fuente,
     //    en paralelo y sin búsqueda por título.
     if (knownSources.size > 0) {
+      // El presupuesto de 2,5 s protege la latencia de "pulsar Reproducir", pero resolver una
+      // ficha con 5 servidores no cabe ahí: se queda siempre a medias. En el camino `deep`
+      // (job de pre-calentado) la latencia no importa y sí importa terminar, que es lo que
+      // deja los enlaces —y su vídeo directo— escritos en la DB para las siguientes aperturas.
       const details = await Promise.all(
-        Array.from(knownSources).slice(0, 4).map(u => this.scrapeDetailWithTimeout(u))
+        Array.from(knownSources).slice(0, 4).map(u => this.scrapeDetailWithTimeout(u, opts.deep ? 20000 : 2500))
       );
       for (const detail of details) {
         addServers(detail?.servers);

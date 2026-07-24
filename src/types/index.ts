@@ -1,13 +1,34 @@
 export type ContentType = 'movie' | 'tvseries';
 export type LinkStatus = 'online' | 'offline' | 'checking';
 
+/**
+ * Cómo se sirve el vídeo directo de un servidor:
+ *   public → la URL extraída no caduca ni va atada a una IP: se guarda y se entrega tal cual.
+ *   proxy  → la URL caduca o va atada a la red que la pidió, así que NO se guarda: `direct_stream`
+ *            apunta a esta API, que la acuña en el momento de reproducir.
+ */
+export type DirectMode = 'public' | 'proxy';
+
 export interface ServerOption {
   id: string;
   name: string;
   quality: '4K' | '1080p' | '720p' | '480p';
   language: 'latino' | 'subtitulado' | 'castellano';
+  /** Reproductor de terceros. Es el ÚLTIMO recurso: solo si `direct_stream` falla. */
   embed_url: string;
+  /**
+   * Vídeo real (m3u8/mp4). Es la fuente PRIORITARIA y lo que el cliente debe intentar primero.
+   *
+   * Con `direct_mode: 'proxy'` es una URL de esta misma API (`/api/v1/stream/direct?e=…`):
+   * permanente y sin token de cara al cliente, aunque por debajo se acuñe en cada reproducción.
+   * Ningún host conocido permite hoy publicar la URL cruda del CDN — todos la firman y la atan
+   * a la IP que la pidió. Ver src/scrapers/directStream.ts.
+   */
   direct_stream?: string;
+  direct_kind?: 'hls' | 'mp4';
+  direct_mode?: DirectMode;
+  /** Host del CDN que sirve el vídeo (`acek-cdn.com`, `okcdn.ru`…). Informativo. */
+  direct_host?: string;
   headers?: Record<string, string>;
   status: LinkStatus;
   last_checked: string;

@@ -6,6 +6,7 @@
  *   npm run refresh:catalog -- 20               # limitado (pruebas)
  *   npm run refresh:catalog -- --streams=300    # además pre-resuelve enlaces del home
  *   npm run refresh:catalog -- --verify=500     # además comprueba disponibilidad real
+ *   npm run direct:catalog                      # solo extrae el vídeo directo de lo guardado
  *   npm run verify:catalog                      # SOLO comprobar disponibilidad (sin crawl)
  *
  * Con la DB poblada, la API sirve listados (getAll DB-first) y el pase de prefijo
@@ -20,6 +21,7 @@ import { CatalogService } from '../src/services/catalogService';
 import { TmdbService } from '../src/services/tmdbService';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
 import { canonicalTitle, searchIndexKey } from '../src/utils/text';
+import { canExtractWithoutFetch } from '../src/scrapers/directStream';
 import { MediaItem } from '../src/types';
 
 // Con RLS activado en media_items, escribir requiere la SUPABASE_SERVICE_ROLE_KEY
@@ -235,6 +237,77 @@ async function verifyAvailability(max: number): Promise<void> {
 }
 
 /**
+ * `--direct[=N]`: rellena el vídeo directo de las fichas ya guardadas.
+ *
+ * Las que se resolvieron antes de existir la extracción solo tienen `embed_url`. Se vuelven a
+ * resolver a fondo para que cada servidor gane su `direct_stream`, que es lo que el cliente
+ * reproduce antes de recurrir al iframe. Es una pasada de una sola vez por ficha: después,
+ * la frescura normal de 24 h se encarga.
+ *
+ * Se atacan primero las MÁS ANTIGUAS, que son justamente las que no pasaron nunca por el
+ * extractor, y se avanza por lotes para poder repetirlo hasta cubrir el catálogo.
+ */
+async function fillDirectStreams(max: number): Promise<void> {
+  // Solo fichas que YA tienen enlaces resueltos: son las únicas a las que se les puede añadir
+  // el vídeo directo. Las de `servers: []` no se han resuelto nunca y son trabajo de --verify.
+  const { data, error } = await db
+    .from('media_items')
+    .select('id,type,title,servers')
+    .not('servers', 'is', null)
+    .neq('servers', '[]')
+    .order('streams_updated_at', { ascending: true, nullsFirst: false })
+    .limit(max);
+
+  if (error) {
+    console.warn(`   ⚠ No se pueden leer las fichas: ${error.message}`);
+    return;
+  }
+
+  // Interesan las que no tienen NINGÚN vídeo directo, y también aquellas donde un servidor
+  // que HOY sabemos resolver se quedó sin él: pasa cada vez que se añade un extractor nuevo,
+  // y también con upns, que responde 429 si se le insiste y deja el servidor sin resolver.
+  const pending = (data || []).filter(row => {
+    if (!Array.isArray(row.servers) || row.servers.length === 0) return false;
+    const servers = row.servers as any[];
+    if (!servers.some(s => s?.direct_stream)) return true;
+    return servers.some(s => s?.embed_url && !s.direct_stream && canExtractWithoutFetch(s.embed_url));
+  });
+
+  if (pending.length === 0) {
+    console.log('✔ Todas las fichas revisadas ya tienen su vídeo directo resuelto.');
+    return;
+  }
+
+  console.log(`🎬 Extrayendo vídeo directo de ${pending.length} fichas (de ${data?.length || 0} revisadas)...`);
+  const CONCURRENCY = 6;
+  let conDirecto = 0;
+  let servidoresDirectos = 0;
+
+  for (let i = 0; i < pending.length; i += CONCURRENCY) {
+    const chunk = pending.slice(i, i + CONCURRENCY);
+    const resolved = await Promise.all(
+      chunk.map(r => CatalogService.getStreams(r.id, r.type, { deep: true }).catch(() => null))
+    );
+    for (const item of resolved) {
+      const directos = (item?.servers || []).filter(s => s.direct_stream).length;
+      if (directos > 0) conDirecto++;
+      servidoresDirectos += directos;
+    }
+    console.log(`   ${Math.min(i + CONCURRENCY, pending.length)}/${pending.length}…`);
+  }
+
+  console.log(`   ${conDirecto}/${pending.length} fichas con vídeo directo · ${servidoresDirectos} servidores directos en total`);
+}
+
+/** `--direct` / `--direct=N`: cuántas fichas guardadas se repasan para extraerles el vídeo. */
+function parseDirectFlag(argv: string[]): number {
+  const flag = argv.find(a => a === '--direct' || a.startsWith('--direct='));
+  if (!flag) return 0;
+  const value = flag.includes('=') ? parseInt(flag.split('=')[1], 10) : NaN;
+  return Number.isFinite(value) && value > 0 ? value : 200;
+}
+
+/**
  * `--streams` / `--streams=N`: cuántos títulos del home llevan sus enlaces pre-resueltos.
  * Sin el flag no se pre-calienta nada (crawl igual de rápido que antes).
  */
@@ -258,11 +331,18 @@ async function main() {
   const limitArg = parseInt(positional[0] || '', 10);
   const streamsLimit = parseStreamsFlag(process.argv);
   const verifyLimit = parseVerifyFlag(process.argv);
+  const directLimit = parseDirectFlag(process.argv);
 
   // `--verify-only`: comprobar disponibilidad SIN volver a crawlear. Es la forma práctica
   // de ir limpiando fichas fantasma del catálogo ya poblado, sin pagar el crawl entero.
   if (process.argv.includes('--verify-only')) {
     await verifyAvailability(verifyLimit || 500);
+    return;
+  }
+
+  // `--direct-only`: extraer el vídeo directo de lo ya guardado, sin crawlear.
+  if (process.argv.includes('--direct-only')) {
+    await fillDirectStreams(directLimit || 200);
     return;
   }
 
@@ -405,6 +485,10 @@ async function main() {
     } else {
       await verifyAvailability(verifyLimit);
     }
+  }
+
+  if (directLimit > 0) {
+    await fillDirectStreams(directLimit);
   }
 }
 

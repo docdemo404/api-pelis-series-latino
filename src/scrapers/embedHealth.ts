@@ -32,6 +32,12 @@ const SOFT_ERROR_PATTERNS = [
   /too many requests/i
 ];
 
+export interface EmbedInspection {
+  status: 'online' | 'offline';
+  /** Cuerpo del embed. Vacío cuando no se llegó a descargar (403 del WAF, error de red). */
+  html: string;
+}
+
 /**
  * Verifica el estado real en la capa de aplicación de un iframe embed
  * (detecta Soft Errors HTTP 200 y distingue WAF HTTP 403).
@@ -40,7 +46,24 @@ export async function verifyEmbedStatus(
   embedUrl: string,
   referer: string = 'https://tioplus.app'
 ): Promise<'online' | 'offline'> {
-  if (!embedUrl) return 'offline';
+  return (await inspectEmbed(embedUrl, referer)).status;
+}
+
+/**
+ * Igual que `verifyEmbedStatus` pero devolviendo además el HTML descargado.
+ *
+ * Existe para que la extracción del vídeo directo (src/scrapers/directStream.ts) reutilice
+ * el cuerpo que esta comprobación ya se traía, en vez de volver a pedir la misma página:
+ * así extraer el m3u8 durante el scraping no cuesta ni una petición HTTP extra.
+ */
+export async function inspectEmbed(
+  embedUrl: string,
+  referer: string = 'https://tioplus.app'
+): Promise<EmbedInspection> {
+  if (!embedUrl) return { status: 'offline', html: '' };
+  // Se acumula aparte para poder devolverlo en CUALQUIER salida: aunque el embed se declare
+  // caído, el cuerpo sigue sirviendo para diagnosticar por qué.
+  let body = '';
   try {
     // 0. Detectar reproductores SPA basados en HASH (#hash_id) ej. upns.pro, rpmstream.live, 4meplayer.pro, strp2p.com
     const hashMatch = embedUrl.match(/https?:\/\/([^\/#]+)\/.*?#([a-zA-Z0-9_-]+)/);
@@ -56,10 +79,10 @@ export async function verifyEmbedStatus(
         });
         const dataStr = typeof hashRes.data === 'string' ? hashRes.data : JSON.stringify(hashRes.data || '');
         if (hashRes.status !== 200 || dataStr.length < 3600 || dataStr.includes('error') || dataStr.includes('not found')) {
-          return 'offline';
+          return { status: 'offline', html: body };
         }
       } catch {
-        return 'offline';
+        return { status: 'offline', html: body };
       }
     }
 
@@ -74,17 +97,18 @@ export async function verifyEmbedStatus(
 
     // WAF / Anti-hotlink protection (ej. VidHide, StreamWish devuelven 403 Forbidden a scrapers automatizados pero funcionan 100% en navegador web)
     if (res.status === 403 || res.status === 401) {
-      return 'online';
+      return { status: 'online', html: body };
     }
 
-    if (res.status >= 400) return 'offline';
+    if (res.status >= 400) return { status: 'offline', html: body };
 
     const html = typeof res.data === 'string' ? res.data : JSON.stringify(res.data || '');
+    body = html;
 
     // Detectar mensajes de error en capa de aplicación (Soft Errors)
     for (const pattern of SOFT_ERROR_PATTERNS) {
       if (pattern.test(html)) {
-        return 'offline';
+        return { status: 'offline', html: body };
       }
     }
 
@@ -102,17 +126,17 @@ export async function verifyEmbedStatus(
         });
 
         if (jsRes.status >= 400 || jsRes.status === 429 || jsRes.status === 410) {
-          return 'offline';
+          return { status: 'offline', html: body };
         }
 
         const jsHtml = typeof jsRes.data === 'string' ? jsRes.data : '';
         for (const pattern of SOFT_ERROR_PATTERNS) {
           if (pattern.test(jsHtml)) {
-            return 'offline';
+            return { status: 'offline', html: body };
           }
         }
       } catch {
-        return 'offline';
+        return { status: 'offline', html: body };
       }
     }
 
@@ -128,17 +152,17 @@ export async function verifyEmbedStatus(
         });
 
         if (vudeoRes.status >= 400 || vudeoRes.status === 410) {
-          return 'offline';
+          return { status: 'offline', html: body };
         }
 
         const vudeoHtml = typeof vudeoRes.data === 'string' ? vudeoRes.data : '';
         for (const pattern of SOFT_ERROR_PATTERNS) {
           if (pattern.test(vudeoHtml)) {
-            return 'offline';
+            return { status: 'offline', html: body };
           }
         }
       } catch {
-        return 'offline';
+        return { status: 'offline', html: body };
       }
     }
 
@@ -155,13 +179,13 @@ export async function verifyEmbedStatus(
         });
 
         if (innerRes.status >= 400 || innerRes.status === 410) {
-          return 'offline';
+          return { status: 'offline', html: body };
         }
 
         const innerHtml = typeof innerRes.data === 'string' ? innerRes.data : '';
         for (const pattern of SOFT_ERROR_PATTERNS) {
           if (pattern.test(innerHtml)) {
-            return 'offline';
+            return { status: 'offline', html: body };
           }
         }
       } catch {}
@@ -169,15 +193,15 @@ export async function verifyEmbedStatus(
 
     // HTML extremadamente corto sin reproductores
     if (html.length < 250 && !html.includes('jwplayer') && !html.includes('video') && !html.includes('iframe') && !html.includes('source') && !html.includes('script')) {
-      return 'offline';
+      return { status: 'offline', html: body };
     }
 
-    return 'online';
+    return { status: 'online', html: body };
   } catch {
     if (embedUrl.includes('vidhide') || embedUrl.includes('streamwish') || embedUrl.includes('upns') || embedUrl.includes('waaw')) {
-      return 'online';
+      return { status: 'online', html: body };
     }
-    return 'offline';
+    return { status: 'offline', html: body };
   }
 }
 
