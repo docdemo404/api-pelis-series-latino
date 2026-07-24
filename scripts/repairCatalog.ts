@@ -757,6 +757,7 @@ async function main() {
 
   const targets = Number.isFinite(limitArg) && limitArg > 0 ? suspicious.slice(0, limitArg) : suspicious;
   const withMetadataSource = await hasColumn('metadata_source');
+  const withMultiSource = await hasColumn('source_urls');
 
   let fixed = 0;
   let confirmed = 0;
@@ -807,20 +808,49 @@ async function main() {
       // índice, así que con --dedupe se elimina la copia rota y se conserva la buena.
       const { data: clash } = await db
         .from('media_items')
-        .select('id,title,original_title,release_date')
+        .select(withMultiSource
+          ? 'id,title,original_title,release_date,aliases,source_url,source_urls'
+          : 'id,title,original_title,release_date,aliases,source_url')
         .eq('tmdb_id', match.id)
         .neq('id', row.id)
         .limit(1);
 
       if (clash && clash.length > 0) {
-        const twin = clash[0];
+        const twin: any = clash[0];
         // Solo se borra si la gemela es INEQUÍVOCAMENTE el mismo título: parecido muy alto
         // y sin números de secuela discordantes ("cambio de bebés" vs "cambio de bebés 2"
         // son películas distintas, no un duplicado).
         const twinIsCorrect = isSameTitleStrict(sourceTitle, twin, year);
 
         if (dedupe && twinIsCorrect) {
+          // SIN PÉRDIDAS: lo único que la copia rota aporta son su(s) página(s) de origen
+          // (sus servidores, a menudo de OTRA fuente distinta a la de la gemela) y su nombre.
+          // Se vuelcan en la ficha canónica ANTES de borrar, igual que hace --fuse; si no, se
+          // perderían enlaces de streaming al eliminar la fila.
+          const currentUrls: string[] = twin.source_urls || [];
+          const mergedUrls = Array.from(
+            new Set([...currentUrls, twin.source_url, row.source_url].filter(Boolean) as string[])
+          );
+          const currentAliases: string[] = twin.aliases || [];
+          const mergedAliases = Array.from(
+            new Set([...currentAliases, ...(row.aliases || []), row.title].filter(Boolean) as string[])
+          );
+          const patch: Record<string, unknown> = {};
+          if (withMultiSource && mergedUrls.length > currentUrls.length) patch.source_urls = mergedUrls;
+          if (mergedAliases.length > currentAliases.length) {
+            patch.aliases = mergedAliases;
+            patch.title_normalized = searchIndexKey(twin.title, twin.original_title, mergedAliases);
+          }
+
           if (apply) {
+            if (Object.keys(patch).length > 0) {
+              const { error: mergeErr } = await db.from('media_items').update(patch).eq('id', twin.id);
+              if (mergeErr) {
+                console.warn(`     ⚠ no se pudo enriquecer la gemela ${twin.id}: ${mergeErr.message} (no se borra el duplicado)`);
+                collisions++;
+                continue;
+              }
+            }
             const { error } = await db.from('media_items').delete().eq('id', row.id);
             if (error) {
               console.warn(`     ⚠ no se pudo borrar ${row.id}: ${error.message}`);
@@ -829,7 +859,7 @@ async function main() {
             }
           }
           deleted++;
-          console.log(`   ␡ ${row.id}\n     duplicado roto "${row.title}" eliminado; se conserva ${twin.id} = "${twin.title}"`);
+          console.log(`   ␡ ${row.id}\n     duplicado roto "${row.title}" fundido en ${twin.id} = "${twin.title}" y eliminado (fuentes ${currentUrls.length}→${mergedUrls.length}, alias ${currentAliases.length}→${mergedAliases.length})`);
           continue;
         }
 
