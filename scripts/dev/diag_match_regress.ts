@@ -17,7 +17,11 @@ const cases: Array<[string, ContentType, string | undefined, string]> = [
   ['Naruto', 'tvseries', undefined, 'Naruto'],
   ['Stranger Things', 'tvseries', '2016', 'Stranger Things'],
   ['El Señor de los Anillos: La Comunidad del Anillo', 'movie', '2001', 'anillo'],
-  ['Los Increíbles 2', 'movie', '2018', 'ncreíbles 2']
+  ['Los Increíbles 2', 'movie', '2018', 'ncreíbles 2'],
+  // Homónimo de otra época: "El fundador" (The Founder / "Hambre de poder", 2016) NO debe
+  // resolverse como "Bonifácio - O Fundador do Brasil" (2018). Ver diag_match.ts para las
+  // variantes con título original e imagen de TMDB.
+  ['El Fundador', 'movie', '2016', 'poder']
 ];
 
 (async () => {

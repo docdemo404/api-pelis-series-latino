@@ -3,10 +3,19 @@ import * as cheerio from 'cheerio';
 import { MediaItem, ContentType, CastMember } from '../types';
 import { OverrideService } from './overrideService';
 import { USER_AGENT } from '../utils/httpClient';
-import { canonicalTitle, normalizeTitle } from '../utils/text';
+import { canonicalTitle, normalizeTitle, dedupeTitles, yearFromSlug } from '../utils/text';
 
 const API_KEY = '99b8bc99e85e79fabd52b64513c9780d';
 const UA = USER_AGENT;
+
+// Regiones hispanohablantes: de aquí salen los títulos ALTERNATIVOS que de verdad busca la
+// audiencia (el nombre de España frente al de Latinoamérica). '419' es el código que TMDB usa
+// para "Latinoamérica". Se deja fuera US a propósito: sus títulos alternativos suelen estar en
+// inglés (nombres de mercado, versiones 3D) y el inglés ya lo cubre el original_title.
+const SPANISH_REGIONS = new Set([
+  'ES', 'MX', 'AR', 'CO', 'CL', 'PE', 'VE', 'EC', 'GT', 'CU', 'BO',
+  'DO', 'HN', 'PY', 'SV', 'NI', 'CR', 'PA', 'UY', 'PR', '419'
+]);
 
 const tmdbIdCache = new Map<string, TmdbMatch>();
 const tmdbDetailCache = new Map<string, any>();
@@ -186,6 +195,22 @@ function similarity(a: string, b: string): number {
 }
 
 /**
+ * Ruta canónica de una imagen de TMDB (`/<hash>.jpg`) a partir de una URL.
+ * Las páginas de origen (og:image) enlazan directo a `image.tmdb.org/t/p/<size>/<hash>.jpg`,
+ * y ese hash es huella casi única de la ficha exacta. Sirve para CONFIRMAR un candidato sin
+ * depender del título. Devuelve null si la URL no es de TMDB. `poster_path`/`backdrop_path`
+ * que ya vienen como `/<hash>.jpg` se normalizan igual (por su nombre de archivo).
+ */
+function tmdbImagePath(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const m = String(url).match(/image\.tmdb\.org\/t\/p\/[^/]+\/([\w-]+\.(?:jpg|jpeg|png|webp|svg))/i);
+  if (m) return `/${m[1]}`;
+  // TMDB devuelve poster_path/backdrop_path ya como "/<hash>.jpg": se normaliza por basename.
+  const bare = String(url).match(/^\/?([\w-]+\.(?:jpg|jpeg|png|webp|svg))$/i);
+  return bare ? `/${bare[1]}` : null;
+}
+
+/**
  * Puntúa un resultado de TMDB frente al título (y año) buscados.
  *
  * El año NO es un desempate menor: los títulos regionales chocan de lleno con películas
@@ -195,7 +220,17 @@ function similarity(a: string, b: string): number {
  * Un desfase grande de estreno descarta el candidato salvo que el título alternativo lo
  * confirme después (ver scoreAgainstKnownTitles).
  */
-function scoreResult(result: any, query: string, year?: string): number {
+function scoreResult(result: any, query: string, year?: string, imageHint?: string | null): number {
+  // Confirmación por IMAGEN: si la página de origen trae la ruta de TMDB (og:image) y coincide
+  // con el póster o el fondo del candidato, es la MISMA ficha con certeza, se llame como se llame
+  // en es-MX (así "El fundador" fija a The Founder aunque su título latino sea "Hambre de poder").
+  // Solo CONFIRMA; si no coincide no penaliza —la página pudo usar el póster de otro idioma—.
+  if (imageHint) {
+    if (imageHint === tmdbImagePath(result.poster_path) || imageHint === tmdbImagePath(result.backdrop_path)) {
+      return 1;
+    }
+  }
+
   const candidates = [result.title, result.name, result.original_title, result.original_name].filter(Boolean);
   let best = 0;
   for (const c of candidates) best = Math.max(best, similarity(query, c));
@@ -210,8 +245,12 @@ function scoreResult(result: any, query: string, year?: string): number {
     } else {
       const diff = Math.abs(parseInt(date.substring(0, 4), 10) - parseInt(year, 10));
       if (diff === 0) best += 0.1;
-      else if (diff <= 2) { /* reestrenos y desfases de distribución: ni premia ni penaliza */ }
-      else if (diff <= 5) best -= 0.15;
+      else if (diff === 1) { /* desfase de distribución (festival vs. estreno): ni premia ni penaliza */ }
+      // Dos años de diferencia YA distinguen homónimos: "El fundador" (2016) frente a
+      // "Bonifácio - O Fundador do Brasil" (2018). Sin esta penalización, la coincidencia de
+      // substring (0.7) de la peli equivocada superaba el umbral y se guardaba como match seguro.
+      else if (diff === 2) best -= 0.15;
+      else if (diff <= 5) best -= 0.2;
       // Con más de un lustro de diferencia ya no es la misma película: se hunde por debajo
       // del umbral aunque el título calce al pie de la letra.
       else best -= 0.45;
@@ -247,7 +286,7 @@ export class TmdbService {
   private static async searchCandidates(
     endpoint: 'movie' | 'tv' | 'multi',
     query: string,
-    opts: { filterYear?: string; knownYear?: string } = {}
+    opts: { filterYear?: string; knownYear?: string; imageHint?: string | null } = {}
   ): Promise<Array<{ id: number; score: number; credibility: number; endpoint: 'movie' | 'tv' }>> {
     // Los dos usos del año son distintos y confundirlos costaba matches equivocados:
     //  · filterYear → se manda a TMDB para acotar la búsqueda;
@@ -255,7 +294,7 @@ export class TmdbService {
     // Cuando el año solo servía de filtro, las consultas sin él no penalizaban nada y una
     // coincidencia exacta de título de otra época ganaba: "Solo en casa" (Home Alone, 1990)
     // se resolvía como "Gambling House" (1944) con puntuación perfecta.
-    const { filterYear, knownYear } = opts;
+    const { filterYear, knownYear, imageHint } = opts;
     try {
       const res = await axios.get(`https://api.themoviedb.org/3/search/${endpoint}`, {
         params: {
@@ -273,7 +312,7 @@ export class TmdbService {
 
       return results.slice(0, 10).map((r: any) => ({
         id: r.id,
-        score: scoreResult(r, query, knownYear),
+        score: scoreResult(r, query, knownYear, imageHint),
         credibility: (r.vote_count || 0) * 1000 + (r.popularity || 0),
         // En /search/multi el tipo lo dice cada resultado; en el resto, el propio endpoint.
         endpoint: (endpoint === 'multi' ? (r.media_type === 'tv' ? 'tv' : 'movie') : endpoint) as 'movie' | 'tv'
@@ -391,10 +430,18 @@ export class TmdbService {
     title: string,
     type: ContentType = 'movie',
     year?: string,
-    seed?: string
+    seed?: string,
+    opts: { originalTitle?: string | null; imageHint?: string | null } = {}
   ): Promise<TmdbMatch> {
     const cleanTitle = cleanForSearch(title);
-    const cacheKey = `${type}:${cleanTitle.toLowerCase()}:${year || ''}`;
+    const imageHint = tmdbImagePath(opts.imageHint);
+    // El título original ("The Founder") se busca como consulta APARTE del título en español:
+    // en es-MX el candidato correcto puede rotularse distinto ("Hambre de poder") y no parecerse
+    // al buscado, pero por su nombre original TMDB lo devuelve con original_title calcado (1.0).
+    const cleanOriginal = opts.originalTitle ? cleanForSearch(opts.originalTitle) : '';
+    const useOriginal = !!cleanOriginal && canonicalTitle(cleanOriginal) !== canonicalTitle(cleanTitle);
+
+    const cacheKey = `${type}:${cleanTitle.toLowerCase()}:${year || ''}:${useOriginal ? canonicalTitle(cleanOriginal) : ''}:${imageHint || ''}`;
     const cached = tmdbIdCache.get(cacheKey);
     if (cached) return cached;
 
@@ -422,13 +469,28 @@ export class TmdbService {
     // Cada variante de la consulta recorre la misma escalera. Se para en cuanto el match
     // es inequívoco, así que para los títulos "normales" el coste no cambia: la primera
     // variante es el título limpio de siempre.
+    const runVariant = async (variant: string): Promise<boolean> => {
+      if (year && collect(await this.searchCandidates(endpoint, variant, { filterYear: year, knownYear: year, imageHint }))) return true;
+      if (collect(await this.searchCandidates(endpoint, variant, { knownYear: year, imageHint }))) return true;
+      if (collect(await this.searchCandidates(opposite, variant, { knownYear: year, imageHint }))) return true;
+      if (collect(await this.searchCandidates('multi', variant, { knownYear: year, imageHint }))) return true;
+      return false;
+    };
+
     for (const variant of queryVariants(cleanTitle)) {
-      if (year && collect(await this.searchCandidates(endpoint, variant, { filterYear: year, knownYear: year }))) break;
-      if (collect(await this.searchCandidates(endpoint, variant, { knownYear: year }))) break;
-      if (collect(await this.searchCandidates(opposite, variant, { knownYear: year }))) break;
-      if (collect(await this.searchCandidates('multi', variant, { knownYear: year }))) break;
-      // Con un match ya aceptable no merece la pena seguir reescribiendo la consulta.
+      if (await runVariant(variant)) break;
+      // Con un match ya aceptable no merece la pena seguir REESCRIBIENDO el mismo título.
       if (bestScore >= MATCH_THRESHOLD) break;
+    }
+
+    // El título original es una consulta DISTINTA, no una reescritura: se intenta siempre que el
+    // match aún no sea INEQUÍVOCO —incluso si el título en español ya dio algo "aceptable" pero
+    // dudoso—, porque ahí es donde se cuela el homónimo ("El fundador" 2016 vs. Bonifácio 2018).
+    if (useOriginal && bestScore < CONFIDENT_SCORE) {
+      for (const variant of queryVariants(cleanOriginal)) {
+        if (await runVariant(variant)) break;
+        if (bestScore >= CONFIDENT_SCORE) break;
+      }
     }
 
     // Rescate por título alternativo. Los títulos regionales son el punto ciego del
@@ -511,8 +573,13 @@ export class TmdbService {
   /**
    * Obtiene el TMDB ID numérico de un título (id sintético negativo si no hay match real).
    */
-  static async getTmdbId(title: string, type: ContentType = 'movie', year?: string): Promise<number> {
-    return (await this.resolveTmdb(title, type, year)).id;
+  static async getTmdbId(
+    title: string,
+    type: ContentType = 'movie',
+    year?: string,
+    opts?: { originalTitle?: string | null; imageHint?: string | null }
+  ): Promise<number> {
+    return (await this.resolveTmdb(title, type, year, undefined, opts)).id;
   }
 
   /**
@@ -534,7 +601,10 @@ export class TmdbService {
             language: 'es-MX',
             // images → logo del título (arte para el hero estilo Netflix)
             // release_dates / content_ratings → clasificación por edades real
-            append_to_response: `credits,videos,images,${endpoint === 'tv' ? 'content_ratings' : 'release_dates'}`,
+            // alternative_titles + translations → los OTROS nombres regionales de la ficha
+            //   ("Solo en casa" ⇄ "Mi pobre angelito"), que alimentan aliases para que la
+            //   búsqueda encuentre el título por cualquiera de sus nombres (ver collectAliases).
+            append_to_response: `credits,videos,images,alternative_titles,translations,${endpoint === 'tv' ? 'content_ratings' : 'release_dates'}`,
             include_image_language: 'es,en,null'
           },
           timeout: 2500
@@ -573,6 +643,38 @@ export class TmdbService {
       console.warn(`[TMDB Detail Warning] ID ${tmdbId}: ${err.message}`);
       return null;
     }
+  }
+
+  /**
+   * Todos los nombres CONOCIDOS del título en español (España + Latinoamérica) según TMDB:
+   * el título mostrado, el original y los títulos alternativos/traducciones de las regiones
+   * hispanohablantes. Es lo que se vuelca en `aliases` para que la búsqueda encuentre la ficha
+   * por CUALQUIERA de sus nombres ("Solo en casa" ⇄ "Mi pobre angelito"), sin depender de que
+   * las dos variantes se hayan scrapeado por separado.
+   *
+   * Hacen falta LAS DOS fuentes: algunas variantes viven solo en `translations` (Home Alone
+   * no tiene ningún alternative_title español; sus nombres regionales están en las traducciones
+   * es-ES/es-MX) y otras solo en `alternative_titles` (el "Zootrópolis" de España). Requiere que
+   * el detalle se haya pedido con `append_to_response=alternative_titles,translations`.
+   */
+  static collectAliases(tmdbData: any): string[] {
+    if (!tmdbData) return [];
+    // Películas: alternative_titles.titles[] · Series: alternative_titles.results[]
+    const alt: any[] = tmdbData.alternative_titles?.titles || tmdbData.alternative_titles?.results || [];
+    const translations: any[] = tmdbData.translations?.translations || [];
+
+    const names: Array<string | undefined> = [
+      tmdbData.title,
+      tmdbData.name,
+      tmdbData.original_title,
+      tmdbData.original_name,
+      ...alt.filter(t => t && SPANISH_REGIONS.has(t.iso_3166_1)).map(t => t.title),
+      ...translations.filter(t => t && t.iso_639_1 === 'es').map(t => t?.data?.title || t?.data?.name)
+    ];
+
+    // Tope defensivo: aun sumando todas las regiones hispanas el conjunto es pequeño, pero no
+    // dejamos que un título con decenas de variantes infle title_normalized sin límite.
+    return dedupeTitles(names).slice(0, 25);
   }
 
   /**
@@ -646,10 +748,19 @@ export class TmdbService {
 
   static async enrichMediaItem(item: MediaItem, opts: { skipSeasons?: boolean } = {}): Promise<MediaItem> {
     try {
-      const year = item.release_date ? item.release_date.substring(0, 4) : undefined;
+      // El año sale de release_date; si la fuente lo dejó vacío (FuegoCine) se recupera del
+      // slug (`…-2015-html`), que es donde de verdad viaja. Sin año, un homónimo de otra época
+      // puede ganar el emparejado.
+      const year = (item.release_date ? item.release_date.substring(0, 4) : '') || yearFromSlug(item.id);
+      // Pista de imagen: el og:image de la página apunta directo a la ficha exacta de TMDB, así
+      // que confirma el candidato aunque el título en es-MX no se parezca al buscado.
+      const imageHint = tmdbImagePath(item.poster) || tmdbImagePath(item.backdrop);
       const match: TmdbMatch = item.tmdb_id && item.tmdb_id > 0
         ? { id: item.tmdb_id, matched: true, score: 1 }
-        : await this.resolveTmdb(item.title, item.type, year, item.id);
+        : await this.resolveTmdb(item.title, item.type, year, item.id, {
+            originalTitle: item.original_title,
+            imageHint
+          });
 
       // Sin match fiable en TMDB no pedimos detalles (traerían metadata de OTRO título):
       // nos quedamos con la del sitio de origen.
@@ -702,6 +813,10 @@ export class TmdbService {
         type: contentType,
         title: tmdbData.title || tmdbData.name || item.title,
         original_title: tmdbData.original_title || tmdbData.original_name || item.original_title,
+        // Nombres regionales que conoce TMDB + el/los que ya traía la fuente. Alimentan
+        // title_normalized (la única columna sobre la que busca el RPC), de modo que la ficha
+        // aparezca al buscar por CUALQUIERA de sus títulos, no solo por el que se scrapeó.
+        aliases: dedupeTitles([...(item.aliases || []), item.title, ...TmdbService.collectAliases(tmdbData)]),
         tagline: tmdbData.tagline || item.tagline || '',
         overview: tmdbData.overview || item.overview || '',
         rating: tmdbData.vote_average ? Number(tmdbData.vote_average.toFixed(1)) : item.rating,

@@ -3,6 +3,10 @@
  *
  *   npm run repair:catalog                        # solo informa (dry-run), no escribe nada
  *   npm run repair:catalog -- --list              # lista las fichas sospechosas y sale
+ *   npm run repair:catalog -- --refetch           # reparación TOTAL: re-visita la página de
+ *                                                 # origen (título original + imagen de TMDB) y
+ *                                                 # re-fija la ficha correcta. Sigue en dry-run.
+ *   npm run repair:catalog -- --refetch --apply   # …y lo aplica en Supabase
  *   npm run repair:catalog -- --apply             # aplica las correcciones en Supabase
  *   npm run repair:catalog -- --apply --dedupe    # además elimina duplicados rotos
  *   npm run repair:catalog -- --fuse              # informa de duplicados ENTRE FUENTES
@@ -12,6 +16,8 @@
  *   npm run repair:catalog -- --unfuse            # informa de fusiones erróneas
  *   npm run repair:catalog -- --unfuse --apply    # retira alias/fuentes que no corresponden
  *   npm run repair:catalog -- --reindex --apply   # reconstruye title_normalized
+ *   npm run repair:catalog -- --aliases           # informa de títulos regionales que faltan
+ *   npm run repair:catalog -- --aliases --apply   # añade los nombres regionales de TMDB a aliases
  *
  * Por qué existe: el catálogo se pobló con un matcher que, ante títulos con artículo
  * inicial ("Los Vengadores…") o coletillas de pack ("Todas las temporadas"), obtenía cero
@@ -31,8 +37,9 @@
  */
 import 'dotenv/config';
 import { TmdbService } from '../src/services/tmdbService';
+import { RealScraperService } from '../src/services/realScraperService';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
-import { canonicalTitle, normalizeTitle, searchIndexKey } from '../src/utils/text';
+import { canonicalTitle, normalizeTitle, searchIndexKey, dedupeTitles, sourceTitleFromSlug } from '../src/utils/text';
 import { MediaItem, ContentType } from '../src/types';
 
 const db = getSupabaseAdmin();
@@ -83,6 +90,9 @@ function isTrustworthySlug(id: string, slugTitle: string): boolean {
   if (!slugTitle) return false;
   if (/^\d+$/.test(String(id).trim())) return false;
   if (JUNK_ID.test(id)) return false;
+  // Slug URL-encoded ("al-l%C3%ADmite"): el título no se reconstruye limpio, así que no sirve
+  // para juzgar la ficha ni para re-resolverla — se deja intacta en vez de arriesgar un cambio.
+  if (/%[0-9a-f]{2}/i.test(id)) return false;
 
   const words = slugTitle.split(/\s+/).filter(Boolean);
   if (words.length > 6) return false;               // frase de sinopsis, no título
@@ -109,26 +119,32 @@ function similarity(a: string, b: string): number {
 }
 
 /**
- * Título y año originales según el id de la fuente.
- * FuegoCine antepone `YYYY-MM-` y añade `-YYYY-html`; TioPlus usa el slug pelado.
+ * Título y año originales según el id/slug de la fuente. La lógica vive en utils/text
+ * (`sourceTitleFromSlug`), compartida con el enrichment: una única fuente de verdad.
  */
-function sourceTitleFromId(id: string): { title: string; year?: string } {
-  let slug = String(id || '').trim().toLowerCase();
-  if (!slug) return { title: '' };
+const sourceTitleFromId = sourceTitleFromSlug;
 
-  slug = slug.replace(/^fc-/, '').replace(/-html$/, '').replace(/^\d{4}-\d{2}-/, '');
-
-  let year: string | undefined;
-  const yearMatch = slug.match(/-(\d{4})$/);
-  if (yearMatch) {
-    const y = Number(yearMatch[1]);
-    if (y >= 1900 && y <= 2100) {
-      year = yearMatch[1];
-      slug = slug.slice(0, -5);
-    }
+/**
+ * Vuelve a la PÁGINA de origen a por las señales que el matcher necesita para acertar y que la
+ * fila guardada ya no tiene fiables: el título original real ("The Founder") y el `og:image` de
+ * TMDB. Son independientes del match equivocado (el póster guardado es el de la ficha ajena),
+ * así que sirven para RE-FIJAR la ficha correcta. Devuelve null si no hay url o falla la visita.
+ */
+async function refetchSourceSignals(row: any): Promise<{ originalTitle?: string; imageHint?: string } | null> {
+  const url: string = row.source_url || (Array.isArray(row.source_urls) ? row.source_urls[0] : '') || '';
+  if (!url || !/^https?:\/\//i.test(url)) return null;
+  try {
+    const detail = /fuegocine/i.test(url)
+      ? await RealScraperService.scrapeFuegocineDetail(url)
+      : await RealScraperService.scrapeDetail(url);
+    if (!detail) return null;
+    return {
+      originalTitle: detail.original_title || undefined,
+      imageHint: detail.poster || detail.backdrop || undefined
+    };
+  } catch {
+    return null;
   }
-
-  return { title: slug.replace(/-/g, ' ').trim(), year };
 }
 
 /**
@@ -179,7 +195,7 @@ async function fetchAllRows(): Promise<any[]> {
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await db
       .from('media_items')
-      .select('id,tmdb_id,type,title,original_title,aliases,release_date')
+      .select('id,tmdb_id,type,title,original_title,aliases,release_date,source_url,poster')
       .range(from, from + PAGE - 1);
     if (error) throw new Error(error.message);
     if (!data || data.length === 0) break;
@@ -235,6 +251,90 @@ async function reindexSearchKeys(apply: boolean): Promise<void> {
     }));
   }
   console.log(`   ${updated} índices actualizados`);
+}
+
+/**
+ * BACKFILL de títulos regionales (`--aliases`).
+ *
+ * La búsqueda solo mira `title_normalized`, que se arma con título + original + alias. Hasta
+ * ahora los alias solo guardaban el nombre con que cada fuente scrapeó la ficha, de modo que
+ * una película scrapeada únicamente como "Mi pobre angelito" NO aparecía al buscar "Solo en
+ * casa" —su otro nombre regional—, aunque TMDB conoce ambos. El enriquecimiento ya rellena los
+ * alias con los nombres regionales (tmdbService.collectAliases), pero las filas ya guardadas
+ * siguen sin ellos hasta el próximo crawl completo.
+ *
+ * Este modo recorre las fichas YA emparejadas con TMDB, pide sus títulos alternativos y
+ * traducciones en español, los añade a `aliases` y reconstruye title_normalized. A partir de
+ * aquí la ficha se encuentra por cualquiera de sus nombres, sin re-scrapear nada.
+ */
+async function backfillRegionalAliases(apply: boolean, limitArg?: number): Promise<void> {
+  console.log(`🌎 Añadiendo títulos regionales desde TMDB${apply ? '' : ' (dry-run: no se escribe nada)'}...`);
+  const withNormalized = await hasColumn('title_normalized');
+
+  // Solo las fichas con match REAL en TMDB (id positivo): las sintéticas no tienen ficha de
+  // la que sacar títulos alternativos (para fundirlas primero, ver --fuse).
+  const rows: any[] = [];
+  const PAGE = 1000;
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await db
+      .from('media_items')
+      .select('id,tmdb_id,type,title,original_title,aliases')
+      .gt('tmdb_id', 0)
+      .range(from, from + PAGE - 1);
+    if (error) throw new Error(error.message);
+    if (!data || data.length === 0) break;
+    rows.push(...data);
+    if (data.length < PAGE) break;
+  }
+  console.log(`   ${rows.length} fichas emparejadas con TMDB`);
+
+  const targets = Number.isFinite(limitArg) && (limitArg as number) > 0 ? rows.slice(0, limitArg) : rows;
+  let grown = 0;
+  let unchanged = 0;
+  let failed = 0;
+
+  const CONCURRENCY = 5;
+  for (let i = 0; i < targets.length; i += CONCURRENCY) {
+    const chunk = targets.slice(i, i + CONCURRENCY);
+
+    const resolved = await Promise.all(chunk.map(async row => {
+      const type: ContentType = row.type === 'tvseries' ? 'tvseries' : 'movie';
+      try {
+        const details = await TmdbService.getTmdbDetails(row.tmdb_id, type);
+        return { row, known: details ? TmdbService.collectAliases(details) : [] };
+      } catch {
+        return { row, known: [] as string[] };
+      }
+    }));
+
+    for (const { row, known } of resolved) {
+      const current: string[] = row.aliases || [];
+      // El título mostrado se conserva SIEMPRE el primero para no alterar el ranking por prefijo.
+      const merged = dedupeTitles([...current, row.title, ...known]);
+      if (merged.length <= current.length) {
+        unchanged++;
+        continue;
+      }
+
+      const patch: Record<string, unknown> = { aliases: merged };
+      if (withNormalized) patch.title_normalized = searchIndexKey(row.title, row.original_title, merged);
+
+      const added = merged.filter(a => !current.some(c => normalizeTitle(c) === normalizeTitle(a)));
+      console.log(`   + ${row.id}\n     "${row.title}" gana ${JSON.stringify(added)}`);
+
+      if (apply) {
+        const { error } = await db.from('media_items').update(patch).eq('id', row.id);
+        if (error) { console.warn(`     ⚠ ${error.message}`); failed++; continue; }
+      }
+      grown++;
+    }
+  }
+
+  console.log(
+    `\n${apply ? '✅ Alias añadidos' : '📋 Dry-run'}: ${grown} fichas ${apply ? 'ampliadas' : 'a ampliar'}, ` +
+    `${unchanged} ya completas, ${failed} fallidas`
+  );
+  if (!apply && grown > 0) console.log('   Ejecuta de nuevo con --apply para escribir los cambios.');
 }
 
 /** Todas las fichas con tmdb_id SINTÉTICO (negativo): las que no emparejaron con TMDB. */
@@ -606,10 +706,19 @@ async function main() {
   const apply = process.argv.includes('--apply');
   // Elimina las filas duplicadas cuya versión correcta ya existe en el catálogo.
   const dedupe = process.argv.includes('--dedupe');
+  // Re-visita la página de origen de cada ficha sospechosa para recuperar el título original
+  // real y el og:image de TMDB, y re-fijar la ficha correcta (reparación total). Cuesta una
+  // petición por ficha, por eso es opt-in; acótalo con --limit=N si el conjunto es grande.
+  const refetch = process.argv.includes('--refetch');
   const limitArg = parseInt((process.argv.find(a => a.startsWith('--limit=')) || '').split('=')[1] || '', 10);
 
   if (process.argv.includes('--reindex')) {
     await reindexSearchKeys(apply);
+    return;
+  }
+
+  if (process.argv.includes('--aliases')) {
+    await backfillRegionalAliases(apply, Number.isFinite(limitArg) ? limitArg : undefined);
     return;
   }
 
@@ -663,7 +772,18 @@ async function main() {
     const results = await Promise.all(chunk.map(async ({ row, sourceTitle, year }) => {
       const type: ContentType = row.type === 'tvseries' ? 'tvseries' : 'movie';
       try {
-        const match = await TmdbService.resolveTmdb(sourceTitle, type, year, row.id);
+        let match = await TmdbService.resolveTmdb(sourceTitle, type, year, row.id);
+        // --refetch es un FALLBACK DIRIGIDO: solo cuando el slug no basta (sin match o poco
+        // fiable) se re-visita la página de origen a por el título original real + la imagen de
+        // TMDB (independientes del match equivocado guardado) y se reintenta. Así la red solo se
+        // toca en las filas difíciles, no en las que el slug ya resuelve con confianza.
+        if (refetch && (!match.matched || match.score < 0.9)) {
+          const signals = await refetchSourceSignals(row);
+          if (signals && (signals.originalTitle || signals.imageHint)) {
+            const retry = await TmdbService.resolveTmdb(sourceTitle, type, year, row.id, signals);
+            if (retry.matched && retry.score >= match.score) match = retry;
+          }
+        }
         return { row, sourceTitle, year, type, match };
       } catch {
         return { row, sourceTitle, year, type, match: null };
