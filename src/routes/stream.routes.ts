@@ -184,6 +184,26 @@ function applyCachePolicy(res: Response, policy: string): void {
   res.setHeader('Vercel-CDN-Cache-Control', policy);
 }
 
+/**
+ * Status con el que se representa un fallo de RED, que no trae ninguno.
+ *
+ * `validateStatus: () => true` solo neutraliza los códigos HTTP: si el CDN no resuelve, rechaza la
+ * conexión o agota el timeout, axios LANZA. Sin este envoltorio esa excepción subía hasta el
+ * manejador global y el cliente recibía un 500 genérico en vez del 502 `DIRECT_UNAVAILABLE` que
+ * dice la documentación — y con él se saltaba tanto el reintento con token nuevo como la cascada
+ * al `embed_url`, que es justo lo que salva la reproducción cuando un CDN se cae.
+ */
+const NETWORK_FAILURE = 504;
+
+/** Ejecuta una petición al CDN traduciendo el fallo de red a un status, en vez de lanzarlo. */
+async function attempt(run: () => Promise<number | null>): Promise<number | null> {
+  try {
+    return await run();
+  } catch {
+    return NETWORK_FAILURE;
+  }
+}
+
 /** Sirve un manifiesto ya reescrito. Devuelve el status de fallo, o null si fue bien. */
 async function serveManifest(
   res: Response,
@@ -272,6 +292,16 @@ async function pipeUpstream(
   let sent = 0;
   upstream.data.on('data', (chunk: Buffer) => { sent += chunk.length; });
   upstream.data.on('end', () => { void BandwidthService.add(sent); });
+
+  // Si el CDN corta a mitad del envío ya no se puede cambiar el status —las cabeceras salieron
+  // hace rato—, pero un `error` sin escuchador en un stream es una excepción no capturada que se
+  // lleva por delante el proceso entero. Se cierra la respuesta y el reproductor lo trata como lo
+  // que es: una descarga interrumpida, que reintenta por su cuenta.
+  upstream.data.on('error', () => {
+    void BandwidthService.add(sent);
+    res.destroy();
+  });
+
   upstream.data.pipe(res);
   return null;
 }
@@ -388,9 +418,9 @@ router.get(DIRECT_BASE, async (req: Request, res: Response, next: NextFunction) 
 
     // En `manifest` solo viajan por aquí las playlists; los segmentos van del CDN al reproductor.
     const rewriteMode: RewriteMode = mode === 'manifest' ? 'manifest' : 'proxy';
-    const serve = (m: MintedStream) => m.kind === 'hls'
+    const serve = (m: MintedStream) => attempt(() => m.kind === 'hls'
       ? serveManifest(res, m.url, m.referer, embedParam, 'no-store', rewriteMode)
-      : pipeUpstream(req, res, m.url, m.referer, embedParam, 'no-store', rewriteMode);
+      : pipeUpstream(req, res, m.url, m.referer, embedParam, 'no-store', rewriteMode));
 
     const failed = await serve(minted);
     if (failed === null) return;
@@ -427,9 +457,9 @@ router.get(`${DIRECT_BASE}/seg`, async (req: Request, res: Response, next: NextF
     const rewriteMode: RewriteMode = req.query.m === 'manifest' ? 'manifest' : 'proxy';
 
     const cacheControl = cachePolicyFor(req, true);
-    const serve = (url: string) => isManifest(url)
+    const serve = (url: string) => attempt(() => isManifest(url)
       ? serveManifest(res, url, referer, embedParam, cacheControl, rewriteMode)
-      : pipeUpstream(req, res, url, referer, embedParam, cacheControl, rewriteMode);
+      : pipeUpstream(req, res, url, referer, embedParam, cacheControl, rewriteMode));
 
     const failed = await serve(target);
     if (failed === null) return;

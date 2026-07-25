@@ -40,7 +40,13 @@ import type { DirectMode } from '../types';
  */
 
 export interface HostPolicy {
-  /** Fragmentos de hostname del EMBED (no del CDN) que identifican a esta familia. */
+  /**
+   * Fragmentos de hostname del EMBED (no del CDN) que identifican a esta familia.
+   *
+   * Meter aquí un dominio que solo exista como CDN no da ningún error: simplemente no casa nunca,
+   * y el host de embed que debía cubrir se queda en `CONSERVATIVE` reenviando bytes para siempre.
+   * `scripts/dev/diag_host_policy_coverage.ts` es lo que saca a la luz esos huérfanos.
+   */
   match: string[];
   /** El CDN valida la IP que acuñó la URL: no se puede redirigir al cliente. */
   ipBound: boolean;
@@ -235,7 +241,12 @@ const POLICIES: HostPolicy[] = [
     // Abierto de arriba abajo aunque cada escalón esté en un host distinto: maestro en
     // `turboviplay.com`, variantes en `turbosplayer.com`, segmentos en `googleusercontent.com`.
     // Los tres sirven sin cabeceras y con `ACAO: *`, así que el 302 basta.
-    match: ['emturbovid', 'turbovidhls', 'vimeos.net'],
+    //
+    // `unlimplay` entra aquí porque su vídeo sale por `vimeos.net`, el mismo CDN, y al medirlo
+    // (tres muestras) dio exactamente este perfil. Antes no casaba con nada: `vimeos.net` estaba
+    // en la lista, pero eso es el CDN y `policyFor` compara contra el host del EMBED, así que sus
+    // 276 servidores se quedaban en `CONSERVATIVE` pagando proxy sin motivo.
+    match: ['emturbovid', 'turbovidhls', 'vimeos.net', 'unlimplay'],
     ipBound: false,
     refererRequired: false,
     refererChecked: false,
@@ -248,6 +259,17 @@ const POLICIES: HostPolicy[] = [
     measuredAt: MEASURED_AT,
   },
 ];
+
+/**
+ * `vidnest` (vidnest.io / vidnest.live) se sondeó y se dejó FUERA a propósito.
+ *
+ * Da mp4, cruza redes y no pide cabeceras — sobre el papel, `redirect`. Pero solo respondió en 2
+ * de 5 intentos, y su CDN (`fs7.vidnest.live`) resultó inalcanzable tanto desde una red
+ * residencial como desde Vercel. Dos aciertos flojos no son una medición, y equivocarse aquí es
+ * entregar un 302 que no reproduce sin que nada lo reporte. Son 25 servidores de 30 155 (0,08 %
+ * del catálogo): no compensa el riesgo. Se queda en `CONSERVATIVE` hasta que el host se
+ * estabilice y se pueda medir en serio.
+ */
 
 /** Política del host de un embed. Lo no medido cae en `CONSERVATIVE`. */
 export function policyFor(url: string): HostPolicy {
