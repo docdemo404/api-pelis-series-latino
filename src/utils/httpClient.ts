@@ -13,6 +13,20 @@ export const DEFAULT_TIMEOUT = 8000;
 const keepAliveHttp = new HttpAgent({ keepAlive: true, maxSockets: 64 });
 const keepAliveHttps = new HttpsAgent({ keepAlive: true, maxSockets: 64 });
 
+/**
+ * Agentes SOLO para el vídeo, separados de los del scraping.
+ *
+ * Compartirlos significaba compartir el cupo de 64 sockets por host: un refresco de catálogo en
+ * marcha podía dejar sin conexión a quien estuviera reproduciendo, y eso se nota como un parón,
+ * no como un error.
+ *
+ * `maxFreeSockets` y un `keepAliveMsecs` alto existen para que el socket abierto contra el CDN
+ * SOBREVIVA entre segmentos: llegan cada pocos segundos, y con el default de 1 s el socket ya se
+ * había cerrado, así que cada segmento volvía a pagar el handshake TLS.
+ */
+const streamHttp = new HttpAgent({ keepAlive: true, maxSockets: 128, maxFreeSockets: 32, keepAliveMsecs: 30000 });
+const streamHttps = new HttpsAgent({ keepAlive: true, maxSockets: 128, maxFreeSockets: 32, keepAliveMsecs: 30000 });
+
 /** Cliente axios compartido con User-Agent, timeout y keep-alive por defecto. */
 export const httpClient: AxiosInstance = axios.create({
   timeout: DEFAULT_TIMEOUT,
@@ -24,15 +38,15 @@ export const httpClient: AxiosInstance = axios.create({
 /**
  * Cliente para el camino de VÍDEO (proxy y manifiestos).
  *
- * Es hermano de `httpClient` y comparte sus agentes —que es justo el punto: el proxy usaba
- * `axios` pelado y abría un handshake TCP+TLS nuevo por cada segmento HLS, cientos por
- * película. Lo que cambia es el timeout: los 8 s por defecto sirven para scrapear una página,
- * no para empezar a servir bytes de un CDN cargado.
+ * Nace de que el proxy usaba `axios` pelado y abría un handshake TCP+TLS nuevo por cada segmento
+ * HLS, cientos por película. Tiene keep-alive PROPIO (ver arriba) para que el scraping no le
+ * quite sockets, y un timeout mayor: los 8 s por defecto sirven para scrapear una página, no para
+ * empezar a servir bytes de un CDN cargado.
  */
 export const streamClient: AxiosInstance = axios.create({
   timeout: 20000,
-  httpAgent: keepAliveHttp,
-  httpsAgent: keepAliveHttps,
+  httpAgent: streamHttp,
+  httpsAgent: streamHttps,
   headers: { 'User-Agent': USER_AGENT },
   // OJO: `decompress` se queda en su valor por defecto (true) a propósito. Desactivarlo aquí
   // afecta también a la descarga del MANIFIESTO, que se lee como texto: el CDN lo sirve gzip,

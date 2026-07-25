@@ -158,16 +158,30 @@ function rewriteManifest(
 }
 
 /**
- * Qué caché merece esta respuesta.
+ * Caché de un segmento. Debe coincidir con la del middleware de `api/index.ts`, que fija las
+ * variantes de borde: si divergen, mandan las de allí.
  *
- * Un segmento es contenido inmutable: su URL firmada va entera dentro de `?u=`, así que dos
- * espectadores de lo mismo comparten respuesta y rebobinar deja de golpear al CDN. Con Range de
- * por medio NO se cachea: la respuesta es un tramo concreto y servirla a quien pida otro daría
- * bytes equivocados.
+ * El TTL es largo a propósito, y no es una apuesta: la URL FIRMADA ENTERA del CDN viaja dentro de
+ * `?u=`, así que la clave de caché identifica el contenido. Dos espectadores de lo mismo comparten
+ * respuesta, rebobinar no vuelve a golpear al CDN, y cuando la firma caduque el re-acuñado
+ * producirá otra clave y la vieja envejecerá sola — nunca se sirve algo distinto bajo la misma
+ * clave.
+ *
+ * Antes eran 10 minutos, y esa cifra es la que se notaba: pasado ese rato el MISMO segmento
+ * volvía a ser un fallo de caché. Medido desde Chile, el fallo va a 482 KB/s y el acierto a
+ * 1,98 MB/s — cuatro veces más rápido— con un vídeo 1080p que pide 3,55 Mbps sostenidos. O sea
+ * que el fallo entrega 10 s de vídeo en 9,2 s y el acierto en 2,2 s: la diferencia entre que el
+ * búfer se llene o se vacíe.
+ */
+const SEGMENT_CACHE = 'public, max-age=3600, s-maxage=604800, stale-while-revalidate=86400';
+
+/**
+ * Con `Range` de por medio NO se cachea: la respuesta es un tramo concreto y el borde no
+ * distingue tramos, así que servirla a quien pida otro daría bytes equivocados.
  */
 function cachePolicyFor(req: Request, isSegment: boolean): string {
   if (!isSegment || req.headers.range) return 'no-store';
-  return 'public, max-age=300, s-maxage=600';
+  return SEGMENT_CACHE;
 }
 
 /**

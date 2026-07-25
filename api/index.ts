@@ -18,7 +18,14 @@ const app = express();
 // otro origen no puede LEER el Content-Range que devuelve el proxy, y el salto por la barra de
 // tiempo se degrada aunque el servidor esté respondiendo 206 correctamente.
 app.use(cors({ exposedHeaders: ['Content-Range', 'Content-Length', 'Accept-Ranges'] }));
-app.use(express.json());
+
+// El parseo de JSON se salta el camino de vídeo. Esas rutas son GET sin cuerpo y se piden cientos
+// de veces por película: no tiene sentido montarles un parser de body a cada segmento.
+const parseJson = express.json();
+app.use((req: Request, res: Response, next: NextFunction) => {
+  if (req.path.includes('/stream/direct')) return next();
+  return parseJson(req, res, next);
+});
 
 // Cabeceras HTTP de Caché en Borde (Edge CDN & Stale-While-Revalidate)
 app.use((req: Request, res: Response, next: NextFunction) => {
@@ -28,10 +35,15 @@ app.use((req: Request, res: Response, next: NextFunction) => {
     // la misma para todo el que vea lo mismo mientras dure el acuñado (compartido vía KV). El
     // propio endpoint rebaja esto a `no-store` cuando la petición trae Range, porque una
     // respuesta parcial cacheada serviría los bytes equivocados a quien pida otro tramo.
+    //
+    // El TTL tiene que ser EL MISMO que `SEGMENT_CACHE` en stream.routes.ts: en el borde de
+    // Vercel estas dos cabeceras mandan sobre `Cache-Control`, así que subirlo solo allí no
+    // habría cambiado nada. Una semana, porque la clave identifica el contenido y una firma
+    // caducada simplemente genera otra clave.
     if (req.path.includes('/stream/direct/seg')) {
-      res.setHeader('Cache-Control', 'public, max-age=300, s-maxage=600');
-      res.setHeader('CDN-Cache-Control', 'public, max-age=600');
-      res.setHeader('Vercel-CDN-Cache-Control', 'public, max-age=600');
+      res.setHeader('Cache-Control', 'public, max-age=3600, s-maxage=604800, stale-while-revalidate=86400');
+      res.setHeader('CDN-Cache-Control', 'public, max-age=604800');
+      res.setHeader('Vercel-CDN-Cache-Control', 'public, max-age=604800');
     // `/stream/direct` NO puede cachearse en el borde: acuña una URL nueva en cada reproducción
     // y, según el host, responde con un 302 distinto cada vez.
     } else if (req.path.includes('/panel') || req.path.includes('/stream/resolve') || req.path.includes('/stream/direct') || req.path.includes('/revalidate') || req.path.includes('/cache')) {
