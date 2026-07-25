@@ -27,7 +27,40 @@ export interface TmdbMatch {
   id: number;
   matched: boolean;
   score: number;
+  /** Ver `scoreResult`: el parecido del título viene respaldado por una señal INDEPENDIENTE. */
+  verified: boolean;
+  /**
+   * A QUÉ catálogo de TMDB pertenece el id, que no siempre es el tipo por el que se preguntó:
+   * la escalera busca también en el endpoint contrario y en /search/multi. Los ids de película
+   * y de serie se numeran POR SEPARADO y se repiten entre sí —74586 es la israelí "כלבת" y a la
+   * vez la serie "¿Solo en casa?"—, así que pedir la ficha por el tipo equivocado no da un 404:
+   * da los datos de otro título.
+   */
+  type: ContentType;
 }
+
+/**
+ * Puntuación de un candidato + si algo AJENO al título lo respalda.
+ *
+ * La distinción es la que faltaba: "Solo en casa" calca al 100% el nombre de "Gambling House"
+ * (1950) y el de Home Alone (1990), así que la puntuación por sí sola no puede decidir. Solo el
+ * año, el `og:image` de la página de origen o el título original distinguen una de otra.
+ */
+interface ScoredResult {
+  score: number;
+  verified: boolean;
+}
+
+/** Un resultado de /search ya puntuado, tal y como circula por la escalera de `resolveTmdb`. */
+interface Candidate extends ScoredResult {
+  id: number;
+  credibility: number;
+  endpoint: 'movie' | 'tv';
+}
+
+// Ante puntuaciones MUY parecidas (p. ej. anime original vs. remake homónimo, o una parodia con
+// nombre casi idéntico al original) no decide la similitud, que ya no distingue nada.
+const TIE_MARGIN = 0.06;
 
 // Puntuación mínima de similitud para aceptar un resultado de TMDB como el mismo título.
 // Por debajo preferimos NO emparejar (mejor metadata de la fuente que metadata de otra peli).
@@ -54,10 +87,15 @@ const PACK_NOISE = /\b(todas\s+las\s+temporadas?|temporadas?\s+completas?|serie\
 // "LOS Vengadores…" no devuelve nada y el único resultado acaba siendo una parodia.
 const LEADING_ARTICLE = /^(los|las|el|la|un|una|unos|unas)\s+/i;
 
+// Año final entre paréntesis, incluido el RANGO con el que las fuentes rotulan los packs de
+// series ("Bridgerton - Todas las Temporadas (2020 - 2026)"). Sin contemplar el rango, el
+// paréntesis sobrevivía a la limpieza y /search devolvía cero resultados.
+const TRAILING_YEAR = /\s*\((\d{4})(?:\s*[-–—/]\s*(?:\d{4}|presente|actualidad))?\)\s*$/i;
+
 /** Limpia un título de listado para buscarlo en TMDB (sin año, sin ruido, sin temporada). */
 function cleanForSearch(title: string): string {
   let t = (title || '')
-    .replace(/\s*\(\d{4}\)\s*$/, '')
+    .replace(TRAILING_YEAR, '')
     .replace(/\[[^\]]*\]/g, '')
     .replace(PACK_NOISE, ' ')
     .replace(/\b(temporada|season|capitulo|capítulo|episodio)\s*\d+\b/gi, '')
@@ -201,7 +239,7 @@ function similarity(a: string, b: string): number {
  * depender del título. Devuelve null si la URL no es de TMDB. `poster_path`/`backdrop_path`
  * que ya vienen como `/<hash>.jpg` se normalizan igual (por su nombre de archivo).
  */
-function tmdbImagePath(url: string | null | undefined): string | null {
+export function tmdbImagePath(url: string | null | undefined): string | null {
   if (!url) return null;
   const m = String(url).match(/image\.tmdb\.org\/t\/p\/[^/]+\/([\w-]+\.(?:jpg|jpeg|png|webp|svg))/i);
   if (m) return `/${m[1]}`;
@@ -211,7 +249,8 @@ function tmdbImagePath(url: string | null | undefined): string | null {
 }
 
 /**
- * Puntúa un resultado de TMDB frente al título (y año) buscados.
+ * Puntúa un resultado de TMDB frente al título (y año) buscados, y dice si algo INDEPENDIENTE
+ * del título respalda al candidato (`verified`).
  *
  * El año NO es un desempate menor: los títulos regionales chocan de lleno con películas
  * ajenas que se llaman exactamente igual. "Solo en casa" (el título de España de Home
@@ -219,21 +258,39 @@ function tmdbImagePath(url: string | null | undefined): string | null {
  * penalización simbólica esa coincidencia exacta ganaba y se guardaba como match seguro.
  * Un desfase grande de estreno descarta el candidato salvo que el título alternativo lo
  * confirme después (ver scoreAgainstKnownTitles).
+ *
+ * Cuando NO se conoce el año, ninguna penalización llega a aplicarse y los dos homónimos
+ * puntúan 1.00 exacto. Por eso la puntuación no basta para dar el match por cerrado: hace falta
+ * saber si viene respaldada, que es lo que responde `verified`.
  */
-function scoreResult(result: any, query: string, year?: string, imageHint?: string | null): number {
+function scoreResult(
+  result: any,
+  query: string,
+  year?: string,
+  imageHint?: string | null,
+  knownOriginal?: string | null
+): ScoredResult {
   // Confirmación por IMAGEN: si la página de origen trae la ruta de TMDB (og:image) y coincide
   // con el póster o el fondo del candidato, es la MISMA ficha con certeza, se llame como se llame
   // en es-MX (así "El fundador" fija a The Founder aunque su título latino sea "Hambre de poder").
   // Solo CONFIRMA; si no coincide no penaliza —la página pudo usar el póster de otro idioma—.
   if (imageHint) {
     if (imageHint === tmdbImagePath(result.poster_path) || imageHint === tmdbImagePath(result.backdrop_path)) {
-      return 1;
+      return { score: 1, verified: true };
     }
   }
 
   const candidates = [result.title, result.name, result.original_title, result.original_name].filter(Boolean);
   let best = 0;
   for (const c of candidates) best = Math.max(best, similarity(query, c));
+
+  // El título ORIGINAL de la fuente ("Home Alone") es una segunda señal independiente del nombre
+  // regional que se está buscando: si calca el original de la ficha, esta es la película.
+  const original = result.original_title || result.original_name || '';
+  const originalConfirms = !!knownOriginal && !!original
+    && canonicalTitle(knownOriginal) === canonicalTitle(original);
+
+  let verified = originalConfirms;
 
   const date: string = result.release_date || result.first_air_date || '';
   if (year) {
@@ -244,6 +301,9 @@ function scoreResult(result: any, query: string, year?: string, imageHint?: stri
       best -= 0.25;
     } else {
       const diff = Math.abs(parseInt(date.substring(0, 4), 10) - parseInt(year, 10));
+      // Un estreno que cuadra es el respaldo más común: descarta de un plumazo al homónimo
+      // de otra época, que es de donde salen casi todos los emparejados equivocados.
+      if (diff <= 1) verified = true;
       if (diff === 0) best += 0.1;
       else if (diff === 1) { /* desfase de distribución (festival vs. estreno): ni premia ni penaliza */ }
       // Dos años de diferencia YA distinguen homónimos: "El fundador" (2016) frente a
@@ -256,7 +316,30 @@ function scoreResult(result: any, query: string, year?: string, imageHint?: stri
       else best -= 0.45;
     }
   }
-  return Math.max(0, Math.min(1, best));
+  return { score: Math.max(0, Math.min(1, best)), verified };
+}
+
+/**
+ * ¿`c` es mejor candidato que `best`? Único criterio de comparación, compartido por el ganador
+ * de cada consulta y por el mejor de toda la escalera.
+ *
+ * Con puntuaciones dentro del margen deciden, por este orden:
+ *  1. ser del tipo que se pidió — la escalera rebusca en el catálogo contrario y en
+ *     /search/multi, y de ahí salen coincidencias reales pero de otra clase: buscando la
+ *     película "Solo en casa" aparece la serie "¿Solo en casa?" (2017), cuyo nombre original
+ *     es literalmente "Home Alone". Si la fuente dice que es película, es película;
+ *  2. venir RESPALDADO por el año, el `og:image` o el título original;
+ *  3. el respaldo de público, que distingue a la parodia "Vengadores Chiflados" (1 voto) del
+ *     título auténtico (24.000) pero no puede pesar más que una confirmación real —así es como
+ *     ganaba "Gambling House", la más votada de las fichas llamadas "Solo en casa"—.
+ */
+function beatsCandidate(c: Candidate, best: Candidate | null, wanted: 'movie' | 'tv'): boolean {
+  if (!best) return true;
+  if (c.score > best.score + TIE_MARGIN) return true;
+  if (Math.abs(c.score - best.score) > TIE_MARGIN) return false;
+  if ((c.endpoint === wanted) !== (best.endpoint === wanted)) return c.endpoint === wanted;
+  if (c.verified !== best.verified) return c.verified;
+  return c.credibility > best.credibility;
 }
 
 /**
@@ -286,15 +369,15 @@ export class TmdbService {
   private static async searchCandidates(
     endpoint: 'movie' | 'tv' | 'multi',
     query: string,
-    opts: { filterYear?: string; knownYear?: string; imageHint?: string | null } = {}
-  ): Promise<Array<{ id: number; score: number; credibility: number; endpoint: 'movie' | 'tv' }>> {
+    opts: { filterYear?: string; knownYear?: string; imageHint?: string | null; knownOriginal?: string | null } = {}
+  ): Promise<Candidate[]> {
     // Los dos usos del año son distintos y confundirlos costaba matches equivocados:
     //  · filterYear → se manda a TMDB para acotar la búsqueda;
     //  · knownYear  → se usa SIEMPRE para puntuar, incluso en las consultas sin filtrar.
     // Cuando el año solo servía de filtro, las consultas sin él no penalizaban nada y una
     // coincidencia exacta de título de otra época ganaba: "Solo en casa" (Home Alone, 1990)
     // se resolvía como "Gambling House" (1944) con puntuación perfecta.
-    const { filterYear, knownYear, imageHint } = opts;
+    const { filterYear, knownYear, imageHint, knownOriginal } = opts;
     try {
       const res = await axios.get(`https://api.themoviedb.org/3/search/${endpoint}`, {
         params: {
@@ -312,7 +395,7 @@ export class TmdbService {
 
       return results.slice(0, 10).map((r: any) => ({
         id: r.id,
-        score: scoreResult(r, query, knownYear, imageHint),
+        ...scoreResult(r, query, knownYear, imageHint, knownOriginal),
         credibility: (r.vote_count || 0) * 1000 + (r.popularity || 0),
         // En /search/multi el tipo lo dice cada resultado; en el resto, el propio endpoint.
         endpoint: (endpoint === 'multi' ? (r.media_type === 'tv' ? 'tv' : 'movie') : endpoint) as 'movie' | 'tv'
@@ -323,24 +406,13 @@ export class TmdbService {
     }
   }
 
-  /** El mejor candidato de una consulta, con el desempate por respaldo de público. */
-  private static pickBest(
-    candidates: Array<{ id: number; score: number; credibility: number }>
-  ): { id: number; score: number } | null {
-    // Ante similitud MUY parecida (p. ej. anime original vs. remake homónimo, o una
-    // parodia con nombre casi idéntico al original) gana la ficha con respaldo real de
-    // público: la parodia "Vengadores Chiflados" tiene 1 voto frente a los 24.000 del
-    // título auténtico. Se compara con margen, no solo en el empate exacto.
-    const TIE_MARGIN = 0.06;
-
-    let best: { id: number; score: number; credibility: number } | null = null;
+  /** El mejor candidato de una consulta, con el desempate de `beatsCandidate`. */
+  private static pickBest(candidates: Candidate[], wanted: 'movie' | 'tv'): Candidate | null {
+    let best: Candidate | null = null;
     for (const c of candidates) {
-      const beatsBest = !best
-        || c.score > best.score + TIE_MARGIN
-        || (Math.abs(c.score - best.score) <= TIE_MARGIN && c.credibility > best.credibility);
-      if (beatsBest) best = c;
+      if (beatsCandidate(c, best, wanted)) best = c;
     }
-    return best ? { id: best.id, score: best.score } : null;
+    return best;
   }
 
   /**
@@ -448,48 +520,73 @@ export class TmdbService {
     const endpoint = type === 'tvseries' ? 'tv' : 'movie';
     const opposite = endpoint === 'tv' ? 'movie' : 'tv';
 
+    let bestCand: Candidate | null = null;
     let bestId = 0;
     let bestScore = 0;
+    let bestVerified = false;
+    let bestEndpoint: 'movie' | 'tv' = endpoint;
+
+    /**
+     * ¿Hay ya un match que cierre la búsqueda? Debe ser inequívoco, RESPALDADO y DEL TIPO PEDIDO.
+     *
+     * Una puntuación perfecta no basta: sin año, el homónimo de otra época también puntúa 1.00, y
+     * dar por cerrado ahí era lo que impedía llegar a probar el título original ("Home Alone"),
+     * que sí lo desempata. Un acierto en el catálogo contrario tampoco cierra nada: la serie
+     * "¿Solo en casa?" (2017) se llama en original "Home Alone" y calcaba las dos consultas,
+     * cerrando la búsqueda antes de mirar una sola película.
+     */
+    const settled = () => bestScore >= CONFIDENT_SCORE && bestVerified && bestEndpoint === endpoint;
     // Todos los candidatos vistos en la escalera, para el rescate por título alternativo:
     // el correcto puede estar hundido en la puntuación y no ser nunca "el mejor".
-    const pool = new Map<number, { id: number; score: number; credibility: number; endpoint: 'movie' | 'tv' }>();
-    const collect = (candidates: Array<{ id: number; score: number; credibility: number; endpoint: 'movie' | 'tv' }>) => {
+    // La clave lleva el endpoint porque los ids se repiten entre películas y series: con la
+    // clave numérica a secas, la serie "¿Solo en casa?" pisaba a la película 74586 en el pool
+    // y el rescate acababa devolviendo un id que luego se leía del catálogo equivocado.
+    const pool = new Map<string, Candidate>();
+    const collect = (candidates: Candidate[]) => {
       for (const c of candidates) {
-        const prev = pool.get(c.id);
-        if (!prev || c.score > prev.score) pool.set(c.id, c);
+        const key = `${c.endpoint}:${c.id}`;
+        const prev = pool.get(key);
+        if (!prev || c.score > prev.score) pool.set(key, c);
       }
-      const best = this.pickBest(candidates);
-      if (best && best.score > bestScore) {
+      const best = this.pickBest(candidates, endpoint);
+      if (best && beatsCandidate(best, bestCand, endpoint)) {
+        bestCand = best;
         bestId = best.id;
         bestScore = best.score;
+        bestVerified = best.verified;
+        bestEndpoint = best.endpoint;
       }
-      return bestScore >= CONFIDENT_SCORE;
+      return settled();
     };
 
     // Cada variante de la consulta recorre la misma escalera. Se para en cuanto el match
     // es inequívoco, así que para los títulos "normales" el coste no cambia: la primera
     // variante es el título limpio de siempre.
+    const knownOriginal = opts.originalTitle || null;
     const runVariant = async (variant: string): Promise<boolean> => {
-      if (year && collect(await this.searchCandidates(endpoint, variant, { filterYear: year, knownYear: year, imageHint }))) return true;
-      if (collect(await this.searchCandidates(endpoint, variant, { knownYear: year, imageHint }))) return true;
-      if (collect(await this.searchCandidates(opposite, variant, { knownYear: year, imageHint }))) return true;
-      if (collect(await this.searchCandidates('multi', variant, { knownYear: year, imageHint }))) return true;
+      const common = { knownYear: year, imageHint, knownOriginal };
+      if (year && collect(await this.searchCandidates(endpoint, variant, { ...common, filterYear: year }))) return true;
+      if (collect(await this.searchCandidates(endpoint, variant, common))) return true;
+      if (collect(await this.searchCandidates(opposite, variant, common))) return true;
+      if (collect(await this.searchCandidates('multi', variant, common))) return true;
       return false;
     };
 
     for (const variant of queryVariants(cleanTitle)) {
       if (await runVariant(variant)) break;
-      // Con un match ya aceptable no merece la pena seguir REESCRIBIENDO el mismo título.
-      if (bestScore >= MATCH_THRESHOLD) break;
+      // Con un match ya aceptable Y RESPALDADO no merece la pena seguir REESCRIBIENDO el mismo
+      // título. Sin respaldo sí compensa: las reescrituras son gratis comparadas con guardar
+      // la ficha de otra película.
+      if (settled()) break;
     }
 
     // El título original es una consulta DISTINTA, no una reescritura: se intenta siempre que el
     // match aún no sea INEQUÍVOCO —incluso si el título en español ya dio algo "aceptable" pero
     // dudoso—, porque ahí es donde se cuela el homónimo ("El fundador" 2016 vs. Bonifácio 2018).
-    if (useOriginal && bestScore < CONFIDENT_SCORE) {
+    if (useOriginal && !settled()) {
       for (const variant of queryVariants(cleanOriginal)) {
         if (await runVariant(variant)) break;
-        if (bestScore >= CONFIDENT_SCORE) break;
+        if (settled()) break;
       }
     }
 
@@ -506,24 +603,58 @@ export class TmdbService {
     // votos titulado "Rápidos y Furiosos: Hobbs y Reyes", mientras la película de verdad
     // lleva ese mismo nombre como título alternativo registrado. Un nombre oficial que
     // calca es mejor prueba que un parecido a medias.
-    if (bestScore < CONFIDENT_SCORE && pool.size > 0) {
-      const byPromise = Array.from(pool.values()).sort((a, b) =>
+    if (!settled() && pool.size > 0) {
+      const byScore = Array.from(pool.values()).sort((a, b) =>
         (b.score - a.score) || (b.credibility - a.credibility)
       );
+      // Los nombres regionales hunden en la puntuación justo a la ficha buena: buscando "Solo en
+      // casa", Home Alone vuelve rotulada "Mi pobre angelito" y puntúa 0, así que por parecido
+      // nunca entra en la revisión. Se añaden también los candidatos con más respaldo de público,
+      // que es donde aparece. Las fichas ya consultadas quedan cacheadas, así que el coste real
+      // de mirar unas cuantas más es casi nulo.
+      const byCredibility = Array.from(pool.values()).sort((a, b) => b.credibility - a.credibility);
+      const examined = new Map<number, Candidate>();
+      for (const c of byScore.slice(0, ALT_TITLE_MAX_CANDIDATES)) examined.set(c.id, c);
+      for (const c of byCredibility.slice(0, ALT_TITLE_MAX_CANDIDATES)) examined.set(c.id, c);
 
-      for (const cand of byPromise.slice(0, ALT_TITLE_MAX_CANDIDATES)) {
+      // Un título alternativo que calca NO basta por sí solo: los nombres se reciclan entre
+      // épocas y TMDB además arrastra fichas con títulos ajenos mal registrados. "Gambling
+      // House" (1950) tiene anotado "Solo en casa", el mismo título con el que España estrenó
+      // Home Alone (1990), y quedarse con el PRIMERO que calcaba confirmaba con total seguridad
+      // la película equivocada.
+      //
+      // Con el año se descarta al homónimo de otra época. Sin año no hay forma de descartarlo,
+      // pero sí de elegir bien entre los que comparten nombre: manda el respaldo del público.
+      // Entre las dos fichas llamadas "Solo en casa" hay 12.616 votos frente a 10.
+      let rescued: { cand: Candidate; score: number; verified: boolean } | null = null;
+      for (const cand of examined.values()) {
         const alt = await this.scoreAgainstKnownTitles(cand.id, cand.endpoint, cleanTitle);
         if (alt.score < ALT_TITLE_ACCEPT) continue;
 
-        // Un título alternativo que calca NO basta por sí solo: los nombres se reciclan
-        // entre épocas. "Gambling House" (1950) tiene registrado "Solo en casa", el mismo
-        // título con el que España estrenó Home Alone (1990), así que sin este control el
-        // rescate confirmaba con total seguridad la película equivocada.
-        if (year && alt.year && Math.abs(Number(alt.year) - Number(year)) > 5) continue;
+        // El año encaja ⇒ la ficha queda confirmada; se desvía ⇒ es la homónima y se descarta.
+        // Sin año por ninguna de las dos partes, el candidato sigue en juego pero sin respaldo.
+        let verified = cand.verified;
+        if (year && alt.year) {
+          if (Math.abs(Number(alt.year) - Number(year)) > 5) continue;
+          verified = true;
+        }
 
-        bestId = cand.id;
-        bestScore = alt.score;
-        break;
+        // Mismo orden de preferencias que `beatsCandidate` (tipo pedido → respaldo → público),
+        // aquí sobre candidatos que YA calcan un nombre oficial, así que la similitud no ordena.
+        const wanted = cand.endpoint === endpoint;
+        const rescuedWanted = rescued ? rescued.cand.endpoint === endpoint : false;
+        const better = !rescued
+          || (wanted !== rescuedWanted ? wanted
+            : verified !== rescued.verified ? verified
+            : cand.credibility > rescued.cand.credibility);
+        if (better) rescued = { cand, score: alt.score, verified };
+      }
+
+      if (rescued) {
+        bestId = rescued.cand.id;
+        bestScore = rescued.score;
+        bestVerified = rescued.verified;
+        bestEndpoint = rescued.cand.endpoint;
       }
     }
 
@@ -550,21 +681,24 @@ export class TmdbService {
             scrapedEndpoint === 'tv' ? 'tvseries' : 'movie'
           ).catch(() => null);
 
-          const score = details
-            ? scoreResult(details, cleanTitle, year)
-            : Math.min(similarity(cleanTitle, cardTitle), MATCH_THRESHOLD - 0.01);
+          const scored: ScoredResult = details
+            ? scoreResult(details, cleanTitle, year, imageHint, knownOriginal)
+            : { score: Math.min(similarity(cleanTitle, cardTitle), MATCH_THRESHOLD - 0.01), verified: false };
 
-          if (score > bestScore) {
+          if (scored.score > bestScore) {
             bestId = scrapedId;
-            bestScore = score;
+            bestScore = scored.score;
+            bestVerified = scored.verified;
+            bestEndpoint = scrapedEndpoint;
           }
         }
       } catch {}
     }
 
+    const matchedType: ContentType = bestEndpoint === 'tv' ? 'tvseries' : 'movie';
     const result: TmdbMatch = bestScore >= MATCH_THRESHOLD && bestId > 0
-      ? { id: bestId, matched: true, score: bestScore }
-      : { id: syntheticTmdbId(seed || `${type}:${cleanTitle}`), matched: false, score: bestScore };
+      ? { id: bestId, matched: true, score: bestScore, verified: bestVerified, type: matchedType }
+      : { id: syntheticTmdbId(seed || `${type}:${cleanTitle}`), matched: false, score: bestScore, verified: false, type };
 
     tmdbIdCache.set(cacheKey, result);
     return result;
@@ -756,7 +890,9 @@ export class TmdbService {
       // que confirma el candidato aunque el título en es-MX no se parezca al buscado.
       const imageHint = tmdbImagePath(item.poster) || tmdbImagePath(item.backdrop);
       const match: TmdbMatch = item.tmdb_id && item.tmdb_id > 0
-        ? { id: item.tmdb_id, matched: true, score: 1 }
+        // Ficha que ya venía resuelta (la trae la BD): se toma tal cual, no se vuelve a
+        // emparejar. Quien deba revisarla es `repair:catalog --verify`, que sí visita la fuente.
+        ? { id: item.tmdb_id, matched: true, score: 1, verified: true, type: item.type }
         : await this.resolveTmdb(item.title, item.type, year, item.id, {
             originalTitle: item.original_title,
             imageHint
@@ -764,7 +900,9 @@ export class TmdbService {
 
       // Sin match fiable en TMDB no pedimos detalles (traerían metadata de OTRO título):
       // nos quedamos con la del sitio de origen.
-      const tmdbData = match.matched ? await this.getTmdbDetails(match.id, item.type) : null;
+      // La ficha se pide por el tipo del MATCH, no por el del ítem: la escalera busca también
+      // en el catálogo contrario, y los ids se repiten entre películas y series (ver TmdbMatch).
+      const tmdbData = match.matched ? await this.getTmdbDetails(match.id, match.type) : null;
       if (!tmdbData) {
         return OverrideService.applyOverridesToItem(this.fromSourceMetadata(item, match.id));
       }
