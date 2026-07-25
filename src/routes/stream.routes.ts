@@ -364,7 +364,10 @@ function resolveMode(
   sendsReferer: boolean
 ): DirectMode {
   if (requested === 'proxy') return 'proxy';
-  if (requested === 'manifest') return kind === 'hls' ? 'manifest' : 'redirect';
+  // Pedir `manifest` sobre un mp4 no tiene sentido —no hay playlists que servir—, pero tampoco
+  // puede degradar a `redirect` a ciegas: en un host que ata por IP eso es un 302 que no
+  // reproduce. Se decide como si no lo hubiera pedido.
+  if (requested === 'manifest' && kind === 'hls') return 'manifest';
   if (requested === 'redirect') return bestMode(embedUrl, kind, { setsHeaders: true });
   return bestMode(embedUrl, kind, { sendsReferer });
 }
