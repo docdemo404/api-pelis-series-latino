@@ -116,11 +116,91 @@ function extractCardTitle($el: cheerio.Cheerio<any>): string {
   const fromMarkup = $el.find('.title_over span, h2, h3, .title').first().text().trim();
   if (fromMarkup) return fromMarkup;
 
-  const alt = $el.find('img').first().attr('alt') || '';
-  return alt.replace(/^Ver\s+/i, '').trim();
+  // El `alt` de la imagen viene SIN el año ("Solo en casa" en vez de "Solo en casa (1990)"),
+  // y sin año el emparejado con TMDB no puede distinguir a un homónimo de otra época: así se
+  // guardó "Gambling House" (1950) como si fuera Home Alone. Se recupera del texto de la tarjeta,
+  // que sí lo lleva ("Pelicúla Solo en casa (1990)").
+  const alt = ($el.find('img').first().attr('alt') || '').replace(/^Ver\s+/i, '').trim();
+  if (!alt) return '';
+
+  const yearInCard = $el.text().match(/\((\d{4})\)/);
+  return yearInCard && !/\(\d{4}\)/.test(alt) ? `${alt} (${yearInCard[1]})` : alt;
+}
+
+// Año final entre paréntesis, admitiendo el RANGO con el que las fuentes rotulan los packs de
+// series ("Bridgerton - Todas las Temporadas (2020 - 2026)"), donde vale el año de estreno.
+const TRAILING_YEAR_RANGE = /\((\d{4})(?:\s*[-–—/]\s*(?:\d{4}|presente|actualidad))?\)\s*$/i;
+
+/** Señales de una página de origen que el emparejado con TMDB necesita para no fallar. */
+export interface SourceSignals {
+  /** Título de la ficha, ya sin el `(AAAA)`. */
+  title: string;
+  /** Año de estreno, o '' si la página no lo publica. */
+  year: string;
+  /** Título original ("Home Alone"), independiente del nombre regional. */
+  originalTitle: string;
+  /** `og:image`: en TioPlus apunta a image.tmdb.org, y ese hash señala UNA ficha concreta. */
+  imageHint: string;
 }
 
 export class RealScraperService {
+  /**
+   * Lee de la PÁGINA de origen solo lo que el emparejado con TMDB necesita: título, año,
+   * título original y `og:image`.
+   *
+   * Existe aparte de `scrapeDetail` por el coste: aquel resuelve además todos los servidores
+   * embed de la ficha (una petición por servidor, más la inspección de cada uno), así que pasar
+   * el catálogo entero por él no es viable. Esto es UNA petición y nada más.
+   *
+   * Los listados solo publican el título y, cuando el markup falla, ni siquiera el año; la ficha
+   * de detalle sí trae las cuatro señales siempre. Sin ellas el matcher empareja a ciegas de
+   * época y un homónimo gana ("Solo en casa" → "Gambling House", 1950).
+   *
+   * Devuelve `null` si la página no responde o no da ni título: no tener señales nunca puede
+   * ser motivo para tocar una ficha.
+   */
+  static async fetchSourceSignals(url: string): Promise<SourceSignals | null> {
+    if (!url || !/^https?:\/\//i.test(url)) return null;
+
+    try {
+      const res = await httpGet(url);
+      const html = typeof res.data === 'string' ? res.data : '';
+      if (!html) return null;
+
+      const $ = cheerio.load(html);
+      const isFuegocine = /fuegocine/i.test(url);
+
+      const rawTitle = isFuegocine
+        ? $('h1.post-title, h1, .entry-title').first().text().trim()
+        : ($('h1.slugh1').first().text().trim() || $('.single-title, .title_over h1, h1').first().text().trim());
+      if (!rawTitle || /404|no encontrada/i.test(rawTitle)) return null;
+
+      // El año viaja en el título ("… (1990)"); TioPlus lo repite además en un campo aparte
+      // cuando el h1 no lo trae, y FuegoCine lo lleva embebido en el slug (`…-2016-html`).
+      // Los packs de series lo rotulan como RANGO ("Bridgerton … (2020 - 2026)"): vale el
+      // primero, que es el del estreno, y es el que TMDB tiene como first_air_date.
+      const fromTitle = rawTitle.match(TRAILING_YEAR_RANGE);
+      let year = fromTitle ? fromTitle[1] : '';
+      if (!year) {
+        const label = $('span:contains("Año:")').first().text().match(/A[ñn]o:\s*([12]\d{3})/);
+        year = label ? label[1] : (yearFromSlug(url.split('/').filter(Boolean).pop()) || '');
+      }
+
+      const originalTitle = $('h2')
+        .filter((_, el) => $(el).parent().find('b').text().includes('Titulo Original'))
+        .first().text().trim();
+
+      return {
+        title: rawTitle.replace(TRAILING_YEAR_RANGE, '').trim(),
+        year,
+        originalTitle,
+        imageHint: $('meta[property="og:image"]').attr('content') || ''
+      };
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Scrapea el homepage completo de TioPlus (slider + secciones)
    */

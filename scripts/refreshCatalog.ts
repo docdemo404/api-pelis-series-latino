@@ -318,6 +318,34 @@ function parseStreamsFlag(argv: string[]): number {
   return Number.isFinite(value) && value > 0 ? value : 300;
 }
 
+/**
+ * Completa un título recolectado con las señales de SU PÁGINA antes de emparejarlo con TMDB.
+ *
+ * Los listados dan el título y poco más: cuando el markup de la tarjeta falla, el año se pierde
+ * (el `alt` de la imagen no lo lleva) y el emparejado se hace a ciegas de época, que es como
+ * "Solo en casa" acabó guardada como "Gambling House" (1950). La ficha de detalle sí publica
+ * siempre el año, el título original y un `og:image` que apunta a una ficha concreta de TMDB.
+ *
+ * Cuesta una petición ligera por título (`fetchSourceSignals` no resuelve servidores). Si la
+ * página no responde se sigue con lo que dio el listado: ninguna ficha se pierde por esto.
+ */
+async function withSourceSignals(item: MediaItem, onHit: () => void): Promise<MediaItem> {
+  const url: string = (item as any)._tioplus_url || (item as any)._source_url || '';
+  if (!url) return item;
+
+  const signals = await RealScraperService.fetchSourceSignals(url).catch(() => null);
+  if (!signals) return item;
+  onHit();
+
+  return {
+    ...item,
+    // Nunca se pisa un dato bueno del listado con uno vacío del detalle.
+    release_date: signals.year || item.release_date,
+    original_title: signals.originalTitle || item.original_title,
+    poster: signals.imageHint || item.poster
+  };
+}
+
 /** `--verify` / `--verify=N`: cuántas fichas sin comprobar se verifican al final del crawl. */
 function parseVerifyFlag(argv: string[]): number {
   const flag = argv.find(a => a === '--verify' || a.startsWith('--verify='));
@@ -364,11 +392,12 @@ async function main() {
   const CONCURRENCY = 10;
   const byTmdb = new Map<number, MediaItem>();
   const fallbacks: MediaItem[] = [];
+  let withSignals = 0;
   for (let i = 0; i < items.length; i += CONCURRENCY) {
     const chunk = items.slice(i, i + CONCURRENCY);
     const enriched = await Promise.all(chunk.map(async (item) => {
       try {
-        return await TmdbService.enrichMediaItem(item, { skipSeasons: true });
+        return await TmdbService.enrichMediaItem(await withSourceSignals(item, () => withSignals++), { skipSeasons: true });
       } catch {
         return TmdbService.fromSourceMetadata(item);
       }
@@ -380,7 +409,7 @@ async function main() {
       }
       if (!byTmdb.has(item.tmdb_id)) byTmdb.set(item.tmdb_id, item);
     }
-    if (i > 0 && i % 500 === 0) console.log(`   ...enriquecidos ${i}/${items.length}`);
+    if (i > 0 && i % 500 === 0) console.log(`   ...enriquecidos ${i}/${items.length} (${withSignals} con señales de su página)`);
   }
 
   // Índice de títulos ya cubiertos por TMDB, para no duplicarlos con una ficha de fallback.
