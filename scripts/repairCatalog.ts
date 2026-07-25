@@ -18,6 +18,10 @@
  *   npm run repair:catalog -- --reindex --apply   # reconstruye title_normalized
  *   npm run repair:catalog -- --aliases           # informa de títulos regionales que faltan
  *   npm run repair:catalog -- --aliases --apply   # añade los nombres regionales de TMDB a aliases
+ *   npm run repair:catalog -- --verify            # repasa TODAS las fichas contra su página de
+ *                                                 # origen (og:image + año + título original)
+ *   npm run repair:catalog -- --verify --apply    # …y corrige/funde las que estén mal
+ *   npm run repair:catalog -- --verify --restart  # ignora el punto de guardado y empieza de cero
  *
  * Por qué existe: el catálogo se pobló con un matcher que, ante títulos con artículo
  * inicial ("Los Vengadores…") o coletillas de pack ("Todas las temporadas"), obtenía cero
@@ -36,8 +40,9 @@
  * fiable. Si la re-resolución devuelve lo mismo, o no encuentra nada, la fila se deja intacta.
  */
 import 'dotenv/config';
-import { TmdbService } from '../src/services/tmdbService';
-import { RealScraperService } from '../src/services/realScraperService';
+import * as fs from 'fs';
+import { TmdbService, tmdbImagePath } from '../src/services/tmdbService';
+import { RealScraperService, SourceSignals } from '../src/services/realScraperService';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
 import { canonicalTitle, normalizeTitle, searchIndexKey, dedupeTitles, sourceTitleFromSlug } from '../src/utils/text';
 import { MediaItem, ContentType } from '../src/types';
@@ -124,27 +129,24 @@ function similarity(a: string, b: string): number {
  */
 const sourceTitleFromId = sourceTitleFromSlug;
 
+/** La url de origen de una fila, mire donde mire (`source_url` o el primero de `source_urls`). */
+function sourceUrlOf(row: any): string {
+  return row.source_url || (Array.isArray(row.source_urls) ? row.source_urls[0] : '') || '';
+}
+
 /**
  * Vuelve a la PÁGINA de origen a por las señales que el matcher necesita para acertar y que la
- * fila guardada ya no tiene fiables: el título original real ("The Founder") y el `og:image` de
- * TMDB. Son independientes del match equivocado (el póster guardado es el de la ficha ajena),
- * así que sirven para RE-FIJAR la ficha correcta. Devuelve null si no hay url o falla la visita.
+ * fila guardada ya no tiene fiables: el año, el título original real ("The Founder") y el
+ * `og:image` de TMDB. Son independientes del match equivocado (el póster guardado es el de la
+ * ficha ajena), así que sirven para RE-FIJAR la ficha correcta.
+ *
+ * Devuelve null si no hay url o falla la visita.
  */
-async function refetchSourceSignals(row: any): Promise<{ originalTitle?: string; imageHint?: string } | null> {
-  const url: string = row.source_url || (Array.isArray(row.source_urls) ? row.source_urls[0] : '') || '';
-  if (!url || !/^https?:\/\//i.test(url)) return null;
-  try {
-    const detail = /fuegocine/i.test(url)
-      ? await RealScraperService.scrapeFuegocineDetail(url)
-      : await RealScraperService.scrapeDetail(url);
-    if (!detail) return null;
-    return {
-      originalTitle: detail.original_title || undefined,
-      imageHint: detail.poster || detail.backdrop || undefined
-    };
-  } catch {
-    return null;
-  }
+async function refetchSourceSignals(row: any): Promise<SourceSignals | null> {
+  // `fetchSourceSignals` hace UNA petición; el `scrapeDetail` que se usaba antes resolvía además
+  // todos los servidores embed de la ficha para quedarse con dos campos, y por eso repasar el
+  // catálogo entero era impensable.
+  return RealScraperService.fetchSourceSignals(sourceUrlOf(row));
 }
 
 /**
@@ -189,13 +191,16 @@ function isSameTitleStrict(sourceTitle: string, twin: any, sourceYear?: string):
   });
 }
 
-async function fetchAllRows(): Promise<any[]> {
+async function fetchAllRows(extraColumns: string[] = []): Promise<any[]> {
   const rows: any[] = [];
   const PAGE = 1000;
+  const columns = ['id', 'tmdb_id', 'type', 'title', 'original_title', 'aliases', 'release_date', 'source_url', 'poster']
+    .concat(extraColumns)
+    .join(',');
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await db
       .from('media_items')
-      .select('id,tmdb_id,type,title,original_title,aliases,release_date,source_url,poster')
+      .select(columns)
       .range(from, from + PAGE - 1);
     if (error) throw new Error(error.message);
     if (!data || data.length === 0) break;
@@ -509,6 +514,276 @@ async function fuseSyntheticDuplicates(apply: boolean, limitArg?: number): Promi
 }
 
 /**
+ * VERIFICACIÓN contra la página de origen (`--verify`).
+ *
+ * Los otros modos juzgan una ficha comparando TÍTULOS, y ahí se acaba su alcance: la mayoría de
+ * las filas que no se parecen a su slug son retítulos regionales CORRECTOS ("infiltrados-en-clase"
+ * → 21 Jump Street, "corrupcion-en-miami" → Miami Vice), mientras que los errores de verdad
+ * pueden llevar el título calcado —una "Sin salida" de 2024 en el sitio de una de 1993—. Por
+ * parecido de títulos, ni se distinguen ni se detectan.
+ *
+ * Este modo no compara títulos: vuelve a la página de la que salió cada ficha y usa lo que ella
+ * publica, en tres etapas de coste creciente.
+ *
+ *   1. El `og:image` de TioPlus apunta a `image.tmdb.org/…/<hash>.jpg`, y ese hash identifica UNA
+ *      ficha concreta. Si coincide con el póster o el fondo de la ficha guardada, es correcta.
+ *   2. Si no coincide (la página pudo poner el póster de otro idioma), se re-resuelve con las
+ *      señales completas de la página —título, año, título original e imagen—. Si sale el mismo
+ *      tmdb_id, correcta.
+ *   3. Si sale otro y viene RESPALDADO (`match.verified`), la ficha estaba mal. Se corrige; si el
+ *      tmdb_id correcto ya lo ocupa otra fila, esta es un duplicado y se funde en aquella.
+ *
+ * Sin respaldo NO se escribe nada: se informa y se pasa. Una página caída tampoco es motivo para
+ * tocar una ficha. Es una pasada larga (una petición por ficha), así que guarda el avance y se
+ * puede reanudar.
+ */
+/**
+ * El punto de guardado va SEPARADO por modo: si el dry-run marcase las fichas como repasadas,
+ * la pasada real con --apply se las saltaría enteras y no corregiría nada.
+ */
+const verifyCheckpointFile = (apply: boolean) =>
+  apply ? 'repair_verify_progress.json' : 'repair_verify_progress.dry.json';
+
+/** Ids ya repasados en ejecuciones anteriores, para reanudar donde se dejó. */
+function loadCheckpoint(file: string, restart: boolean): Set<string> {
+  if (restart) return new Set();
+  try {
+    return new Set(JSON.parse(fs.readFileSync(file, 'utf8')) as string[]);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveCheckpoint(file: string, done: Set<string>): void {
+  try {
+    fs.writeFileSync(file, JSON.stringify(Array.from(done)));
+  } catch (err: any) {
+    console.warn(`   ⚠ no se pudo guardar el avance: ${err.message}`);
+  }
+}
+
+async function verifyAgainstSource(apply: boolean, limitArg?: number, restart = false): Promise<void> {
+  console.log(`🔬 Verificando fichas contra su página de origen${apply ? '' : ' (dry-run: no se escribe nada)'}...`);
+
+  const withMultiSource = await hasColumn('source_urls');
+  const withMetadataSource = await hasColumn('metadata_source');
+
+  const checkpoint = verifyCheckpointFile(apply);
+  const done = loadCheckpoint(checkpoint, restart);
+  if (done.size > 0) console.log(`   ↻ reanudando: ${done.size} fichas ya repasadas (usa --restart para empezar de cero)`);
+
+  const rows = (await fetchAllRows(withMultiSource ? ['source_urls'] : []))
+    .filter(row => sourceUrlOf(row) && !done.has(row.id));
+  const targets = Number.isFinite(limitArg) && (limitArg as number) > 0 ? rows.slice(0, limitArg) : rows;
+  console.log(`   ${targets.length} fichas por repasar`);
+
+  let okImage = 0;
+  let okRematch = 0;
+  let fixed = 0;
+  let fused = 0;
+  let doubtful = 0;
+  let noSignals = 0;
+  let unresolved = 0;
+
+  const CONCURRENCY = 6;
+  for (let i = 0; i < targets.length; i += CONCURRENCY) {
+    const chunk = targets.slice(i, i + CONCURRENCY);
+
+    const results = await Promise.all(chunk.map(async row => {
+      const type: ContentType = row.type === 'tvseries' ? 'tvseries' : 'movie';
+      const signals = await refetchSourceSignals(row);
+      if (!signals || !signals.title) return { row, type, signals: null, confirmedByImage: false, match: null };
+
+      // Etapa 1: el hash del og:image contra las imágenes de la ficha guardada.
+      const sourceImage = tmdbImagePath(signals.imageHint);
+      if (sourceImage && row.tmdb_id > 0) {
+        const stored = await TmdbService.getTmdbDetails(row.tmdb_id, type).catch(() => null);
+        const confirmed = !!stored && (
+          sourceImage === tmdbImagePath(stored.poster_path) ||
+          sourceImage === tmdbImagePath(stored.backdrop_path)
+        );
+        if (confirmed) return { row, type, signals, confirmedByImage: true, match: null };
+      }
+
+      // Etapa 2: re-resolver con TODO lo que publica la página.
+      const match = await TmdbService.resolveTmdb(signals.title, type, signals.year || undefined, row.id, {
+        originalTitle: signals.originalTitle || null,
+        imageHint: signals.imageHint || null
+      }).catch(() => null);
+
+      return { row, type, signals, confirmedByImage: false, match };
+    }));
+
+    for (const { row, type, signals, confirmedByImage, match } of results) {
+      done.add(row.id);
+
+      if (!signals) {
+        noSignals++;
+        continue;
+      }
+      if (confirmedByImage) {
+        okImage++;
+        continue;
+      }
+      if (!match || !match.matched) {
+        unresolved++;
+        console.log(`   ? ${row.id}\n     "${row.title}" · la fuente dice "${signals.title}" (${signals.year || 'sin año'}) y no hay match fiable: se deja igual`);
+        continue;
+      }
+      if (match.id === row.tmdb_id) {
+        okRematch++;
+        continue;
+      }
+
+      // Un id distinto SIN respaldo no autoriza a escribir: podría ser el matcher acertando de
+      // menos, y sustituir una ficha buena por otra es exactamente el daño que se quiere evitar.
+      if (!match.verified) {
+        doubtful++;
+        console.log(`   ~ ${row.id}\n     "${row.title}" (tmdb ${row.tmdb_id}) · la fuente sugiere tmdb ${match.id} pero sin respaldo (score ${match.score.toFixed(2)}): solo se informa`);
+        continue;
+      }
+
+      const { data: clash } = await db
+        .from('media_items')
+        .select(withMultiSource
+          ? 'id,type,title,original_title,aliases,source_url,source_urls'
+          : 'id,type,title,original_title,aliases,source_url')
+        .eq('tmdb_id', match.id)
+        .neq('id', row.id)
+        .limit(1);
+
+      const twin: any = clash && clash.length > 0 ? clash[0] : null;
+
+      // Mismo número, otro catálogo: NO es un duplicado. TMDB numera películas y series por
+      // separado y los ids se repiten, pero la columna tmdb_id es UNIQUE para las dos, así que
+      // la serie "Snowdrop" (tv 108291) choca con la película "Road Dogz" (movie 108291) sin
+      // tener nada que ver. Fundir ahí mezclaría dos títulos ajenos: se informa y se deja.
+      if (twin && (twin.type === 'tvseries' ? 'tvseries' : 'movie') !== match.type) {
+        doubtful++;
+        console.log(
+          `   ! ${row.id}\n     "${row.title}" es tmdb ${match.id} (${match.type}), pero ese número ya lo ocupa ${twin.id} = "${twin.title}" (${twin.type}).` +
+          `\n       Son fichas distintas con el mismo id en catálogos distintos: no se toca ninguna.`
+        );
+        continue;
+      }
+
+      // El tmdb_id es UNIQUE: si la ficha correcta ya está en el catálogo, esta fila es un
+      // DUPLICADO. Lo único que aporta son su página de origen (sus servidores, a menudo de otra
+      // fuente) y su nombre: se vuelcan en la canónica ANTES de borrarla o se perderían enlaces.
+      if (twin) {
+        const currentUrls: string[] = twin.source_urls || [];
+        const mergedUrls = Array.from(
+          new Set([...currentUrls, twin.source_url, ...(row.source_urls || []), row.source_url].filter(Boolean) as string[])
+        );
+        const currentAliases: string[] = twin.aliases || [];
+        const mergedAliases = dedupeTitles([...currentAliases, ...(row.aliases || []), row.title, signals.title]);
+
+        const patch: Record<string, unknown> = {};
+        if (withMultiSource && mergedUrls.length > currentUrls.length) patch.source_urls = mergedUrls;
+        if (mergedAliases.length > currentAliases.length) {
+          patch.aliases = mergedAliases;
+          patch.title_normalized = searchIndexKey(twin.title, twin.original_title, mergedAliases);
+        }
+
+        console.log(
+          `   ⇄ ${row.id}\n     "${row.title}" (tmdb ${row.tmdb_id}) era en realidad "${signals.title}" = tmdb ${match.id}, que ya es ${twin.id} = "${twin.title}"` +
+          `\n       se funde ahí (fuentes ${currentUrls.length}→${mergedUrls.length}, alias ${currentAliases.length}→${mergedAliases.length}) y se elimina el duplicado`
+        );
+
+        if (apply) {
+          if (Object.keys(patch).length > 0) {
+            const { error: mergeErr } = await db.from('media_items').update(patch).eq('id', twin.id);
+            if (mergeErr) {
+              console.warn(`     ⚠ no se pudo enriquecer ${twin.id}: ${mergeErr.message} (no se borra el duplicado)`);
+              continue;
+            }
+          }
+          const { error: delErr } = await db.from('media_items').delete().eq('id', row.id);
+          if (delErr) {
+            console.warn(`     ⚠ no se pudo borrar ${row.id}: ${delErr.message}`);
+            continue;
+          }
+        }
+        fused++;
+        continue;
+      }
+
+      // Ficha nueva completa, partiendo del título REAL que publica la fuente.
+      const base: MediaItem = {
+        id: row.id,
+        tmdb_id: match.id,
+        imdb_id: null,
+        type,
+        title: signals.title,
+        original_title: signals.originalTitle || signals.title,
+        aliases: dedupeTitles([signals.title, row.title]),
+        overview: '',
+        rating: 0,
+        release_date: signals.year || '',
+        genres: [],
+        subcategories: [],
+        poster: null,
+        backdrop: null,
+        logo: null,
+        trailer: null,
+        cast: [],
+        dubbing_cast: []
+      };
+
+      const enriched = await TmdbService.enrichMediaItem(base, { skipSeasons: true });
+      console.log(`   ✓ ${row.id}\n     "${row.title}" → "${enriched.title}" (tmdb ${row.tmdb_id} → ${enriched.tmdb_id}, la fuente dice "${signals.title}" ${signals.year || 's/a'})`);
+
+      if (!apply) {
+        fixed++;
+        continue;
+      }
+
+      const update: Record<string, unknown> = {
+        tmdb_id: enriched.tmdb_id,
+        type: enriched.type,
+        title: enriched.title,
+        original_title: enriched.original_title || enriched.title,
+        title_normalized: searchIndexKey(enriched.title, enriched.original_title, enriched.aliases),
+        aliases: enriched.aliases || [],
+        tagline: enriched.tagline || '',
+        overview: enriched.overview || '',
+        rating: enriched.rating || 0,
+        content_rating: enriched.content_rating || null,
+        release_date: enriched.release_date || '',
+        genres: enriched.genres || [],
+        poster: enriched.poster,
+        backdrop: enriched.backdrop,
+        logo: enriched.logo,
+        trailer: enriched.trailer,
+        cast_data: (enriched.cast_details && enriched.cast_details.length ? enriched.cast_details : enriched.cast) || [],
+        total_seasons: enriched.total_seasons || 0,
+        total_episodes: enriched.total_episodes || 0,
+        updated_at: new Date().toISOString()
+      };
+      if (withMetadataSource) update.metadata_source = enriched.metadata_source || 'tmdb';
+
+      const { error } = await db.from('media_items').update(update).eq('id', row.id);
+      if (error) console.warn(`     ⚠ no se pudo guardar: ${error.message}`);
+      else fixed++;
+    }
+
+    saveCheckpoint(checkpoint, done);
+    const seen = Math.min(i + CONCURRENCY, targets.length);
+    if (seen % 300 === 0 || seen === targets.length) {
+      console.log(`   …${seen}/${targets.length} · ${okImage + okRematch} correctas · ${fixed + fused} con problema · ${doubtful} dudosas`);
+    }
+  }
+
+  console.log(
+    `\n${apply ? '✅ Verificación aplicada' : '📋 Dry-run'}: ` +
+    `${okImage} confirmadas por imagen, ${okRematch} confirmadas al re-resolver, ` +
+    `${fixed} ${apply ? 'corregidas' : 'a corregir'}, ${fused} duplicados ${apply ? 'fundidos' : 'a fundir'}, ` +
+    `${doubtful} dudosas (solo informadas), ${unresolved} sin match fiable, ${noSignals} sin señales en su página`
+  );
+  if (!apply && (fixed > 0 || fused > 0)) console.log('   Ejecuta de nuevo con --verify --apply para escribir los cambios.');
+}
+
+/**
  * LIMPIEZA de fusiones erróneas (`--unfuse`).
  *
  * Al fundir duplicados, la ficha superviviente absorbe el nombre y la URL de origen de la
@@ -717,6 +992,15 @@ async function main() {
     return;
   }
 
+  if (process.argv.includes('--verify')) {
+    await verifyAgainstSource(
+      apply,
+      Number.isFinite(limitArg) ? limitArg : undefined,
+      process.argv.includes('--restart')
+    );
+    return;
+  }
+
   if (process.argv.includes('--aliases')) {
     await backfillRegionalAliases(apply, Number.isFinite(limitArg) ? limitArg : undefined);
     return;
@@ -780,8 +1064,12 @@ async function main() {
         // toca en las filas difíciles, no en las que el slug ya resuelve con confianza.
         if (refetch && (!match.matched || match.score < 0.9)) {
           const signals = await refetchSourceSignals(row);
-          if (signals && (signals.originalTitle || signals.imageHint)) {
-            const retry = await TmdbService.resolveTmdb(sourceTitle, type, year, row.id, signals);
+          if (signals && (signals.originalTitle || signals.imageHint || signals.year)) {
+            // El año de la PÁGINA manda sobre el del slug: el slug no lo trae casi nunca y,
+            // cuando lo trae, puede ser parte del título ("cherry-2000", "madrid-1987").
+            const retry = await TmdbService.resolveTmdb(
+              signals.title || sourceTitle, type, signals.year || year, row.id, signals
+            );
             if (retry.matched && retry.score >= match.score) match = retry;
           }
         }

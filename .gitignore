@@ -23,6 +23,9 @@ venv/
 *.swp
 *.swo
 
+# Punto de guardado de `repair:catalog --verify` (permite reanudar la pasada)
+repair_verify_progress*.json
+
 # Editors
 .vscode/
 .idea/
