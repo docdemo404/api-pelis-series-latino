@@ -23,11 +23,18 @@ interface HostStat {
   servidores: number;
   conDirect: number;
   /**
-   * Embeds para pasarle a la sonda. Se guardan SOLO los que ya tienen `direct_stream`: un embed
-   * cualquiera del host suele estar muerto y la sonda diría "sin extracción", que no responde a
-   * lo que se pregunta aquí (si el host puede salir del proxy, no si ese enlace sigue vivo).
+   * Embeds para pasarle a la sonda, de los que YA extraen vídeo: para preguntarle si ese host
+   * puede salir del proxy. Un embed cualquiera del host suele estar muerto y la sonda diría "sin
+   * extracción", que no responde a esa pregunta.
    */
   ejemplos: string[];
+  /**
+   * Embeds de hosts de los que NO se saca vídeo NUNCA. Responden a la otra pregunta, que es la
+   * cara cara del catálogo: `waaw.to`, `vudeo.co` y compañía suman miles de servidores que solo
+   * reproducen por iframe ajeno. Para escribirles un extractor hace falta una muestra viva, y sin
+   * esto no había forma de sacar ninguna: solo se guardaban ejemplos de los que ya funcionaban.
+   */
+  sinVideo: string[];
   modos: Set<string>;
 }
 
@@ -68,11 +75,13 @@ async function main() {
         } catch {
           continue;
         }
-        const stat = stats.get(host) || { servidores: 0, conDirect: 0, ejemplos: [], modos: new Set<string>() };
+        const stat = stats.get(host) || { servidores: 0, conDirect: 0, ejemplos: [], sinVideo: [], modos: new Set<string>() };
         stat.servidores++;
         if (servidor.direct_stream) {
           stat.conDirect++;
           if (stat.ejemplos.length < MAX_EJEMPLOS && !stat.ejemplos.includes(embed)) stat.ejemplos.push(embed);
+        } else if (stat.sinVideo.length < MAX_EJEMPLOS && !stat.sinVideo.includes(embed)) {
+          stat.sinVideo.push(embed);
         }
         if (servidor.direct_mode) stat.modos.add(servidor.direct_mode);
         stats.set(host, stat);
@@ -108,6 +117,18 @@ async function main() {
     console.log('\nEmbeds de los que SÍ se saca vídeo pero no casan con ninguna entrada.');
     console.log('Pásaselos a probe_hosts.ts para saber si pueden salir del proxy:\n');
     console.log(`  npx ts-node scripts/dev/probe_hosts.ts --remote=<api> \\\n    ${huerfanos.slice(0, 8).map(u => `"${u}"`).join(' \\\n    ')}`);
+  }
+
+  // La otra mitad del problema, y la más grande: hosts de los que no se saca vídeo NUNCA. No es
+  // que vayan lentos, es que no participan de nada de esto — reproducen por iframe ajeno y ya.
+  const sinExtractor = filas.filter(([, s]) => s.conDirect === 0 && s.sinVideo.length);
+  if (sinExtractor.length) {
+    const afectados = sinExtractor.reduce((acc, [, s]) => acc + s.servidores, 0);
+    console.log(`\nHosts SIN EXTRACTOR: ${afectados} servidores (${total ? (afectados / total * 100).toFixed(1) : '0'}%) que solo`);
+    console.log('reproducen por iframe. Para escribirles un extractor, una muestra viva de cada uno:\n');
+    for (const [host, stat] of sinExtractor.slice(0, 10)) {
+      console.log(`  ${host.padEnd(24)} ${String(stat.servidores).padStart(5)} servidores   ${stat.sinVideo[0]}`);
+    }
   }
 }
 

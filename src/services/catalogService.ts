@@ -31,7 +31,13 @@ const STREAMS_FRESH_MS = 24 * 60 * 60 * 1000;
 //   gastan proxy. Lo único que sigue sin arreglarse solo es `headers`, que es lo que copia un
 //   cliente nativo para pedir `?mode=redirect`. Si algún día ese campo deja de importar, este
 //   corte se puede retirar y se ahorra un re-escrapeo por título.
-const DIRECT_EXTRACTION_SINCE = Date.parse('2026-07-25T07:32:00Z');
+//
+// 2026-07-25T21:42 → se arregló la comprobación de salud (src/scrapers/embedHealth.ts), que
+//   marcaba caído a emturbovid entero: 6.265 servidores, el segundo host más grande y el más
+//   rápido que se ha medido (holgura 6x en frío, 13x repetido). El `status` es un campo GUARDADO
+//   y `streamSorter` antepone lo que está `online`, así que sin volver a comprobarlos seguirían
+//   enterrados con el veredicto viejo. Esto es lo que los saca a flote.
+const DIRECT_EXTRACTION_SINCE = Date.parse('2026-07-25T21:42:00Z');
 
 /**
  * Clave canónica de título para AGRUPAR variantes del mismo contenido entre fuentes

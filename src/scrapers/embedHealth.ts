@@ -7,10 +7,21 @@ import { USER_AGENT } from '../utils/httpClient';
  * "¿este embed sigue vivo?" del scraping de catálogo en sí.
  */
 
-const SOFT_ERROR_PATTERNS = [
+/**
+ * Frases que un host ENSEÑA al visitante cuando el vídeo ya no está. Se buscan en el texto
+ * visible, con el `<script>` fuera.
+ *
+ * Sacar el script no es una precaución teórica: emturbovid —6.265 servidores, el segundo host más
+ * grande del catálogo— salía marcado como caído entero porque su reproductor lleva
+ * `throw new Error("Subtitle file not found")` en el JS, y `/file not found/i` casaba ahí dentro.
+ * Los vídeos reproducían perfectamente (medido: holgura 6x en frío, 13x repetido), pero el orden
+ * de servidores antepone lo que está `online`, así que el host más rápido quedaba enterrado.
+ *
+ * Una cadena de error DEFINIDA en código no es un error MOSTRADO. Esa es la distinción que faltaba.
+ */
+const SOFT_ERROR_PROSE = [
   /file is no longer available/i,
   /expired or has been deleted/i,
-  /player_blank\.jpg/i,
   /file not found/i,
   /file deleted/i,
   /video (has been|was) (deleted|removed)/i,
@@ -18,8 +29,6 @@ const SOFT_ERROR_PATTERNS = [
   /content removed/i,
   /video no disponible/i,
   /archivo (eliminado|no encontrado)/i,
-  /file_deleted/i,
-  /video_not_found/i,
   /404 not found/i,
   /this video (is|was) deleted/i,
   /media not found/i,
@@ -31,6 +40,47 @@ const SOFT_ERROR_PATTERNS = [
   /file you are looking for/i,
   /too many requests/i
 ];
+
+/**
+ * Marcadores que SÍ viven en el código o en los nombres de recurso: son la forma en que algunos
+ * hosts señalan la baja sin escribir una frase. Se buscan en el HTML entero, script incluido,
+ * porque es justo ahí donde aparecen.
+ */
+const SOFT_ERROR_MARKERS = [
+  /player_blank\.jpg/i,
+  /file_deleted/i,
+  /video_not_found/i,
+];
+
+/** Quita `<script>`, `<style>` y comentarios: deja lo que el visitante llegaría a leer. */
+function visibleText(html: string): string {
+  return html
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ');
+}
+
+/** ¿El cuerpo del embed dice que el vídeo ya no está? */
+function hasSoftError(html: string): boolean {
+  if (SOFT_ERROR_MARKERS.some(p => p.test(html))) return true;
+  const texto = visibleText(html);
+  return SOFT_ERROR_PROSE.some(p => p.test(texto));
+}
+
+/**
+ * ¿Esta página ES el reproductor, o solo un trozo de paso que redirige a otro sitio?
+ *
+ * Importa para decidir si hacer caso a un `window.location` que aparezca en su JavaScript. Un
+ * stub —el caso para el que se escribió aquel seguimiento, listeamed.net— no tiene reproductor:
+ * su única función es mandarte a otra parte. Una página que trae el vídeo empaquetado dentro no
+ * va a redirigir a nadie, y cualquier `location` que lleve estará en código condicional (avisos
+ * de anti-sandbox, anti-devtools) que no se ejecuta en una reproducción normal.
+ */
+function isPlayerPage(html: string): boolean {
+  return /eval\(function\(p,a,c,k,e,d\)/i.test(html)   // P.A.C.K.E.R.: el vídeo va dentro
+    || /["']?sources["']?\s*:\s*\[/i.test(html)         // jwplayer y clones
+    || /["']?file["']?\s*:\s*["'][^"']+\.(?:m3u8|mp4)/i.test(html);
+}
 
 export interface EmbedInspection {
   status: 'online' | 'offline';
@@ -106,15 +156,19 @@ export async function inspectEmbed(
     body = html;
 
     // Detectar mensajes de error en capa de aplicación (Soft Errors)
-    for (const pattern of SOFT_ERROR_PATTERNS) {
-      if (pattern.test(html)) {
-        return { status: 'offline', html: body };
-      }
-    }
+    if (hasSoftError(html)) return { status: 'offline', html: body };
 
-    // Detectar redirecciones JS de window.location / document.location (ej. listeamed.net)
-    const jsLocationMatch = html.match(/window\.location\.(?:replace|href)\s*=\s*['"]([^'"]+)['"]/i) ||
-                            html.match(/document\.location\.(?:replace|href)\s*=\s*['"]([^'"]+)['"]/i);
+    // Detectar redirecciones JS de window.location / document.location (ej. listeamed.net).
+    //
+    // Solo si la página es un TROZO DE PASO y no un reproductor: ver `isPlayerPage`. emturbovid
+    // sirve el vídeo y además lleva una comprobación anti-sandbox con un
+    // `window.location.href='/sandbox'` metido dentro de una función que solo corre si el iframe
+    // trae el atributo `sandbox`. Nunca se ejecuta para un espectador, `/sandbox` responde 404, y
+    // seguirla a ciegas marcaba como caídos sus 6.265 servidores.
+    const jsLocationMatch = isPlayerPage(html) ? null : (
+      html.match(/window\.location\.(?:replace|href)\s*=\s*['"]([^'"]+)['"]/i) ||
+      html.match(/document\.location\.(?:replace|href)\s*=\s*['"]([^'"]+)['"]/i)
+    );
     if (jsLocationMatch) {
       const redirectPath = jsLocationMatch[1];
       const targetUrl = redirectPath.startsWith('http') ? redirectPath : `${new URL(embedUrl).origin}${redirectPath}`;
@@ -130,11 +184,7 @@ export async function inspectEmbed(
         }
 
         const jsHtml = typeof jsRes.data === 'string' ? jsRes.data : '';
-        for (const pattern of SOFT_ERROR_PATTERNS) {
-          if (pattern.test(jsHtml)) {
-            return { status: 'offline', html: body };
-          }
-        }
+        if (hasSoftError(jsHtml)) return { status: 'offline', html: body };
       } catch {
         return { status: 'offline', html: body };
       }
@@ -156,11 +206,7 @@ export async function inspectEmbed(
         }
 
         const vudeoHtml = typeof vudeoRes.data === 'string' ? vudeoRes.data : '';
-        for (const pattern of SOFT_ERROR_PATTERNS) {
-          if (pattern.test(vudeoHtml)) {
-            return { status: 'offline', html: body };
-          }
-        }
+        if (hasSoftError(vudeoHtml)) return { status: 'offline', html: body };
       } catch {
         return { status: 'offline', html: body };
       }
@@ -183,11 +229,7 @@ export async function inspectEmbed(
         }
 
         const innerHtml = typeof innerRes.data === 'string' ? innerRes.data : '';
-        for (const pattern of SOFT_ERROR_PATTERNS) {
-          if (pattern.test(innerHtml)) {
-            return { status: 'offline', html: body };
-          }
-        }
+        if (hasSoftError(innerHtml)) return { status: 'offline', html: body };
       } catch {}
     }
 

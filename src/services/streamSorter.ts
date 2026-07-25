@@ -45,7 +45,7 @@ export function getSourceId(server: ServerOption): string {
 /**
  * Ordena la lista de servidores respetando las prioridades configuradas en SourceManager (/panel):
  * 1. Status 'online' primero
- * 2. Vídeo directo (m3u8/mp4) antes que embed, y URL libre antes que proxeada
+ * 2. Vídeo directo (m3u8/mp4) antes que embed, y cuanto menos dependa de esta API, mejor
  * 3. Prioridad de Fuente de Servidor (Prioridad 1 primero, luego 2, etc.)
  * 4. Idioma Latino preferido
  * 5. Calidad más alta (4K > 1080p > 720p > 480p)
@@ -82,14 +82,6 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
     '480p': 1
   };
 
-  // Un servidor con vídeo directo vale más que cualquier embed; y entre dos directos, gana el
-  // que no obliga a reenviar bytes por esta API. `public`, `redirect` y `manifest` empatan a
-  // propósito: en los tres el VÍDEO viaja del CDN al reproductor sin pasar por aquí, que es lo
-  // único que decide la velocidad real que nota el usuario — que en `manifest` pasen unos KB de
-  // playlist no cambia nada. `proxy` queda de último recurso.
-  //
-  // El modo se RECALCULA (`effectiveDirectMode`); leer el guardado era lo que hundía a los
-  // servidores rápidos al fondo de la lista.
   // El modo se recalcula UNA vez por servidor, antes de ordenar: hacerlo dentro del comparador lo
   // repetiría en cada comparación. Y de paso se publica, para que el campo deje de mentir —
   // `direct_mode` es informativo (lo dice openapi.json) y anunciar el valor guardado describía un
@@ -99,9 +91,31 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
     return mode && mode !== s.direct_mode ? { ...s, direct_mode: mode } : s;
   });
 
+  /**
+   * Un servidor con vídeo directo vale más que cualquier embed, y entre dos directos gana el que
+   * menos depende de esta API. Los tres escalones están MEDIDOS, no supuestos (holgura en frío
+   * desde Chile contra producción, `scripts/dev/diag_playback_speed.ts`):
+   *
+   *   public / redirect  el reproductor solo habla con el CDN     emturbovid 12,2x  gscdn 6,9x
+   *   manifest           las playlists pasan por aquí             upns 0,8x - 1,4x
+   *   proxy              cada byte pasa por aquí                  vidhideplus ~1,8x
+   *
+   * `manifest` y `redirect` empataban, y con el empate el desempate caía en la prioridad de
+   * fuente: se acababa eligiendo un host con holgura 0,8x —que no puede reproducir sin pararse—
+   * teniendo al lado uno de 12x. La diferencia no es el kilobyte de playlist que pasa por la API,
+   * es que son CDN distintos y unos van mucho mejor que otros hacia Latinoamérica.
+   *
+   * OJO con leer la tabla al revés: en esa muestra `proxy` marcó mejor holgura que `manifest`, y
+   * aun así va por debajo. Son dos cosas distintas. Ese 1,8x es de UN host cuyo CDN va bien y con
+   * el borde ya caliente; lo que no cambia es que cada espectador de un `proxy` nos cuesta ancho
+   * de banda del plan, así que no escala: cuando el presupuesto se agote dejará de proxear y esos
+   * servidores no reproducirán nada. `manifest` es lento en upns por culpa de upns, no del modo.
+   */
   const directScore = (s: ServerOption): number => {
     if (!s.direct_stream) return 0;
-    return s.direct_mode === 'proxy' || s.direct_mode === undefined ? 1 : 2;
+    if (s.direct_mode === 'public' || s.direct_mode === 'redirect') return 3;
+    if (s.direct_mode === 'manifest') return 2;
+    return 1;
   };
 
   return [...withEffectiveMode].sort((a, b) => {
