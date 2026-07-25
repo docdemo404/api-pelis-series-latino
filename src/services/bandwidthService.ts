@@ -48,14 +48,17 @@ export class BandwidthService {
    * Suma lo servido. Se llama al terminar de enviar cada respuesta, en fire-and-forget:
    * contar nunca debe retrasar ni tumbar una reproducción.
    *
+   * Va por INCRBY y no por leer-sumar-escribir: con varias lambdas sirviendo segmentos a la
+   * vez, la segunda leía el mismo valor que la primera y la pisaba al escribir, de modo que el
+   * contador subestimaba el consumo justo cuando más tráfico había — o sea, dejaba de proteger
+   * precisamente cuando hacía falta.
+   *
    * TTL de 40 días para que la clave del mes sobreviva al mes entero y se limpie sola.
    */
   static async add(bytes: number): Promise<void> {
     if (!Number.isFinite(bytes) || bytes <= 0) return;
     try {
-      const key = currentKey();
-      const current = await this.used();
-      await CacheStore.set(key, current + bytes, 40 * 24 * 60 * 60);
+      await CacheStore.incrBy(currentKey(), bytes, 40 * 24 * 60 * 60);
     } catch {}
   }
 

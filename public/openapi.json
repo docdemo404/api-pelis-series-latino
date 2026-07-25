@@ -793,7 +793,7 @@
     "/api/v1/stream/direct": {
       "get": {
         "summary": "Vídeo directo de un embed (lo que apunta `direct_stream`)",
-        "description": "Resuelve el vídeo real que hay detrás de un reproductor embebido y lo sirve. Es la URL a la que apunta el campo `direct_stream` de cada servidor: permanente y sin token de cara al cliente, aunque por dentro se acuñe en cada reproducción, porque los CDN firman la URL entera y la atan a la red que la pidió.\n\nCon HLS devuelve el manifiesto ya reescrito para que los segmentos también pasen por aquí; con MP4 reenvía los bytes con soporte de Range (seek). Si el embed no es extraíble responde 502 `DIRECT_UNAVAILABLE` y el cliente debe reproducir con `embed_url`.",
+        "description": "Resuelve el vídeo real que hay detrás de un reproductor embebido y lo entrega. Es la URL a la que apunta el campo `direct_stream` de cada servidor: permanente y sin token de cara al cliente, aunque por dentro se acuñe una recién hecha en cada reproducción, porque los CDN firman la URL entera y le ponen caducidad.\n\n**Lo normal es que responda 302** a la URL del CDN (13 de las 14 familias de host medidas): así el vídeo viaja directo del CDN al reproductor, sin pasar por esta API. Solo se reenvían los bytes (200/206) cuando el host valida la IP que acuñó la URL, o cuando exige cabeceras que un navegador no puede poner. En ambos casos basta con seguir la respuesta: **el cliente no tiene que hacer nada distinto**.\n\nSi el embed no es extraíble responde 502 `DIRECT_UNAVAILABLE` y el cliente debe reproducir con `embed_url`.",
         "parameters": [
           {
             "name": "e",
@@ -803,17 +803,28 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "mode",
+            "in": "query",
+            "required": false,
+            "description": "Cómo entregar el vídeo.\n\n- `auto` (por defecto): lo más rápido que funcione en CUALQUIER reproductor. Un navegador no necesita declarar nada.\n- `redirect`: para clientes NATIVOS (ExoPlayer, AVPlayer, VLC) que saben fijar `Referer` y `User-Agent`. Devuelve 302 también en los hosts que exigen esas cabeceras — hay que copiarlas del campo `headers` del servidor o el CDN responderá 403. Un navegador NO debe usarlo: no puede fijarlas.\n- `proxy`: fuerza el reenvío de bytes. Es la salida de emergencia si el 302 no reproduce en tu cliente.",
+            "schema": {
+              "type": "string",
+              "enum": ["auto", "redirect", "proxy"],
+              "default": "auto"
+            }
           }
         ],
         "responses": {
+          "302": {
+            "description": "Redirección a la URL del CDN, recién acuñada. Es la respuesta habitual. Lleva `Referrer-Policy: no-referrer` a propósito: varios de estos CDN aceptan que no haya `Referer` pero devuelven 403 con uno ajeno, así que el navegador NO debe filtrar el origen de tu página al seguirla. Si tu cliente reescribe esa política, el vídeo dejará de reproducir."
+          },
           "200": {
-            "description": "Manifiesto HLS reescrito, o flujo de vídeo"
+            "description": "Manifiesto HLS reescrito, o flujo de vídeo (hosts que no admiten redirección)"
           },
           "206": {
             "description": "Respuesta parcial de vídeo (Range Request / seek)"
-          },
-          "302": {
-            "description": "Presupuesto mensual de tránsito agotado: se redirige a la URL acuñada del CDN. Puede fallar por la atadura de IP; en ese caso, usar `embed_url`."
           },
           "502": {
             "description": "No se pudo extraer el vídeo de este embed. Reproduce con `embed_url`."
@@ -851,30 +862,6 @@
           },
           "206": {
             "description": "Respuesta parcial del segmento (Range Request)"
-          }
-        }
-      }
-    },
-    "/api/v1/stream/proxy": {
-      "get": {
-        "summary": "Proxy de Streaming de Video con soporte nativo HTTP Range Requests (206 Partial Content)",
-        "parameters": [
-          {
-            "name": "url",
-            "in": "query",
-            "required": true,
-            "description": "URL directa de video (MP4 o M3U8 HLS)",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "206": {
-            "description": "Respuesta parcial de flujo de video (Range Request Seek)"
-          },
-          "200": {
-            "description": "Flujo de video completo"
           }
         }
       }
@@ -1040,7 +1027,7 @@
           },
           "direct_stream": {
             "type": "string",
-            "description": "FUENTE PRIORITARIA: el vídeo real (HLS/MP4). Intenta SIEMPRE esta antes que `embed_url`. Ningún host permite publicar la URL cruda de su CDN —la firman entera y la atan a la IP que la pidió—, así que normalmente apunta a esta misma API, que la resuelve en el momento de reproducir. Para el cliente es una URL permanente y sin token. Si devuelve error, cae a `embed_url`.",
+            "description": "FUENTE PRIORITARIA: el vídeo real (HLS/MP4). Intenta SIEMPRE esta antes que `embed_url`. Ningún host permite publicar la URL cruda de su CDN —la firman entera y le ponen caducidad—, así que apunta a esta misma API, que la resuelve en el momento de reproducir. Para el cliente es una URL permanente y sin token: basta con dársela al reproductor y seguir la respuesta. Si devuelve error, cae a `embed_url`.",
             "example": "/api/v1/stream/direct?e=aHR0cHM6Ly92aWRoaWRlcGx1cy5jb20vdi8zMHdyMGd1Mzhxc2I"
           },
           "direct_kind": {
@@ -1055,14 +1042,25 @@
             "type": "string",
             "enum": [
               "public",
+              "redirect",
               "proxy"
             ],
-            "description": "`public` = URL libre del CDN, servida tal cual. `proxy` = se acuña y se sirve desde esta API."
+            "description": "Qué hará `direct_stream` con este servidor.\n\n- `public`: la URL del CDN no caduca y se entrega tal cual.\n- `redirect`: responde 302 a la URL del CDN. El vídeo va directo del CDN a tu reproductor, sin pasar por esta API: es el camino rápido y el habitual.\n- `proxy`: esta API reenvía los bytes, porque el CDN valida la IP que acuñó la URL o exige cabeceras que un navegador no puede poner.\n\nEs informativo: sirve para saber qué esperar, no hay que actuar distinto según el valor."
           },
           "direct_host": {
             "type": "string",
             "description": "Host del CDN que entrega el vídeo. Informativo.",
             "example": "acek-cdn.com"
+          },
+          "headers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Cabeceras que exige el CDN de este host. Solo sirven a clientes que puedan fijarlas (ExoPlayer, AVPlayer, VLC): copiándolas pueden pedir `direct_stream` con `?mode=redirect` y saltarse el reenvío de bytes incluso en los hosts que por defecto no lo permiten. Un navegador debe IGNORARLAS: `Referer` y `User-Agent` son cabeceras prohibidas en fetch/XHR, y por eso a un navegador nunca se le ofrece redirección cuando hacen falta.",
+            "example": {
+              "Referer": "https://dropload.co/"
+            }
           },
           "status": {
             "type": "string",

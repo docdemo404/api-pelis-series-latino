@@ -2,12 +2,19 @@ export type ContentType = 'movie' | 'tvseries';
 export type LinkStatus = 'online' | 'offline' | 'checking';
 
 /**
- * Cómo se sirve el vídeo directo de un servidor:
- *   public → la URL extraída no caduca ni va atada a una IP: se guarda y se entrega tal cual.
- *   proxy  → la URL caduca o va atada a la red que la pidió, así que NO se guarda: `direct_stream`
- *            apunta a esta API, que la acuña en el momento de reproducir.
+ * Cómo se sirve el vídeo directo de un servidor, del más rápido al más caro:
+ *
+ *   public   → la URL extraída no caduca ni va atada a una IP: se guarda y se entrega tal cual.
+ *   redirect → la URL caduca, pero el CDN la sirve a cualquier red: `direct_stream` acuña una
+ *              recién hecha y responde 302. NO pasa ni un byte de vídeo por esta API, así que
+ *              reproduce a la velocidad del CDN del host y no consume tránsito del plan.
+ *   proxy    → el CDN valida la IP que acuñó la URL (o exige cabeceras que el cliente no puede
+ *              poner), así que hay que reenviar los bytes desde aquí. Es el último recurso.
+ *
+ * Qué modo toca lo decide `bestMode` (src/scrapers/hostPolicy.ts) a partir de mediciones reales
+ * por host, no de suposiciones.
  */
-export type DirectMode = 'public' | 'proxy';
+export type DirectMode = 'public' | 'redirect' | 'proxy';
 
 export interface ServerOption {
   id: string;
@@ -19,16 +26,27 @@ export interface ServerOption {
   /**
    * Vídeo real (m3u8/mp4). Es la fuente PRIORITARIA y lo que el cliente debe intentar primero.
    *
-   * Con `direct_mode: 'proxy'` es una URL de esta misma API (`/api/v1/stream/direct?e=…`):
-   * permanente y sin token de cara al cliente, aunque por debajo se acuñe en cada reproducción.
-   * Ningún host conocido permite hoy publicar la URL cruda del CDN — todos la firman y la atan
-   * a la IP que la pidió. Ver src/scrapers/directStream.ts.
+   * Salvo en modo `public`, es una URL de esta misma API (`/api/v1/stream/direct?e=…`):
+   * permanente y sin token de cara al cliente, aunque por debajo la URL del CDN se acuñe en cada
+   * reproducción, porque todos los hosts la firman con caducidad. Funciona en CUALQUIER
+   * reproductor sin que el cliente tenga que saber nada: según el host, responderá con un 302 al
+   * CDN (`redirect`) o reenviará los bytes (`proxy`).
    */
   direct_stream?: string;
   direct_kind?: 'hls' | 'mp4';
+  /** Qué hará `direct_stream` con este servidor. Ver DirectMode. */
   direct_mode?: DirectMode;
   /** Host del CDN que sirve el vídeo (`acek-cdn.com`, `okcdn.ru`…). Informativo. */
   direct_host?: string;
+  /**
+   * Cabeceras que exige el CDN de este host.
+   *
+   * Solo sirven a los clientes que puedan fijarlas —ExoPlayer, AVPlayer, VLC—, y son su billete
+   * para pedir `direct_stream` con `?mode=redirect` y saltarse el proxy incluso en los hosts que
+   * por defecto no lo permiten. Un navegador debe ignorarlas: `Referer` y `User-Agent` son
+   * cabeceras prohibidas en fetch/XHR, y por eso a un navegador nunca se le ofrece `redirect`
+   * cuando hacen falta.
+   */
   headers?: Record<string, string>;
   status: LinkStatus;
   last_checked: string;

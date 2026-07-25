@@ -76,6 +76,26 @@ export class CacheStore {
   }
 
   /**
+   * Suma sobre un contador de forma ATÓMICA.
+   *
+   * No es lo mismo que leer, sumar y escribir con `set`: con varias instancias serverless
+   * escribiendo a la vez, las dos leen el mismo valor y la última sobrescribe a la primera, así
+   * que el contador se queda corto justo cuando más tráfico hay. Redis lo resuelve de un golpe
+   * con INCRBY. Sin Redis no hay concurrencia real entre procesos, así que el Map basta.
+   */
+  static async incrBy(key: string, amount: number, ttlSeconds: number): Promise<void> {
+    const k = NAMESPACE + key;
+    if (!this.isShared()) {
+      memorySet(k, (memoryGet<number>(k) || 0) + amount, ttlSeconds);
+      return;
+    }
+    try {
+      await kvCommand(['INCRBY', k, String(amount)]);
+      await kvCommand(['EXPIRE', k, String(ttlSeconds)]);
+    } catch {}
+  }
+
+  /**
    * Limpia el caché en memoria del proceso. En Redis las claves expiran por TTL;
    * no se hace FLUSH global para no arrasar claves ajenas al proyecto.
    */

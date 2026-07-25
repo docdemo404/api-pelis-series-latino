@@ -53,11 +53,13 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
     '480p': 1
   };
 
-  // Un servidor con vídeo directo vale más que cualquier embed; y entre dos directos, la URL
-  // libre (persistida, sin caducidad) vale más que la que hay que acuñar y proxear.
+  // Un servidor con vídeo directo vale más que cualquier embed; y entre dos directos, gana el
+  // que no obliga a reenviar bytes por esta API. `redirect` empata con `public` a propósito:
+  // ambos hacen que el vídeo viaje del CDN al reproductor sin pasar por aquí, que es lo único
+  // que decide la velocidad real que nota el usuario. `proxy` queda de último recurso.
   const directScore = (s: ServerOption): number => {
     if (!s.direct_stream) return 0;
-    return s.direct_mode === 'public' ? 2 : 1;
+    return s.direct_mode === 'public' || s.direct_mode === 'redirect' ? 2 : 1;
   };
 
   return [...activeServers].sort((a, b) => {

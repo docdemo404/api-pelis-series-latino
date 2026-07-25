@@ -70,8 +70,11 @@ async function main() {
   }
 
   console.log(`\n=== ${ok}/${targets.length} embeds con vídeo directo REPRODUCIBLE ===`);
-  console.log('"proxy" = la URL caduca o va atada a la IP que la pidió, así que se acuña en');
-  console.log('cada reproducción y NO se persiste. "MUDO" = se extrajo pero el CDN no la sirve.');
+  console.log('"redirect" = el CDN sirve la URL a cualquier red, así que se entrega con un 302 y');
+  console.log('el vídeo no pasa por la API. "proxy" = hay que reenviar los bytes porque el CDN');
+  console.log('valida la IP que acuñó o exige cabeceras que un navegador no puede poner.');
+  console.log('Qué host es cuál está medido en src/scrapers/hostPolicy.ts.');
+  console.log('"MUDO" = se extrajo pero el CDN no la sirve.');
 }
 
 main().then(() => process.exit(0));

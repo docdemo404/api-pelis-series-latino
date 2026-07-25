@@ -3,8 +3,16 @@ import { Request, Response } from 'express';
 /**
  * Formato de error unificado de la API (único en todo el proyecto):
  * { status: 'error', success: false, error: { code, message } }
+ *
+ * Un error NUNCA se cachea. El middleware de cabeceras decide la política por la RUTA, mucho
+ * antes de saber si la petición va a salir bien, así que sin esto un 502 pasajero de un segmento
+ * heredaba el `s-maxage=600` de la ruta y el borde lo servía durante diez minutos: un parpadeo
+ * del CDN se convertía en una avería. Se pisa aquí, que es por donde salen todos los errores.
  */
 export function sendErrorResponse(res: Response, statusCode: number, code: string, message: string) {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('CDN-Cache-Control', 'no-store');
+  res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
   return res.status(statusCode).json({
     status: 'error',
     success: false,

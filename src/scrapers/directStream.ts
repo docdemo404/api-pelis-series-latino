@@ -1,7 +1,8 @@
 import * as cheerio from 'cheerio';
 import * as crypto from 'crypto';
 import { DirectMode, ServerOption } from '../types';
-import { httpClient } from '../utils/httpClient';
+import { httpClient, USER_AGENT } from '../utils/httpClient';
+import { bestMode, requiredHeaders } from './hostPolicy';
 
 /**
  * Extracción del vídeo REAL que hay detrás de un embed (el .m3u8 o .mp4 que reproduce
@@ -11,12 +12,18 @@ import { httpClient } from '../utils/httpClient';
  * ninguno entrega una URL permanente. La familia Earnvids/goodstream firma un HMAC que cubre
  * la query ENTERA —quitar o alterar cualquier parámetro devuelve 403, incluido el `e` de
  * caducidad— y ese HMAC lo calcula su servidor, así que no hay algoritmo que replicar: solo
- * se puede pedir. Además la firma va ligada a la red que lo pidió (`asn=` dentro de la propia
- * firma), ok.ru mete `srcIp=` en la URL y Netu la IP en base64 en la ruta (`/secip/`).
+ * se puede pedir.
  *
  * Consecuencia de diseño: lo extraído NO se persiste. Aquí solo se averigua que la extracción
  * ES POSIBLE (y de qué tipo); la URL se acuña en el momento de reproducir, desde
  * /api/v1/stream/direct. Ver src/routes/stream.routes.ts.
+ *
+ * LO QUE CADUCA NO ES LO QUE ATA. Durante mucho tiempo aquí se afirmó que además la firma iba
+ * ligada a la red que la pidió, y de ahí que TODO se reenviara byte a byte desde la API. Se
+ * midió (scripts/dev/probe_hosts.ts, 2026-07-25) y solo es cierto en vidhideplus: las otras 13
+ * familias sirven sin rechistar una URL acuñada desde otra IP. Que una URL caduque en 4 h no
+ * impide entregarla al cliente — se acuña en el momento de reproducir y se entrega recién
+ * hecha. Quién puede recibirla directamente lo dice src/scrapers/hostPolicy.ts.
  *
  * Cada host vive en su propio extractor y falla de forma aislada: si un sitio cambia, ese
  * servidor se queda con su embed y ningún otro se ve afectado.
@@ -74,6 +81,32 @@ const VOLATILE_PATTERNS: RegExp[] = [
 export function hasVolatileToken(url: string): boolean {
   if (!url) return true;
   return VOLATILE_PATTERNS.some(re => re.test(url));
+}
+
+/**
+ * Segundos que le quedan de vida a la firma de una URL, leídos de la propia URL.
+ *
+ * Estos CDN no publican la caducidad en ninguna cabecera: la meten como un parámetro más con
+ * marca de tiempo Unix (`e=` en la familia Earnvids, `kx=` en upns). Se coge la mayor que esté
+ * en el futuro, que es la que manda. Sirve para no re-acuñar una URL que aún vale horas.
+ *
+ * Devuelve null cuando la URL no declara ninguna: entonces no se puede saber y toca asumir poco.
+ */
+export function tokenExpirySeconds(url: string): number | null {
+  let params: URLSearchParams;
+  try {
+    params = new URL(url).searchParams;
+  } catch {
+    return null;
+  }
+  const now = Math.floor(Date.now() / 1000);
+  let best: number | null = null;
+  for (const [, raw] of params) {
+    if (!/^1[6-9]\d{8}$/.test(raw)) continue;
+    const remaining = Number(raw) - now;
+    if (remaining > 0 && (best === null || remaining > best)) best = remaining;
+  }
+  return best;
 }
 
 /** ¿El host ata el vídeo a la IP que lo pidió? */
@@ -331,6 +364,57 @@ async function extractUpns(embedUrl: string): Promise<DirectStream | null> {
   }
 }
 
+export interface FastExtraction {
+  /** El vídeo, si se pudo resolver sin descargar el embed. */
+  direct: DirectStream | null;
+  /**
+   * `true` = este host se resuelve por aquí y no hay nada más que probar, haya salido vídeo o
+   * no. Descargar el HTML del embed sería tirar una petición a la basura.
+   */
+  conclusive: boolean;
+}
+
+/**
+ * Extracción que NO necesita el HTML del embed.
+ *
+ * Existe por una razón concreta de latencia: al reproducir, `mintDirect` se descargaba SIEMPRE
+ * el embed antes de intentar nada, y para los hosts que caen aquí ese cuerpo no se llegaba a
+ * mirar. Eran hasta dos viajes completos (el chequeo de salud y el HTML) metidos en el camino
+ * crítico entre pulsar Play y el primer fotograma, para no usarlos.
+ *
+ * Cubre los tres casos que se deciden solo con la URL:
+ *   - el vídeo viaja en la propia URL del embed (`link=` de FuegoCine);
+ *   - hosts de la familia upns, que no dejan nada en el HTML y hay que preguntar a su API;
+ *   - hosts señuelo, cuyo HTML solo contiene URLs muertas y por eso se descarta a propósito.
+ */
+export async function extractDirectFast(
+  embedUrl: string,
+  opts: { allowNetwork?: boolean } = {}
+): Promise<FastExtraction> {
+  if (!embedUrl) return { direct: null, conclusive: true };
+
+  try {
+    // Lo primero y más barato: puede que el vídeo venga ya en la propia URL del embed.
+    const fromParam = extractFromUrlParam(embedUrl);
+    if (fromParam) return { direct: fromParam, conclusive: true };
+
+    // upns.pro no deja nada en el HTML: hay que preguntarle a su API. Solo se hace al
+    // REPRODUCIR (`allowNetwork`), nunca al scrapear: su API responde 429 en cuanto se la
+    // llama en lote, y un 429 durante el crawl quedaría persistido como "este servidor no
+    // tiene vídeo directo", que es mentira. Ver `deferredDirectFields`.
+    if (isDeferredDirectHost(embedUrl)) {
+      return { direct: opts.allowNetwork ? await extractUpns(embedUrl) : null, conclusive: true };
+    }
+
+    const host = new URL(embedUrl).hostname.toLowerCase();
+    if (DECOY_HOSTS.some(h => host.includes(h))) return { direct: null, conclusive: true };
+
+    return { direct: null, conclusive: false };
+  } catch {
+    return { direct: null, conclusive: false };
+  }
+}
+
 /**
  * Extrae el vídeo directo de un embed ya descargado.
  *
@@ -347,34 +431,17 @@ export async function extractDirect(
   opts: { allowNetwork?: boolean } = {}
 ): Promise<DirectStream | null> {
   if (!embedUrl) return null;
-  const host = (() => {
-    try {
-      return new URL(embedUrl).hostname.toLowerCase();
-    } catch {
-      return '';
-    }
-  })();
 
   try {
-    // Lo primero y más barato: puede que el vídeo venga ya en la propia URL del embed.
-    const fromParam = extractFromUrlParam(embedUrl);
-    if (fromParam) return fromParam;
-
-    // upns.pro no deja nada en el HTML: hay que preguntarle a su API. Solo se hace al
-    // REPRODUCIR (`allowNetwork`), nunca al scrapear: su API responde 429 en cuanto se la
-    // llama en lote, y un 429 durante el crawl quedaría persistido como "este servidor no
-    // tiene vídeo directo", que es mentira. Ver `deferredDirectFields`.
-    if (isDeferredDirectHost(embedUrl)) {
-      return opts.allowNetwork ? await extractUpns(embedUrl) : null;
-    }
+    const fast = await extractDirectFast(embedUrl, opts);
+    if (fast.direct || fast.conclusive) return fast.direct;
 
     if (!html) return null;
 
+    const host = new URL(embedUrl).hostname.toLowerCase();
     if (host.includes('ok.ru') || host.includes('odnoklassniki')) {
       return extractOkru(html);
     }
-
-    if (DECOY_HOSTS.some(h => host.includes(h))) return null;
 
     // Familia Earnvids (vidhide/streamwish/filelions/lulustream) y dropload: todo va empaquetado.
     const unpacked = unpackPacker(html);
@@ -432,7 +499,7 @@ export function isDeferredDirectHost(embedUrl: string): boolean {
   }
 }
 
-export type DirectFields = Pick<ServerOption, 'direct_stream' | 'direct_kind' | 'direct_mode' | 'direct_host'>;
+export type DirectFields = Pick<ServerOption, 'direct_stream' | 'direct_kind' | 'direct_mode' | 'direct_host' | 'headers'>;
 
 /**
  * Campos de vídeo directo para los hosts que NO se resuelven al scrapear.
@@ -451,8 +518,9 @@ export function deferredDirectFields(embedUrl: string): DirectFields {
   return {
     direct_stream: directEndpointUrl(embedUrl),
     direct_kind: 'hls',
-    direct_mode: 'proxy',
+    direct_mode: bestMode(embedUrl, 'hls'),
     direct_host: host || undefined,
+    headers: requiredHeaders(embedUrl, USER_AGENT),
   };
 }
 
@@ -462,14 +530,18 @@ export function deferredDirectFields(embedUrl: string): DirectFields {
  * Cuando la URL es efímera (todos los hosts conocidos hoy) se publica la URL de ESTA API en
  * vez de la del CDN: así el cliente guarda un enlace estable y la caducidad se resuelve por
  * dentro. La URL cruda no se propaga nunca hacia la base de datos.
+ *
+ * `direct_mode` dice qué HARÁ esa URL al pedirla: casi siempre un 302 al CDN (`redirect`), y
+ * solo reenvío de bytes (`proxy`) en los hosts que atan por IP o exigen cabeceras que un
+ * navegador no puede poner. Es un anuncio, no una orden: la decisión real la vuelve a tomar
+ * /api/v1/stream/direct al reproducir, así que un valor guardado que se quede viejo no rompe
+ * nada — como mucho desactualiza lo que se muestra.
  */
 export function describeDirect(embedUrl: string, direct: DirectStream): DirectFields {
-  // Solo un MP4 sin firma se entrega crudo. Un HLS siempre va por el proxy aunque su URL
-  // parezca limpia: el manifiesto hay que reescribirlo para que los segmentos vuelvan por
-  // aquí, y además esos CDN suelen exigir el Referer del embed, que el cliente no puede
-  // poner. Publicar el manifiesto crudo era regalarle al cliente un 403 seguro.
+  // `isPubliclyShareable` ya no decide si se proxea, solo si la URL se puede PERSISTIR: una
+  // URL sin firma ni caducidad sigue valiendo mañana, y esa es la única que se guarda cruda.
   const shareable = direct.kind === 'mp4' && isPubliclyShareable(direct.url);
-  const mode: DirectMode = shareable ? 'public' : 'proxy';
+  const mode: DirectMode = shareable ? 'public' : bestMode(embedUrl, direct.kind);
   let host = '';
   try {
     host = new URL(direct.url).hostname;
@@ -480,5 +552,6 @@ export function describeDirect(embedUrl: string, direct: DirectStream): DirectFi
     direct_kind: direct.kind,
     direct_mode: mode,
     direct_host: host || undefined,
+    headers: requiredHeaders(embedUrl, USER_AGENT),
   };
 }

@@ -18,10 +18,16 @@ const METADATA_TTL_SECONDS = 6 * 60 * 60;
 // Enlaces persistidos por debajo de esta antigüedad se sirven de la DB sin volver a scrapear.
 const STREAMS_FRESH_MS = 24 * 60 * 60 * 1000;
 
-// Fecha en que se empezó a extraer el vídeo directo (src/scrapers/directStream.ts). Los
-// enlaces guardados antes solo tienen embed, así que se consideran caducos aunque sean
-// recientes: hay que volver a resolverlos una vez para que ganen su `direct_stream`.
-const DIRECT_EXTRACTION_SINCE = Date.parse('2026-07-23T00:00:00Z');
+// Corte de re-resolución: los enlaces guardados antes de esta fecha se consideran caducos
+// aunque sean recientes, y se vuelven a resolver UNA vez por título según se van pidiendo.
+//
+// 2026-07-23 → empezó a extraerse el vídeo directo: lo guardado antes solo tenía embed.
+// 2026-07-25 → se midió qué hosts admiten redirección (src/scrapers/hostPolicy.ts). Lo
+//   guardado antes lleva `direct_mode: 'proxy'` a fuego y sin el campo `headers`. Reproducir
+//   ya funciona igual, porque /stream/direct vuelve a decidir el modo en cada petición; lo que
+//   no se arregla solo es el ORDEN: `streamSorter` puntúa por `direct_mode`, así que con la
+//   etiqueta vieja hundiría precisamente los servidores que no gastan proxy.
+const DIRECT_EXTRACTION_SINCE = Date.parse('2026-07-25T07:32:00Z');
 
 /**
  * Clave canónica de título para AGRUPAR variantes del mismo contenido entre fuentes

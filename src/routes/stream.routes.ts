@@ -1,11 +1,12 @@
 import { Router, Request, Response, NextFunction } from 'express';
-import axios from 'axios';
 import { ResolverService } from '../services/resolverService';
 import { BandwidthService } from '../services/bandwidthService';
 import { mintDirect, MintedStream } from '../services/directResolver';
 import { decodeEmbedParam } from '../scrapers/directStream';
+import { bestMode } from '../scrapers/hostPolicy';
+import { DirectMode } from '../types';
 import { sendErrorResponse } from '../utils/apiHelpers';
-import { USER_AGENT } from '../utils/httpClient';
+import { USER_AGENT, streamClient } from '../utils/httpClient';
 
 /**
  * Streaming: resolución de tokens dinámicos, proxy con soporte de Range
@@ -26,54 +27,28 @@ router.get('/api/v1/stream/resolve', async (req: Request, res: Response, next: N
   }
 });
 
-// Proxy de Streaming con soporte nativo de HTTP Range Requests (206 Partial Content) para Seek instantáneo
-router.get('/api/v1/stream/proxy', async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const videoUrl = req.query.url as string;
-    if (!videoUrl) {
-      return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'El parámetro ?url= es requerido');
-    }
-
-    const range = req.headers.range;
-    const originHeaders: Record<string, string> = {
-      'User-Agent': USER_AGENT,
-      'Referer': new URL(videoUrl).origin + '/',
-      ...(range ? { 'Range': range } : {})
-    };
-
-    const response = await axios.get(videoUrl, {
-      headers: originHeaders,
-      responseType: 'stream',
-      validateStatus: (status) => status >= 200 && status < 400
-    });
-
-    res.status(response.status);
-    const cr = response.headers['content-range'];
-    if (cr) res.setHeader('Content-Range', String(cr));
-    const ar = response.headers['accept-ranges'];
-    if (ar) res.setHeader('Accept-Ranges', String(ar));
-    else res.setHeader('Accept-Ranges', 'bytes');
-    const cl = response.headers['content-length'];
-    if (cl) res.setHeader('Content-Length', String(cl));
-    const ct = response.headers['content-type'];
-    if (ct) res.setHeader('Content-Type', String(ct));
-    else res.setHeader('Content-Type', videoUrl.includes('.m3u8') ? 'application/x-mpegURL' : 'video/mp4');
-
-    response.data.pipe(res);
-  } catch (err) {
-    next(err);
-  }
-});
-
 /**
  * ───────────────────────────────────────────────────────────────────────────────────────────
  * VÍDEO DIRECTO — la fuente prioritaria; el embed solo si esto falla.
  *
  * `direct_stream` apunta aquí en vez de al CDN porque ningún host conocido entrega una URL
- * permanente: firman la query entera (alterar cualquier parámetro devuelve 403) y la atan a la
- * red que la pidió. Esta ruta es lo que hace que, DE CARA AL CLIENTE, exista una URL estable
- * y sin token: por dentro se acuña en cada reproducción y se sirve desde la misma máquina que
- * la acuñó, que es la única que el CDN acepta.
+ * permanente: firman la query entera (alterar cualquier parámetro devuelve 403) y le ponen
+ * caducidad. Esta ruta es lo que hace que, DE CARA AL CLIENTE, exista una URL estable y sin
+ * token: por dentro se acuña una recién hecha en cada reproducción.
+ *
+ * Lo que hace con ella depende del host, y eso está MEDIDO (src/scrapers/hostPolicy.ts):
+ *
+ *   redirect → 302 a la URL del CDN. Es el camino normal, 13 de las 14 familias de host. No
+ *              pasa un solo byte de vídeo por aquí: reproduce a la velocidad del CDN y no gasta
+ *              tránsito del plan. Lleva `Referrer-Policy: no-referrer` porque varios de estos
+ *              CDN aceptan que no haya Referer pero rechazan uno ajeno — y un navegador que
+ *              siguiera el 302 mandaría por defecto el de NUESTRA página.
+ *   proxy    → se reenvían los bytes, como se hacía siempre. Solo para vidhideplus, que sí
+ *              valida la IP que acuñó, y para los hosts que exigen Referer cuando el cliente es
+ *              un navegador y no puede ponerlo.
+ *
+ * Un cliente que sepa fijar cabeceras (ExoPlayer, AVPlayer, VLC) puede pedir `?mode=redirect` y
+ * saltarse el proxy también en esos hosts, copiando el `headers` que viaja en el ServerOption.
  * ───────────────────────────────────────────────────────────────────────────────────────────
  */
 
@@ -145,15 +120,43 @@ function rewriteManifest(manifest: string, manifestUrl: string, embedParam: stri
     .join('\n');
 }
 
+/**
+ * Qué caché merece esta respuesta.
+ *
+ * Un segmento es contenido inmutable: su URL firmada va entera dentro de `?u=`, así que dos
+ * espectadores de lo mismo comparten respuesta y rebobinar deja de golpear al CDN. Con Range de
+ * por medio NO se cachea: la respuesta es un tramo concreto y servirla a quien pida otro daría
+ * bytes equivocados.
+ */
+function cachePolicyFor(req: Request, isSegment: boolean): string {
+  if (!isSegment || req.headers.range) return 'no-store';
+  return 'public, max-age=300, s-maxage=600';
+}
+
+/**
+ * Aplica la política en las TRES cabeceras a la vez.
+ *
+ * No basta con `Cache-Control`: el middleware global fija además `CDN-Cache-Control` y
+ * `Vercel-CDN-Cache-Control` por la ruta, y en el borde de Vercel esas dos mandan sobre la
+ * primera. Corregir solo una dejaba el borde cacheando respuestas parciales de Range, que es
+ * justo lo que no puede cachearse: servirían el tramo equivocado a quien pidiera otro.
+ */
+function applyCachePolicy(res: Response, policy: string): void {
+  res.setHeader('Cache-Control', policy);
+  res.setHeader('CDN-Cache-Control', policy);
+  res.setHeader('Vercel-CDN-Cache-Control', policy);
+}
+
 /** Sirve un manifiesto ya reescrito. Devuelve el status de fallo, o null si fue bien. */
 async function serveManifest(
   res: Response,
   manifestUrl: string,
   referer: string,
-  embedParam: string
+  embedParam: string,
+  cacheControl = 'no-store'
 ): Promise<number | null> {
-  const upstream = await axios.get(manifestUrl, {
-    headers: { 'User-Agent': USER_AGENT, Referer: referer },
+  const upstream = await streamClient.get(manifestUrl, {
+    headers: { Referer: referer },
     responseType: 'text',
     timeout: 15000,
     validateStatus: () => true
@@ -162,7 +165,7 @@ async function serveManifest(
 
   const body = rewriteManifest(String(upstream.data), manifestUrl, embedParam);
   res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-  res.setHeader('Cache-Control', 'no-store');
+  applyCachePolicy(res, cacheControl);
   res.send(body);
   void BandwidthService.add(Buffer.byteLength(body));
   return null;
@@ -179,17 +182,24 @@ async function pipeUpstream(
   res: Response,
   target: string,
   referer: string,
-  embedParam: string
+  embedParam: string,
+  cacheControl = 'no-store'
 ): Promise<number | null> {
   const range = req.headers.range;
-  const upstream = await axios.get(target, {
+  const upstream = await streamClient.get(target, {
     headers: {
-      'User-Agent': USER_AGENT,
       Referer: referer,
+      // El CDN no debe comprimir: se reenvían sus Content-Length y Content-Range tal cual, y
+      // cualquier recodificación por el camino los dejaría mintiendo.
+      'Accept-Encoding': 'identity',
       ...(range ? { Range: range } : {})
     },
     responseType: 'stream',
-    timeout: 20000,
+    // El vídeo ya viene comprimido, y axios descomprime por defecto INCLUSO en modo stream: si
+    // el CDN respondiera gzip, el cuerpo saldría inflado mientras abajo se reenvían su
+    // Content-Length y su Content-Range tal cual, y el reproductor vería cabeceras que no
+    // cuadran con los bytes que recibe.
+    decompress: false,
     validateStatus: () => true
   });
 
@@ -201,7 +211,7 @@ async function pipeUpstream(
   if (isManifestContentType(String(upstream.headers['content-type'] || ''))) {
     const body = rewriteManifest(await streamToString(upstream.data), target, embedParam);
     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-    res.setHeader('Cache-Control', 'no-store');
+    applyCachePolicy(res, cacheControl);
     res.send(body);
     void BandwidthService.add(Buffer.byteLength(body));
     return null;
@@ -217,7 +227,7 @@ async function pipeUpstream(
   if (!upstream.headers['content-type']) {
     res.setHeader('Content-Type', target.includes('.m3u8') ? 'application/x-mpegURL' : 'video/mp4');
   }
-  res.setHeader('Cache-Control', 'no-store');
+  applyCachePolicy(res, cacheControl);
 
   // El contador de tránsito no debe estorbar: se suma al terminar, sin bloquear el pipe.
   let sent = 0;
@@ -248,6 +258,34 @@ async function refreshTarget(target: string, embedUrl: string): Promise<string |
   }
 }
 
+/**
+ * Qué modo pide el cliente con `?mode=`.
+ *
+ * `auto` (por defecto) elige lo más rápido que funcione en CUALQUIER reproductor, así que un
+ * navegador no tiene que declarar nada. `redirect` es la declaración de un cliente nativo:
+ * "sé fijar Referer y User-Agent", lo que le abre el 302 también en los hosts que los exigen.
+ * `proxy` fuerza el camino lento y existe como escape: si un cliente descubre que el 302 no le
+ * reproduce, puede volver al reenvío sin esperar a que cambiemos nada aquí.
+ */
+function resolveMode(requested: string, embedUrl: string, kind: MintedStream['kind']): DirectMode {
+  if (requested === 'proxy') return 'proxy';
+  if (requested === 'redirect') return bestMode(embedUrl, kind, { setsHeaders: true });
+  return bestMode(embedUrl, kind);
+}
+
+/**
+ * Entrega la URL del CDN y se aparta.
+ *
+ * `Referrer-Policy: no-referrer` no es decorativo: la familia upns y varios más aceptan una
+ * petición SIN Referer pero devuelven 403 con uno ajeno. Sin esta cabecera, el navegador que
+ * siguiera la redirección mandaría el Referer de nuestra propia página y el CDN lo rechazaría.
+ */
+function sendRedirect(res: Response, url: string): void {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.redirect(302, url);
+}
+
 // Vídeo directo de un embed: acuña la URL real y la sirve. Es lo que apunta `direct_stream`.
 router.get(DIRECT_BASE, async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -257,17 +295,24 @@ router.get(DIRECT_BASE, async (req: Request, res: Response, next: NextFunction) 
       return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'El parámetro ?e= (embed en base64url) es requerido');
     }
 
-    const minted: MintedStream | null = await mintDirect(embedUrl);
+    // En paralelo: el presupuesto es un viaje a KV que no depende del acuñado, y encadenarlos
+    // sumaba su latencia al tiempo hasta el primer fotograma sin ninguna razón.
+    const [minted, overBudget] = await Promise.all([
+      mintDirect(embedUrl),
+      BandwidthService.isOverBudget(),
+    ]);
     if (!minted) {
       return sendErrorResponse(res, 502, 'DIRECT_UNAVAILABLE', 'No se pudo extraer el vídeo de este embed. Reproduce con embed_url.');
     }
 
+    const mode = resolveMode(String(req.query.mode || 'auto').toLowerCase(), embedUrl, minted.kind);
+
+    // El camino normal: el CDN del host sirve el vídeo y nosotros no tocamos un byte.
+    if (mode === 'redirect') return sendRedirect(res, minted.url);
+
     // Presupuesto de tránsito agotado: se entrega la URL acuñada y que el cliente lo intente
     // por su cuenta. Puede fallar por la atadura de IP, pero le queda el embed como respaldo.
-    if (await BandwidthService.isOverBudget()) {
-      res.setHeader('Cache-Control', 'no-store');
-      return res.redirect(302, minted.url);
-    }
+    if (overBudget) return sendRedirect(res, minted.url);
 
     const failed = minted.kind === 'hls'
       ? await serveManifest(res, minted.url, minted.referer, embedParam)
@@ -305,9 +350,10 @@ router.get(`${DIRECT_BASE}/seg`, async (req: Request, res: Response, next: NextF
       referer = embedUrl ? `${new URL(embedUrl).origin}/` : `${new URL(target).origin}/`;
     } catch {}
 
+    const cacheControl = cachePolicyFor(req, true);
     const serve = (url: string) => isManifest(url)
-      ? serveManifest(res, url, referer, embedParam)
-      : pipeUpstream(req, res, url, referer, embedParam);
+      ? serveManifest(res, url, referer, embedParam, cacheControl)
+      : pipeUpstream(req, res, url, referer, embedParam, cacheControl);
 
     const failed = await serve(target);
     if (failed === null) return;

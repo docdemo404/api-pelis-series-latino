@@ -1,6 +1,6 @@
 import { CacheStore } from '../cache/store';
 import { inspectEmbed } from '../scrapers/embedHealth';
-import { extractDirect, DirectStream } from '../scrapers/directStream';
+import { extractDirect, extractDirectFast, tokenExpirySeconds, DirectStream } from '../scrapers/directStream';
 
 /**
  * Acuñado del vídeo directo en el momento de reproducir.
@@ -13,7 +13,28 @@ import { extractDirect, DirectStream } from '../scrapers/directStream';
  * (manifiesto, reintentos, cambio de calidad) no repitan el trabajo.
  */
 
-const MINT_TTL_SECONDS = 10 * 60;
+/** Cuánto se recuerda una URL cuya caducidad no se puede leer: poco, por prudencia. */
+const MINT_TTL_FALLBACK_SECONDS = 10 * 60;
+
+/** Techo del caché aunque la firma dure más: una hora ya evita casi todos los re-acuñados. */
+const MINT_TTL_MAX_SECONDS = 60 * 60;
+
+/** Margen para no entregar una URL que caduca mientras el cliente la está pidiendo. */
+const MINT_TTL_MARGIN_SECONDS = 60;
+
+/**
+ * Cuánto vale la pena recordar esta URL.
+ *
+ * Antes eran 10 minutos fijos para todo, elegidos a ojo. Pero la firma trae su propia
+ * caducidad, y en la familia upns son CUATRO HORAS: re-acuñar cada 10 minutos era repetir un
+ * trabajo que seguía siendo válido veinticuatro veces más de lo necesario, y cada re-acuñado es
+ * una petición a la API del host, justo la que responde 429 en cuanto se le insiste.
+ */
+function mintTtlFor(url: string): number {
+  const expiry = tokenExpirySeconds(url);
+  if (expiry === null) return MINT_TTL_FALLBACK_SECONDS;
+  return Math.max(30, Math.min(expiry - MINT_TTL_MARGIN_SECONDS, MINT_TTL_MAX_SECONDS));
+}
 
 /**
  * Cuánto se recuerda que un embed NO dio vídeo.
@@ -54,19 +75,27 @@ export async function mintDirect(embedUrl: string, opts: { fresh?: boolean } = {
     if (cached && 'url' in cached && cached.url) return cached;
   }
 
-  const { status, html } = await inspectEmbed(embedUrl);
-  // Al reproducir sí se permite la llamada extra a la API del host (upns): es una por
-  // reproducción real, no una por ficha del catálogo.
-  const direct = await extractDirect(embedUrl, html, { allowNetwork: true });
+  // Primero lo que se resuelve solo con la URL. Para la familia upns y para los embeds que
+  // llevan el vídeo en un parámetro, esto es TODO lo que hace falta: descargar antes el embed
+  // —como se hacía— eran hasta dos viajes de ida y vuelta metidos en el camino crítico entre
+  // pulsar Play y el primer fotograma, y su cuerpo ni se miraba. El estado de salud tampoco se
+  // usaba: un embed marcado caído puede entregar la URL igualmente (el 403 del WAF cuenta como
+  // vivo), así que nunca decidió nada aquí.
+  const fast = await extractDirectFast(embedUrl, { allowNetwork: true });
+  let direct = fast.direct;
+
+  // Solo los hosts que esconden el vídeo DENTRO del HTML pagan la descarga del embed.
+  if (!direct && !fast.conclusive) {
+    const { html } = await inspectEmbed(embedUrl);
+    direct = await extractDirect(embedUrl, html, { allowNetwork: true });
+  }
+
   if (!direct) {
     await CacheStore.set(cacheKey, { miss: true }, MISS_TTL_SECONDS);
     return null;
   }
-  // Un embed marcado caído todavía puede entregar la URL (el 403 del WAF se cuenta como vivo),
-  // así que no se descarta por `status`; solo se anota para el diagnóstico.
-  void status;
 
   const minted: MintedStream = { ...direct, ...refererFor(embedUrl) };
-  await CacheStore.set(cacheKey, minted, MINT_TTL_SECONDS);
+  await CacheStore.set(cacheKey, minted, mintTtlFor(direct.url));
   return minted;
 }

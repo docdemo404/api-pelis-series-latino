@@ -14,15 +14,27 @@ import { sendErrorResponse } from '../src/utils/apiHelpers';
  * Las rutas viven en src/routes/* (panel, catálogo, búsqueda, detalle, streaming).
  */
 const app = express();
-app.use(cors());
+// `exposedHeaders` no es opcional para el vídeo: sin ellas un reproductor web servido desde
+// otro origen no puede LEER el Content-Range que devuelve el proxy, y el salto por la barra de
+// tiempo se degrada aunque el servidor esté respondiendo 206 correctamente.
+app.use(cors({ exposedHeaders: ['Content-Range', 'Content-Length', 'Accept-Ranges'] }));
 app.use(express.json());
 
 // Cabeceras HTTP de Caché en Borde (Edge CDN & Stale-While-Revalidate)
 app.use((req: Request, res: Response, next: NextFunction) => {
   if (req.path.startsWith('/api/v1')) {
-    // `/stream/direct` NO puede cachearse en el borde: sirve manifiestos acuñados al vuelo,
-    // que caducan en horas y solo valen desde la IP que los pidió.
-    if (req.path.includes('/panel') || req.path.includes('/stream/resolve') || req.path.includes('/stream/direct') || req.path.includes('/revalidate') || req.path.includes('/cache')) {
+    // Los SEGMENTOS sí se cachean, y es la diferencia entre volver al CDN una vez o una por
+    // espectador: la respuesta está determinada por la URL firmada que viaja en `?u=`, que es
+    // la misma para todo el que vea lo mismo mientras dure el acuñado (compartido vía KV). El
+    // propio endpoint rebaja esto a `no-store` cuando la petición trae Range, porque una
+    // respuesta parcial cacheada serviría los bytes equivocados a quien pida otro tramo.
+    if (req.path.includes('/stream/direct/seg')) {
+      res.setHeader('Cache-Control', 'public, max-age=300, s-maxage=600');
+      res.setHeader('CDN-Cache-Control', 'public, max-age=600');
+      res.setHeader('Vercel-CDN-Cache-Control', 'public, max-age=600');
+    // `/stream/direct` NO puede cachearse en el borde: acuña una URL nueva en cada reproducción
+    // y, según el host, responde con un 302 distinto cada vez.
+    } else if (req.path.includes('/panel') || req.path.includes('/stream/resolve') || req.path.includes('/stream/direct') || req.path.includes('/revalidate') || req.path.includes('/cache')) {
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
     } else if (req.path.includes('/search')) {

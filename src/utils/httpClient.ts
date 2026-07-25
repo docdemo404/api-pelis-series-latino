@@ -21,6 +21,26 @@ export const httpClient: AxiosInstance = axios.create({
   headers: { 'User-Agent': USER_AGENT },
 });
 
+/**
+ * Cliente para el camino de VÍDEO (proxy y manifiestos).
+ *
+ * Es hermano de `httpClient` y comparte sus agentes —que es justo el punto: el proxy usaba
+ * `axios` pelado y abría un handshake TCP+TLS nuevo por cada segmento HLS, cientos por
+ * película. Lo que cambia es el timeout: los 8 s por defecto sirven para scrapear una página,
+ * no para empezar a servir bytes de un CDN cargado.
+ */
+export const streamClient: AxiosInstance = axios.create({
+  timeout: 20000,
+  httpAgent: keepAliveHttp,
+  httpsAgent: keepAliveHttps,
+  headers: { 'User-Agent': USER_AGENT },
+  // OJO: `decompress` se queda en su valor por defecto (true) a propósito. Desactivarlo aquí
+  // afecta también a la descarga del MANIFIESTO, que se lee como texto: el CDN lo sirve gzip,
+  // los bytes crudos se decodificaban como UTF-8 y el manifiesto salía lleno de caracteres de
+  // reemplazo, así que las URLs de segmento reescritas ya no existían y el CDN devolvía 400.
+  // Donde sí hay que desactivarlo es en el reenvío de bytes, y se hace en esa llamada.
+});
+
 /** GET de una página HTML con cabeceras típicas de navegador (es-ES). */
 export function httpGetHtml(url: string, config: AxiosRequestConfig = {}) {
   return httpClient.get(url, {
