@@ -20,6 +20,15 @@ import { USER_AGENT } from '../../src/utils/httpClient';
  *   cors             manda Access-Control-Allow-Origin (necesario para hls.js en navegador)
  *   ipBound          la URL acuñada aquí NO sirve desde otra red
  *   tokenTtl         cuánto vive de verdad la firma
+ *   segment*         LO MISMO, pero pedido sobre un SEGMENTO de verdad
+ *
+ * POR QUÉ HAY QUE BAJAR HASTA EL SEGMENTO. La primera versión de este script se quedaba en la
+ * URL extraída —el m3u8 maestro— y daba por hecho que el resto de la reproducción iría igual.
+ * Con eso, la familia upns salió "redirigible" y se fue a producción un `redirect` que no
+ * reproducía nada: sus playlists están en el host del embed y rechazan un Referer ajeno, pero
+ * sus segmentos están en OTRO host y exigen un Referer cualquiera. Un manifiesto que responde 200
+ * no dice NADA de lo que harán sus segmentos. Por eso se sigue la cadena maestro → variante →
+ * primer segmento y se repiten las pruebas sobre él.
  *
  * EL TEST DE IP, que es el que decide todo: se acuña en LOCAL (IP residencial) y luego se le
  * pide a la API DESPLEGADA que descargue esa misma URL, cosa que `/stream/direct/seg` ya sabe
@@ -64,6 +73,11 @@ interface HostFinding {
   browserUaRequired: boolean | null;
   cors: string | null;
   ipBound: boolean | null;
+  /** Host que sirve los segmentos. Suele NO ser el del manifiesto, y ahí está la trampa. */
+  segmentHost: string | null;
+  segmentRefererRequired: boolean | null;
+  segmentRefererChecked: boolean | null;
+  segmentCors: string | null;
   tokenTtlSeconds: number | null;
   ttfbDirectMs: number | null;
   note: string;
@@ -156,6 +170,59 @@ async function probeCrossNetwork(remote: string, embedUrl: string, target: strin
   return probe(url, {});
 }
 
+/**
+ * Baja por el árbol HLS hasta el PRIMER SEGMENTO real.
+ *
+ * Un maestro apunta a variantes y una variante a segmentos, y cada escalón puede estar en un host
+ * distinto con reglas distintas — en upns lo está. Se siguen como mucho `MAX_DEPTH` saltos: con
+ * dos basta para cualquier manifiesto de los que se ven aquí, y el tope evita quedarse dando
+ * vueltas si un host se referencia a sí mismo.
+ */
+const MAX_DEPTH = 3;
+
+async function firstSegmentUrl(manifestUrl: string, headers: Record<string, string>): Promise<string | null> {
+  let current = manifestUrl;
+
+  for (let depth = 0; depth < MAX_DEPTH; depth++) {
+    let body: string;
+    try {
+      const res = await axios.get(current, { headers, timeout: 15000, responseType: 'text', validateStatus: () => true });
+      if (res.status >= 400) return null;
+      body = String(res.data);
+    } catch {
+      return null;
+    }
+
+    // La primera línea que no es etiqueta ni está vacía: variante si acaba en .m3u8, si no, ya
+    // es el segmento que buscábamos.
+    const uri = body
+      .split(/\r?\n/)
+      .map(l => l.trim())
+      .find(l => l && !l.startsWith('#'));
+    if (!uri) return null;
+
+    let absolute: string;
+    try {
+      absolute = new URL(uri, current).toString();
+    } catch {
+      return null;
+    }
+
+    // Ojo con fiarse de la extensión al revés: upns disfraza sus segmentos de `.woff2`. Aquí solo
+    // se usa para reconocer una PLAYLIST, que sí lleva siempre `.m3u8` en la ruta.
+    let isPlaylist: boolean;
+    try {
+      isPlaylist = /\.m3u8$/i.test(new URL(absolute).pathname);
+    } catch {
+      isPlaylist = false;
+    }
+    if (!isPlaylist) return absolute;
+    current = absolute;
+  }
+
+  return null;
+}
+
 async function sampleFromCatalog(perHost: number): Promise<string[]> {
   try {
     const { data } = await getSupabaseAdmin()
@@ -198,6 +265,10 @@ async function inspectOne(original: string, remote: string | null): Promise<Host
     browserUaRequired: null,
     cors: null,
     ipBound: null,
+    segmentHost: null,
+    segmentRefererRequired: null,
+    segmentRefererChecked: null,
+    segmentCors: null,
     tokenTtlSeconds: null,
     ttfbDirectMs: null,
     note: '',
@@ -244,6 +315,28 @@ async function inspectOne(original: string, remote: string | null): Promise<Host
   finding.refererChecked = !ok(badReferer);
   finding.browserUaRequired = !ok(noBrowserUa);
 
+  // Lo que decide si el 302 reproduce de verdad: qué exige un SEGMENTO, no el manifiesto.
+  if (direct.kind === 'hls') {
+    const segment = await firstSegmentUrl(direct.url, withReferer);
+    if (!segment) {
+      finding.note = 'no se pudo llegar a un segmento: los campos segment* quedan sin medir';
+    } else {
+      finding.segmentHost = familyOf(segment);
+      const [segBaseline, segNoReferer, segBadReferer] = await Promise.all([
+        probe(segment, withReferer),
+        probe(segment, { 'User-Agent': USER_AGENT }),
+        probe(segment, { 'User-Agent': USER_AGENT, Referer: FOREIGN_REFERER }),
+      ]);
+      if (!ok(segBaseline)) {
+        finding.note = `el segmento rechaza incluso con Referer (HTTP ${segBaseline.status})`;
+      } else {
+        finding.segmentRefererRequired = !ok(segNoReferer);
+        finding.segmentRefererChecked = !ok(segBadReferer);
+        finding.segmentCors = segBaseline.cors;
+      }
+    }
+  }
+
   if (remote) {
     const cross = await probeCrossNetwork(remote, embedUrl, direct.url);
     // Control: si el token murió durante la prueba, el fallo remoto no prueba atadura de IP.
@@ -282,6 +375,13 @@ function summarize(findings: HostFinding[]): Map<string, HostFinding> {
         : prev.ipBound === false && f.ipBound === false ? false
         : prev.ipBound ?? f.ipBound,
       cors: prev.cors || f.cors,
+      segmentHost: prev.segmentHost || f.segmentHost,
+      // Mismo criterio que arriba: si una muestra vio la exigencia, la familia la tiene.
+      segmentRefererRequired: prev.segmentRefererRequired === true || f.segmentRefererRequired === true ? true
+        : prev.segmentRefererRequired ?? f.segmentRefererRequired,
+      segmentRefererChecked: prev.segmentRefererChecked === true || f.segmentRefererChecked === true ? true
+        : prev.segmentRefererChecked ?? f.segmentRefererChecked,
+      segmentCors: prev.segmentCors || f.segmentCors,
       tokenTtlSeconds: Math.min(prev.tokenTtlSeconds ?? Infinity, f.tokenTtlSeconds ?? Infinity) || null,
     });
   }
@@ -290,6 +390,27 @@ function summarize(findings: HostFinding[]): Map<string, HostFinding> {
 
 function flag(value: boolean | null): string {
   return value === null ? ' ? ' : value ? 'SÍ ' : 'no ';
+}
+
+/**
+ * El modo que le tocaría a este host. Es la misma cascada que `bestMode` (hostPolicy.ts), con
+ * `null` —lo no medido— tratado como lo peor, para que el veredicto nunca sugiera más de lo que
+ * se ha comprobado.
+ */
+function suggestMode(f: HostFinding): string {
+  if (f.ipBound !== false) return f.ipBound === null ? 'proxy (ipBound sin medir)' : 'proxy';
+  if (f.kind !== 'hls') return f.refererRequired ? 'redirect (solo cliente nativo)' : 'redirect';
+
+  const playlistsOk = f.refererRequired === false && f.refererChecked === false && Boolean(f.cors);
+  // El navegador manda el Referer de su página; solo importa que el segmento no exija OTRO.
+  const segmentsOk = f.segmentRefererChecked === false && Boolean(f.segmentCors);
+  if (playlistsOk && segmentsOk) {
+    // Sin Referer no hay segmento, así que un cliente que no manda ninguno seguirá en proxy.
+    return f.segmentRefererRequired ? 'redirect (proxy si el cliente no manda Referer)' : 'redirect';
+  }
+  if (segmentsOk) return 'manifest';
+  if (f.segmentRefererRequired === null) return 'proxy (segmento sin medir)';
+  return 'proxy';
 }
 
 function human(seconds: number | null): string {
@@ -327,17 +448,18 @@ async function main() {
 
   const summary = summarize(findings);
   console.log('\n════ VEREDICTO POR HOST ════');
-  console.log('host                    referer  valida  UA-nav  ipBound  CORS  token   modo sugerido');
+  console.log('host                    referer  valida  UA-nav  ipBound  CORS  seg-ref  seg-val  seg-CORS  token   modo sugerido');
   for (const [family, f] of summary) {
-    // El modo más rápido que este host tolera. `null` en ipBound = no medido = conservador.
-    const mode = f.ipBound === false
-      ? (f.refererRequired ? 'redirect (solo cliente nativo)' : 'redirect')
-      : f.ipBound === null ? 'proxy (ipBound sin medir)' : 'proxy';
     console.log(
       `${family.padEnd(23)} ${flag(f.refererRequired)}     ${flag(f.refererChecked)}    ` +
       `${flag(f.browserUaRequired)}    ${flag(f.ipBound)}     ${(f.cors || '-').slice(0, 4).padEnd(5)} ` +
-      `${human(f.tokenTtlSeconds).padEnd(7)} ${mode}`
+      `${flag(f.segmentRefererRequired)}      ${flag(f.segmentRefererChecked)}      ` +
+      `${(f.segmentCors || '-').slice(0, 4).padEnd(9)} ` +
+      `${human(f.tokenTtlSeconds).padEnd(7)} ${suggestMode(f)}`
     );
+    if (f.segmentHost && f.segmentHost !== f.cdnHost) {
+      console.log(`${''.padEnd(23)} └─ los segmentos están en ${f.segmentHost}, no en ${f.cdnHost}`);
+    }
   }
 
   console.log('\n════ PARA SEMBRAR src/scrapers/hostPolicy.ts ════');
@@ -351,6 +473,10 @@ async function main() {
       // `Referrer-Policy: no-referrer` en el 302 o el navegador filtrará nuestro origen.
       refererChecked: f.refererChecked ?? true,
       cors: f.cors === '*' || Boolean(f.cors),
+      // Lo no medido en el segmento va a lo peor, igual que en CONSERVATIVE.
+      segmentRefererRequired: f.segmentRefererRequired ?? true,
+      segmentRefererChecked: f.segmentRefererChecked ?? true,
+      segmentCors: f.segmentCors === '*' || Boolean(f.segmentCors),
       tokenTtlSeconds: Number.isFinite(f.tokenTtlSeconds) ? f.tokenTtlSeconds : null,
       measuredAt: new Date().toISOString().slice(0, 10),
     })),
@@ -358,9 +484,12 @@ async function main() {
     2
   ));
 
-  const redirectable = [...summary.values()].filter(f => f.ipBound === false).length;
-  console.log(`\n${redirectable}/${summary.size} familias de host pueden salir del proxy.`);
+  const modes = [...summary.values()].map(suggestMode);
+  const noProxy = modes.filter(m => !m.startsWith('proxy')).length;
+  console.log(`\n${noProxy}/${summary.size} familias de host sirven el vídeo sin reenviar bytes.`);
   if (!remote) console.log('Sin --remote no hay medición de ipBound: todo queda en "proxy" por defecto.');
+  const sinSegmento = [...summary.values()].filter(f => f.kind === 'hls' && f.segmentRefererRequired === null).length;
+  if (sinSegmento) console.log(`${sinSegmento} familia(s) HLS sin medición de segmento: quedan en el perfil conservador.`);
 }
 
 main().then(() => setTimeout(() => process.exit(0), 400).unref());

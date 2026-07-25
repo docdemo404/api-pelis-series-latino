@@ -8,13 +8,18 @@ export type LinkStatus = 'online' | 'offline' | 'checking';
  *   redirect → la URL caduca, pero el CDN la sirve a cualquier red: `direct_stream` acuña una
  *              recién hecha y responde 302. NO pasa ni un byte de vídeo por esta API, así que
  *              reproduce a la velocidad del CDN del host y no consume tránsito del plan.
+ *   manifest → solo las playlists pasan por aquí; los segmentos van del CDN al reproductor. Es
+ *              para los hosts cuyo manifiesto y cuyos segmentos exigen cosas CONTRARIAS: en la
+ *              familia upns las playlists rechazan un Referer ajeno y los segmentos —que viven en
+ *              otro host— exigen uno cualquiera, y ninguna política de referrer de navegador
+ *              cumple las dos. Un m3u8 son unos KB, así que cuesta como un `redirect`.
  *   proxy    → el CDN valida la IP que acuñó la URL (o exige cabeceras que el cliente no puede
  *              poner), así que hay que reenviar los bytes desde aquí. Es el último recurso.
  *
  * Qué modo toca lo decide `bestMode` (src/scrapers/hostPolicy.ts) a partir de mediciones reales
  * por host, no de suposiciones.
  */
-export type DirectMode = 'public' | 'redirect' | 'proxy';
+export type DirectMode = 'public' | 'redirect' | 'manifest' | 'proxy';
 
 export interface ServerOption {
   id: string;
@@ -30,7 +35,7 @@ export interface ServerOption {
    * permanente y sin token de cara al cliente, aunque por debajo la URL del CDN se acuñe en cada
    * reproducción, porque todos los hosts la firman con caducidad. Funciona en CUALQUIER
    * reproductor sin que el cliente tenga que saber nada: según el host, responderá con un 302 al
-   * CDN (`redirect`) o reenviará los bytes (`proxy`).
+   * CDN (`redirect`), con un manifiesto reescrito (`manifest`) o reenviando los bytes (`proxy`).
    */
   direct_stream?: string;
   direct_kind?: 'hls' | 'mp4';

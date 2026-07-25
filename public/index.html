@@ -47,11 +47,11 @@
         </div>
 
         <div class="alert alert-success bg-dark text-success border-success mb-4" role="alert">
-          <strong>▶️ Cómo reproducir (y por qué va rápido):</strong> pásale <code>direct_stream</code> a tu reproductor y sigue la respuesta. Nada más. En la mayoría de los hosts responde con un <strong>302 a la URL del CDN</strong>, así que el vídeo viaja del CDN a tu reproductor <em>sin pasar por esta API</em>: reproduce a la velocidad del host, no a la nuestra. Solo se reenvían los bytes en los hosts que validan la IP que acuñó la URL — el campo <code>direct_mode</code> te dice cuál es cuál, pero no tienes que actuar distinto.
+          <strong>▶️ Cómo reproducir (y por qué va rápido):</strong> pásale <code>direct_stream</code> a tu reproductor y sigue la respuesta. Nada más. Según lo que exija el host responderá con un <strong>302 a la URL del CDN</strong> o con un <strong>manifiesto HLS reescrito</strong>; en los dos casos el vídeo viaja del CDN a tu reproductor <em>sin pasar por esta API</em>, porque un manifiesto son unos KB de texto. Solo se reenvían los bytes en los hosts que validan la IP que acuñó la URL o que exigen cabeceras hasta en los segmentos. El campo <code>direct_mode</code> te dice cuál es cuál, pero no tienes que actuar distinto.
           <ul class="mb-0 mt-2">
             <li><strong>Cascada:</strong> intenta <code>direct_stream</code>; si responde <code>502</code>, reproduce con <code>embed_url</code>. Es el único respaldo que hace falta.</li>
-            <li><strong>Navegador:</strong> no toques nada. Y <strong>no reescribas la política de referrer</strong> del 302: varios CDN aceptan una petición sin <code>Referer</code> pero devuelven 403 con uno ajeno, y por eso la redirección viaja con <code>Referrer-Policy: no-referrer</code>.</li>
-            <li><strong>App nativa</strong> (ExoPlayer, AVPlayer, VLC): copia el objeto <code>headers</code> del servidor y pide <code>direct_stream</code> con <code>&amp;mode=redirect</code>. Así te saltas el reenvío de bytes también en los hosts que exigen cabeceras, que un navegador no puede poner.</li>
+            <li><strong>Navegador:</strong> no toques nada. Y <strong>no reescribas la política de referrer</strong>, ni la del 302 ni la de tu página: hay CDN que aceptan una petición sin <code>Referer</code> pero devuelven 403 con uno ajeno, y otros justo al revés. La API elige el modo contando con el <code>Referer</code> que manda tu página, así que una página en <code>no-referrer</code> recibirá una respuesta distinta —y más lenta— que una normal.</li>
+            <li><strong>App nativa</strong> (ExoPlayer, AVPlayer, VLC): copia el objeto <code>headers</code> del servidor, aplícalo <em>también a los segmentos</em> y pide <code>direct_stream</code> con <code>&amp;mode=redirect</code>. Así te saltas el reenvío de bytes también en los hosts que exigen cabeceras, que un navegador no puede poner.</li>
           </ul>
         </div>
 

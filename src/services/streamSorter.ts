@@ -54,12 +54,15 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
   };
 
   // Un servidor con vídeo directo vale más que cualquier embed; y entre dos directos, gana el
-  // que no obliga a reenviar bytes por esta API. `redirect` empata con `public` a propósito:
-  // ambos hacen que el vídeo viaje del CDN al reproductor sin pasar por aquí, que es lo único
-  // que decide la velocidad real que nota el usuario. `proxy` queda de último recurso.
+  // que no obliga a reenviar bytes por esta API. `public`, `redirect` y `manifest` empatan a
+  // propósito: en los tres el VÍDEO viaja del CDN al reproductor sin pasar por aquí, que es lo
+  // único que decide la velocidad real que nota el usuario — que en `manifest` pasen unos KB de
+  // playlist no cambia nada. `proxy` queda de último recurso.
+  // Una ficha vieja puede traer `direct_stream` sin `direct_mode`: se la trata como proxy, que es
+  // lo que era cuando se guardó.
   const directScore = (s: ServerOption): number => {
     if (!s.direct_stream) return 0;
-    return s.direct_mode === 'public' || s.direct_mode === 'redirect' ? 2 : 1;
+    return s.direct_mode === 'public' || s.direct_mode === 'redirect' || s.direct_mode === 'manifest' ? 2 : 1;
   };
 
   return [...activeServers].sort((a, b) => {

@@ -38,14 +38,18 @@ router.get('/api/v1/stream/resolve', async (req: Request, res: Response, next: N
  *
  * Lo que hace con ella depende del host, y eso está MEDIDO (src/scrapers/hostPolicy.ts):
  *
- *   redirect → 302 a la URL del CDN. Es el camino normal, 13 de las 14 familias de host. No
- *              pasa un solo byte de vídeo por aquí: reproduce a la velocidad del CDN y no gasta
- *              tránsito del plan. Lleva `Referrer-Policy: no-referrer` porque varios de estos
- *              CDN aceptan que no haya Referer pero rechazan uno ajeno — y un navegador que
- *              siguiera el 302 mandaría por defecto el de NUESTRA página.
- *   proxy    → se reenvían los bytes, como se hacía siempre. Solo para vidhideplus, que sí
- *              valida la IP que acuñó, y para los hosts que exigen Referer cuando el cliente es
- *              un navegador y no puede ponerlo.
+ *   redirect → 302 a la URL del CDN. No pasa un solo byte de vídeo por aquí: reproduce a la
+ *              velocidad del CDN y no gasta tránsito del plan. Lleva `Referrer-Policy:
+ *              no-referrer` porque varios de estos CDN aceptan que no haya Referer pero rechazan
+ *              uno ajeno — y un navegador que siguiera el 302 mandaría el de NUESTRA página.
+ *   manifest → se sirven las PLAYLISTS desde aquí, con el Referer que espera el host, pero las
+ *              URIs de segmento se dejan apuntando al CDN. Existe por la familia upns: sus
+ *              playlists rechazan un Referer ajeno y sus segmentos —que viven en otro host—
+ *              exigen uno cualquiera, y ningún navegador puede cumplir las dos cosas a la vez.
+ *              Un m3u8 son unos KB, así que en tránsito cuesta lo mismo que un `redirect`.
+ *   proxy    → se reenvían los bytes, como se hacía siempre. Para vidhideplus y ok.ru, que
+ *              validan la IP que acuñó, y para los hosts que exigen su Referer también en los
+ *              segmentos (dropload) cuando el cliente no puede ponerlo.
  *
  * Un cliente que sepa fijar cabeceras (ExoPlayer, AVPlayer, VLC) puede pedir `?mode=redirect` y
  * saltarse el proxy también en esos hosts, copiando el `headers` que viaja en el ServerOption.
@@ -53,6 +57,12 @@ router.get('/api/v1/stream/resolve', async (req: Request, res: Response, next: N
  */
 
 const DIRECT_BASE = '/api/v1/stream/direct';
+
+/**
+ * Qué se envuelve al reescribir un manifiesto. Es el subconjunto de `DirectMode` que llega hasta
+ * aquí: `public` y `redirect` no reescriben nada porque no pasan por esta API.
+ */
+type RewriteMode = 'manifest' | 'proxy';
 
 function encodeParam(value: string): string {
   return Buffer.from(value, 'utf8').toString('base64url');
@@ -89,20 +99,44 @@ function streamToString(stream: NodeJS.ReadableStream): Promise<string> {
 }
 
 /**
- * Reescribe un manifiesto HLS para que TODO lo que referencia vuelva a pasar por esta API.
+ * Reescribe un manifiesto HLS para que lo que referencia vuelva a pasar por esta API.
  *
- * Sin esto el cliente recibiría el manifiesto con las rutas del CDN y pediría los segmentos por
- * su cuenta: llevan el mismo token atado a nuestra IP, así que le responderían 403.
+ * En modo `proxy` se envuelve TODO: el cliente recibiría si no las rutas del CDN y pediría los
+ * segmentos por su cuenta, llevando el mismo token atado a nuestra IP, y le responderían 403.
+ *
+ * En modo `manifest` se envuelven solo las PLAYLISTS y las claves; los segmentos se dejan
+ * apuntando al CDN. Es lo que convierte a upns en reproducible sin gastar tránsito: sus
+ * segmentos aceptan el Referer de la página del reproductor —cualquiera les vale— mientras que
+ * sus playlists lo rechazan, así que cada uno va por donde puede.
+ *
+ * Absolutizar no es opcional en ninguno de los dos modos: el manifiesto se sirve desde NUESTRO
+ * origen, y una URI relativa que se dejara tal cual resolvería contra la API en vez de contra
+ * el CDN.
  */
-function rewriteManifest(manifest: string, manifestUrl: string, embedParam: string): string {
-  const wrap = (uri: string): string => {
-    let absolute: string;
+function rewriteManifest(
+  manifest: string,
+  manifestUrl: string,
+  embedParam: string,
+  mode: RewriteMode = 'proxy'
+): string {
+  const absolutize = (uri: string): string | null => {
     try {
-      absolute = new URL(uri, manifestUrl).toString();
+      return new URL(uri, manifestUrl).toString();
     } catch {
-      return uri;
+      return null;
     }
-    return `${DIRECT_BASE}/seg?u=${encodeParam(absolute)}&e=${embedParam}`;
+  };
+
+  const through = (absolute: string): string =>
+    `${DIRECT_BASE}/seg?u=${encodeParam(absolute)}&e=${embedParam}` +
+    (mode === 'manifest' ? `&m=${mode}` : '');
+
+  /** `alwaysWrap` es para las claves de cifrado: viven en el host que valida el Referer. */
+  const rewrite = (uri: string, alwaysWrap = false): string => {
+    const absolute = absolutize(uri);
+    if (!absolute) return uri;
+    if (mode === 'proxy' || alwaysWrap || isManifest(absolute)) return through(absolute);
+    return absolute;
   };
 
   return manifest
@@ -111,11 +145,14 @@ function rewriteManifest(manifest: string, manifestUrl: string, embedParam: stri
       const trimmed = line.trim();
       if (!trimmed) return line;
       // Las etiquetas llevan sus URIs en un atributo (#EXT-X-KEY, #EXT-X-MEDIA, #EXT-X-MAP).
+      // La clave de #EXT-X-KEY se pide siempre por aquí; #EXT-X-MAP es el segmento de
+      // inicialización y comparte host y reglas con los demás segmentos.
       if (trimmed.startsWith('#')) {
-        return line.replace(/URI="([^"]+)"/g, (_full, uri: string) => `URI="${wrap(uri)}"`);
+        const isKey = /^#EXT-X-KEY/i.test(trimmed);
+        return line.replace(/URI="([^"]+)"/g, (_full, uri: string) => `URI="${rewrite(uri, isKey)}"`);
       }
       // Cualquier otra línea no vacía es un segmento o una variante.
-      return wrap(trimmed);
+      return rewrite(trimmed);
     })
     .join('\n');
 }
@@ -153,7 +190,8 @@ async function serveManifest(
   manifestUrl: string,
   referer: string,
   embedParam: string,
-  cacheControl = 'no-store'
+  cacheControl = 'no-store',
+  mode: RewriteMode = 'proxy'
 ): Promise<number | null> {
   const upstream = await streamClient.get(manifestUrl, {
     headers: { Referer: referer },
@@ -163,7 +201,7 @@ async function serveManifest(
   });
   if (upstream.status >= 400) return upstream.status;
 
-  const body = rewriteManifest(String(upstream.data), manifestUrl, embedParam);
+  const body = rewriteManifest(String(upstream.data), manifestUrl, embedParam, mode);
   res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
   applyCachePolicy(res, cacheControl);
   res.send(body);
@@ -183,7 +221,8 @@ async function pipeUpstream(
   target: string,
   referer: string,
   embedParam: string,
-  cacheControl = 'no-store'
+  cacheControl = 'no-store',
+  mode: RewriteMode = 'proxy'
 ): Promise<number | null> {
   const range = req.headers.range;
   const upstream = await streamClient.get(target, {
@@ -209,7 +248,7 @@ async function pipeUpstream(
   }
 
   if (isManifestContentType(String(upstream.headers['content-type'] || ''))) {
-    const body = rewriteManifest(await streamToString(upstream.data), target, embedParam);
+    const body = rewriteManifest(await streamToString(upstream.data), target, embedParam, mode);
     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
     applyCachePolicy(res, cacheControl);
     res.send(body);
@@ -259,18 +298,45 @@ async function refreshTarget(target: string, embedUrl: string): Promise<string |
 }
 
 /**
+ * ¿Este cliente mandará un `Referer` que el CDN vaya a ACEPTAR en las peticiones que haga por su
+ * cuenta?
+ *
+ * Importa porque los segmentos de algunos hosts responden 403 sin él, y no los pedimos nosotros:
+ * los pide el reproductor. No hay que adivinarlo ni pedirle que lo declare — la petición que
+ * acaba de llegar y las de los segmentos salen de la MISMA página, con la MISMA política de
+ * referrer. Si esta trae `Referer` u `Origin`, aquellas también lo llevarán; si la página está
+ * en `no-referrer`, ninguna lo llevará y la decisión cae sola al proxy, que es lo correcto. Un
+ * VLC o un curl pelado tampoco mandan nada, y también acaban donde deben.
+ *
+ * Tiene que ser `https`, y esto está medido: el CDN de la familia upns acepta
+ * `https://loquesea/` y devuelve 403 con `http://loquesea/` — el mismo host, solo cambia el
+ * esquema. Una página servida por http produciría un manifiesto cuyos segmentos no se pueden
+ * descargar, así que se la trata como si no mandara Referer y baja a proxy, que sí funciona.
+ */
+function clientSendsReferer(req: Request): boolean {
+  const source = req.headers.referer || req.headers.origin;
+  return Boolean(source && /^https:\/\//i.test(source));
+}
+
+/**
  * Qué modo pide el cliente con `?mode=`.
  *
  * `auto` (por defecto) elige lo más rápido que funcione en CUALQUIER reproductor, así que un
  * navegador no tiene que declarar nada. `redirect` es la declaración de un cliente nativo:
  * "sé fijar Referer y User-Agent", lo que le abre el 302 también en los hosts que los exigen.
- * `proxy` fuerza el camino lento y existe como escape: si un cliente descubre que el 302 no le
- * reproduce, puede volver al reenvío sin esperar a que cambiemos nada aquí.
+ * `manifest` y `proxy` fuerzan los caminos lentos y existen como escape: si un cliente descubre
+ * que el 302 no le reproduce, puede bajar un escalón sin esperar a que cambiemos nada aquí.
  */
-function resolveMode(requested: string, embedUrl: string, kind: MintedStream['kind']): DirectMode {
+function resolveMode(
+  requested: string,
+  embedUrl: string,
+  kind: MintedStream['kind'],
+  sendsReferer: boolean
+): DirectMode {
   if (requested === 'proxy') return 'proxy';
+  if (requested === 'manifest') return kind === 'hls' ? 'manifest' : 'redirect';
   if (requested === 'redirect') return bestMode(embedUrl, kind, { setsHeaders: true });
-  return bestMode(embedUrl, kind);
+  return bestMode(embedUrl, kind, { sendsReferer });
 }
 
 /**
@@ -305,29 +371,33 @@ router.get(DIRECT_BASE, async (req: Request, res: Response, next: NextFunction) 
       return sendErrorResponse(res, 502, 'DIRECT_UNAVAILABLE', 'No se pudo extraer el vídeo de este embed. Reproduce con embed_url.');
     }
 
-    const mode = resolveMode(String(req.query.mode || 'auto').toLowerCase(), embedUrl, minted.kind);
+    const mode = resolveMode(
+      String(req.query.mode || 'auto').toLowerCase(),
+      embedUrl,
+      minted.kind,
+      clientSendsReferer(req)
+    );
 
     // El camino normal: el CDN del host sirve el vídeo y nosotros no tocamos un byte.
     if (mode === 'redirect') return sendRedirect(res, minted.url);
 
     // Presupuesto de tránsito agotado: se entrega la URL acuñada y que el cliente lo intente
     // por su cuenta. Puede fallar por la atadura de IP, pero le queda el embed como respaldo.
-    if (overBudget) return sendRedirect(res, minted.url);
+    // En `manifest` no aplica: lo que se sirve son kilobytes de texto, no vídeo.
+    if (overBudget && mode !== 'manifest') return sendRedirect(res, minted.url);
 
-    const failed = minted.kind === 'hls'
-      ? await serveManifest(res, minted.url, minted.referer, embedParam)
-      : await pipeUpstream(req, res, minted.url, minted.referer, embedParam);
+    // En `manifest` solo viajan por aquí las playlists; los segmentos van del CDN al reproductor.
+    const rewriteMode: RewriteMode = mode === 'manifest' ? 'manifest' : 'proxy';
+    const serve = (m: MintedStream) => m.kind === 'hls'
+      ? serveManifest(res, m.url, m.referer, embedParam, 'no-store', rewriteMode)
+      : pipeUpstream(req, res, m.url, m.referer, embedParam, 'no-store', rewriteMode);
+
+    const failed = await serve(minted);
     if (failed === null) return;
 
     // El token cacheado ya no vale: se fuerza uno nuevo y se reintenta UNA vez.
     const retry = await mintDirect(embedUrl, { fresh: true });
-    if (!retry) {
-      return sendErrorResponse(res, 502, 'DIRECT_UNAVAILABLE', 'El servidor de vídeo rechazó la petición. Reproduce con embed_url.');
-    }
-    const retryFailed = retry.kind === 'hls'
-      ? await serveManifest(res, retry.url, retry.referer, embedParam)
-      : await pipeUpstream(req, res, retry.url, retry.referer, embedParam);
-    if (retryFailed !== null) {
+    if (!retry || (await serve(retry)) !== null) {
       return sendErrorResponse(res, 502, 'DIRECT_UNAVAILABLE', 'El servidor de vídeo rechazó la petición. Reproduce con embed_url.');
     }
   } catch (err) {
@@ -335,7 +405,8 @@ router.get(DIRECT_BASE, async (req: Request, res: Response, next: NextFunction) 
   }
 });
 
-// Segmentos y variantes del manifiesto reescrito.
+// Segmentos y variantes del manifiesto reescrito. En modo `manifest` (`&m=manifest`) solo llegan
+// aquí las variantes y las claves: los segmentos los pide el reproductor directamente al CDN.
 router.get(`${DIRECT_BASE}/seg`, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const embedParam = String(req.query.e || '');
@@ -350,10 +421,15 @@ router.get(`${DIRECT_BASE}/seg`, async (req: Request, res: Response, next: NextF
       referer = embedUrl ? `${new URL(embedUrl).origin}/` : `${new URL(target).origin}/`;
     } catch {}
 
+    // El modo viaja en la URL que fabricó `rewriteManifest`: una variante que se pide por aquí
+    // tiene que reescribir sus segmentos con el mismo criterio que su padre. Sin esto, el
+    // manifiesto de segundo nivel volvería a envolverlo todo y se perdería el ahorro entero.
+    const rewriteMode: RewriteMode = req.query.m === 'manifest' ? 'manifest' : 'proxy';
+
     const cacheControl = cachePolicyFor(req, true);
     const serve = (url: string) => isManifest(url)
-      ? serveManifest(res, url, referer, embedParam, cacheControl)
-      : pipeUpstream(req, res, url, referer, embedParam, cacheControl);
+      ? serveManifest(res, url, referer, embedParam, cacheControl, rewriteMode)
+      : pipeUpstream(req, res, url, referer, embedParam, cacheControl, rewriteMode);
 
     const failed = await serve(target);
     if (failed === null) return;

@@ -793,7 +793,7 @@
     "/api/v1/stream/direct": {
       "get": {
         "summary": "Vídeo directo de un embed (lo que apunta `direct_stream`)",
-        "description": "Resuelve el vídeo real que hay detrás de un reproductor embebido y lo entrega. Es la URL a la que apunta el campo `direct_stream` de cada servidor: permanente y sin token de cara al cliente, aunque por dentro se acuñe una recién hecha en cada reproducción, porque los CDN firman la URL entera y le ponen caducidad.\n\n**Lo normal es que responda 302** a la URL del CDN (13 de las 14 familias de host medidas): así el vídeo viaja directo del CDN al reproductor, sin pasar por esta API. Solo se reenvían los bytes (200/206) cuando el host valida la IP que acuñó la URL, o cuando exige cabeceras que un navegador no puede poner. En ambos casos basta con seguir la respuesta: **el cliente no tiene que hacer nada distinto**.\n\nSi el embed no es extraíble responde 502 `DIRECT_UNAVAILABLE` y el cliente debe reproducir con `embed_url`.",
+        "description": "Resuelve el vídeo real que hay detrás de un reproductor embebido y lo entrega. Es la URL a la que apunta el campo `direct_stream` de cada servidor: permanente y sin token de cara al cliente, aunque por dentro se acuñe una recién hecha en cada reproducción, porque los CDN firman la URL entera y le ponen caducidad.\n\nSegún lo que exija el host, responde de tres formas: **302** a la URL del CDN (lo más rápido), **200 con un manifiesto HLS reescrito** cuando las playlists del host no se pueden entregar crudas pero sus segmentos sí —solo viajan por aquí unos KB de texto, el vídeo sigue yendo del CDN al reproductor—, o **200/206 reenviando los bytes** cuando el host valida la IP que acuñó la URL o exige cabeceras en los segmentos que un navegador no puede poner. En los tres casos basta con seguir la respuesta: **el cliente no tiene que hacer nada distinto**.\n\nSi el embed no es extraíble responde 502 `DIRECT_UNAVAILABLE` y el cliente debe reproducir con `embed_url`.",
         "parameters": [
           {
             "name": "e",
@@ -808,20 +808,20 @@
             "name": "mode",
             "in": "query",
             "required": false,
-            "description": "Cómo entregar el vídeo.\n\n- `auto` (por defecto): lo más rápido que funcione en CUALQUIER reproductor. Un navegador no necesita declarar nada.\n- `redirect`: para clientes NATIVOS (ExoPlayer, AVPlayer, VLC) que saben fijar `Referer` y `User-Agent`. Devuelve 302 también en los hosts que exigen esas cabeceras — hay que copiarlas del campo `headers` del servidor o el CDN responderá 403. Un navegador NO debe usarlo: no puede fijarlas.\n- `proxy`: fuerza el reenvío de bytes. Es la salida de emergencia si el 302 no reproduce en tu cliente.",
+            "description": "Cómo entregar el vídeo.\n\n- `auto` (por defecto): lo más rápido que funcione en CUALQUIER reproductor. Un navegador no necesita declarar nada. La elección tiene en cuenta si tu petición trae `Referer`/`Origin`, porque hay hosts cuyos segmentos responden 403 sin él.\n- `redirect`: para clientes NATIVOS (ExoPlayer, AVPlayer, VLC) que saben fijar `Referer` y `User-Agent`. Devuelve 302 también en los hosts que exigen esas cabeceras — hay que copiarlas del campo `headers` del servidor y aplicarlas TAMBIÉN a los segmentos, o el CDN responderá 403. Un navegador NO debe usarlo: no puede fijarlas.\n- `manifest`: sirve las playlists desde esta API y deja los segmentos apuntando al CDN. Escalón intermedio para cuando el 302 no reproduce pero no hace falta reenviar vídeo.\n- `proxy`: fuerza el reenvío de bytes. Es la salida de emergencia si nada de lo anterior reproduce en tu cliente.",
             "schema": {
               "type": "string",
-              "enum": ["auto", "redirect", "proxy"],
+              "enum": ["auto", "redirect", "manifest", "proxy"],
               "default": "auto"
             }
           }
         ],
         "responses": {
           "302": {
-            "description": "Redirección a la URL del CDN, recién acuñada. Es la respuesta habitual. Lleva `Referrer-Policy: no-referrer` a propósito: varios de estos CDN aceptan que no haya `Referer` pero devuelven 403 con uno ajeno, así que el navegador NO debe filtrar el origen de tu página al seguirla. Si tu cliente reescribe esa política, el vídeo dejará de reproducir."
+            "description": "Redirección a la URL del CDN, recién acuñada. Lleva `Referrer-Policy: no-referrer` a propósito: varios de estos CDN aceptan que no haya `Referer` pero devuelven 403 con uno ajeno, así que el navegador NO debe filtrar el origen de tu página al seguirla. Si tu cliente reescribe esa política, el vídeo dejará de reproducir."
           },
           "200": {
-            "description": "Manifiesto HLS reescrito, o flujo de vídeo (hosts que no admiten redirección)"
+            "description": "Manifiesto HLS reescrito (`Content-Type: application/vnd.apple.mpegurl`), o flujo de vídeo en los hosts que no admiten ninguna de las dos cosas anteriores. En el manifiesto reescrito, unas URIs apuntan a esta API y otras al CDN: es intencionado, y el reproductor no tiene que distinguirlas."
           },
           "206": {
             "description": "Respuesta parcial de vídeo (Range Request / seek)"
@@ -853,6 +853,16 @@
             "description": "URL del embed en base64url, para poder re-acuñar el token si caduca",
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "m",
+            "in": "query",
+            "required": false,
+            "description": "Modo de reescritura heredado del manifiesto padre, para que una playlist anidada trate sus segmentos con el mismo criterio. Lo pone `/api/v1/stream/direct`; no hay que tocarlo.",
+            "schema": {
+              "type": "string",
+              "enum": ["manifest"]
             }
           }
         ],
@@ -1043,9 +1053,10 @@
             "enum": [
               "public",
               "redirect",
+              "manifest",
               "proxy"
             ],
-            "description": "Qué hará `direct_stream` con este servidor.\n\n- `public`: la URL del CDN no caduca y se entrega tal cual.\n- `redirect`: responde 302 a la URL del CDN. El vídeo va directo del CDN a tu reproductor, sin pasar por esta API: es el camino rápido y el habitual.\n- `proxy`: esta API reenvía los bytes, porque el CDN valida la IP que acuñó la URL o exige cabeceras que un navegador no puede poner.\n\nEs informativo: sirve para saber qué esperar, no hay que actuar distinto según el valor."
+            "description": "Qué hará `direct_stream` con este servidor.\n\n- `public`: la URL del CDN no caduca y se entrega tal cual.\n- `redirect`: responde 302 a la URL del CDN. El vídeo va directo del CDN a tu reproductor, sin pasar por esta API: es el camino rápido.\n- `manifest`: las playlists se sirven desde esta API (unos KB) y los segmentos van del CDN a tu reproductor. Ocurre cuando las playlists del host y sus segmentos exigen cosas contrarias y ningún navegador puede cumplir las dos.\n- `proxy`: esta API reenvía los bytes, porque el CDN valida la IP que acuñó la URL o exige cabeceras que un navegador no puede poner ni siquiera en los segmentos.\n\nEs informativo, y además solo un anuncio: `/api/v1/stream/direct` vuelve a decidir en cada reproducción según tu cliente, así que un valor que se quede viejo no rompe nada."
           },
           "direct_host": {
             "type": "string",
