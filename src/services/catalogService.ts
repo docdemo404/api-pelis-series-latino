@@ -23,10 +23,14 @@ const STREAMS_FRESH_MS = 24 * 60 * 60 * 1000;
 //
 // 2026-07-23 → empezó a extraerse el vídeo directo: lo guardado antes solo tenía embed.
 // 2026-07-25 → se midió qué hosts admiten redirección (src/scrapers/hostPolicy.ts). Lo
-//   guardado antes lleva `direct_mode: 'proxy'` a fuego y sin el campo `headers`. Reproducir
-//   ya funciona igual, porque /stream/direct vuelve a decidir el modo en cada petición; lo que
-//   no se arregla solo es el ORDEN: `streamSorter` puntúa por `direct_mode`, así que con la
-//   etiqueta vieja hundiría precisamente los servidores que no gastan proxy.
+//   guardado antes lleva `direct_mode: 'proxy'` a fuego y sin el campo `headers`.
+//
+//   Ni reproducir ni el ORDEN dependen ya de esto: /stream/direct vuelve a decidir el modo en
+//   cada petición, y `streamSorter` lo RECALCULA antes de ordenar (`effectiveDirectMode`) en vez
+//   de leer la etiqueta guardada — que era lo que hundía precisamente a los servidores que no
+//   gastan proxy. Lo único que sigue sin arreglarse solo es `headers`, que es lo que copia un
+//   cliente nativo para pedir `?mode=redirect`. Si algún día ese campo deja de importar, este
+//   corte se puede retirar y se ahorra un re-escrapeo por título.
 const DIRECT_EXTRACTION_SINCE = Date.parse('2026-07-25T07:32:00Z');
 
 /**
