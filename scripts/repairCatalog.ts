@@ -550,8 +550,8 @@ async function rewriteRowFromMatch(
   type: ContentType,
   tmdbId: number,
   signals: SourceSignals,
-  opts: { apply: boolean; withMetadataSource: boolean }
-): Promise<string | null> {
+  opts: { apply: boolean; withMetadataSource: boolean; quiet?: boolean }
+): Promise<{ title: string | null; taken: boolean }> {
   const base: MediaItem = {
     id: row.id,
     tmdb_id: tmdbId,
@@ -574,7 +574,7 @@ async function rewriteRowFromMatch(
   };
 
   const enriched = await TmdbService.enrichMediaItem(base, { skipSeasons: true });
-  if (!opts.apply) return enriched.title;
+  if (!opts.apply) return { title: enriched.title, taken: false };
 
   const update: Record<string, unknown> = {
     tmdb_id: enriched.tmdb_id,
@@ -602,10 +602,15 @@ async function rewriteRowFromMatch(
 
   const { error } = await db.from('media_items').update(update).eq('id', row.id);
   if (error) {
-    console.warn(`     ⚠ no se pudo guardar ${row.id}: ${error.message}`);
-    return null;
+    // 23505 = violación de unicidad: el id ya lo tiene otra fila. Quien lo decide es la
+    // restricción de la tabla, no una suposición del script: si el UNIQUE se amplió a
+    // (tmdb_id, type) —migración 006— una película y una serie pueden compartir número y
+    // esta escritura entra sin más. Presuponer el choque era negarse a algo ya permitido.
+    const taken = error.code === '23505';
+    if (!taken || !opts.quiet) console.warn(`     ⚠ no se pudo guardar ${row.id}: ${error.message}`);
+    return { title: null, taken };
   }
-  return enriched.title;
+  return { title: enriched.title, taken: false };
 }
 
 /**
@@ -714,10 +719,10 @@ async function relocateOccupant(
     return { freed: true, reason: '' };
   }
 
-  const newTitle = await rewriteRowFromMatch(twin, twinType, own.id, signals, opts);
-  if (!newTitle) return { freed: false, reason: 'no se pudo reescribir' };
+  const moved = await rewriteRowFromMatch(twin, twinType, own.id, signals, opts);
+  if (!moved.title) return { freed: false, reason: 'no se pudo reescribir' };
 
-  console.log(`     ↳ se desaloja ${twin.id}: "${twin.title}" → "${newTitle}" (tmdb ${twin.tmdb_id} → ${own.id}), su página dice "${signals.title}" ${signals.year || 's/a'}`);
+  console.log(`     ↳ se desaloja ${twin.id}: "${twin.title}" → "${moved.title}" (tmdb ${twin.tmdb_id} → ${own.id}), su página dice "${signals.title}" ${signals.year || 's/a'}`);
   return { freed: true, reason: '' };
 }
 
@@ -752,7 +757,11 @@ async function verifyAgainstSource(apply: boolean, limitArg?: number, restart = 
   const done = loadCheckpoint(checkpoint, restart);
   if (done.size > 0) console.log(`   ↻ reanudando: ${done.size} fichas ya repasadas (usa --restart para empezar de cero)`);
 
-  const rows = (await fetchAllRows(withMultiSource ? ['source_urls'] : []))
+  const extraColumns = [
+    ...(withMultiSource ? ['source_urls'] : []),
+    ...(withMetadataSource ? ['metadata_source'] : [])
+  ];
+  const rows = (await fetchAllRows(extraColumns))
     .filter(row => sourceUrlOf(row) && !done.has(row.id));
   const targets = Number.isFinite(limitArg) && (limitArg as number) > 0 ? rows.slice(0, limitArg) : rows;
   console.log(`   ${targets.length} fichas por repasar`);
@@ -806,6 +815,17 @@ async function verifyAgainstSource(apply: boolean, limitArg?: number, restart = 
         continue;
       }
       if (confirmedByImage) {
+        // Confirmar que la ficha es la correcta no dice que esté RELLENA: si TMDB falló al pedir
+        // los detalles en su día, la fila conserva el id bueno con la metadata del sitio de
+        // origen. Se rellena aquí también, o esta vía la daría por buena para siempre.
+        if (withMetadataSource && row.tmdb_id > 0 && row.metadata_source === 'source') {
+          const filled = await rewriteRowFromMatch(row, type, row.tmdb_id, signals, { apply, withMetadataSource });
+          if (filled.title) {
+            console.log(`   ✓ ${row.id}\n     "${row.title}" estaba confirmada por imagen pero sin metadata de TMDB → "${filled.title}"`);
+            fixed++;
+            continue;
+          }
+        }
         okImage++;
         continue;
       }
@@ -814,7 +834,23 @@ async function verifyAgainstSource(apply: boolean, limitArg?: number, restart = 
         console.log(`   ? ${row.id}\n     "${row.title}" · la fuente dice "${signals.title}" (${signals.year || 'sin año'}) y no hay match fiable: se deja igual`);
         continue;
       }
-      if (match.id === row.tmdb_id) {
+      // Coincidir en el NÚMERO no basta: tiene que ser del mismo catálogo. `submundo` estaba
+      // guardada como serie con el id 957951, que es de una película, así que pedir su ficha
+      // devolvía 404 y la fila se quedaba sin metadata para siempre, dándose por correcta en
+      // cada revisión. Cuando el match dice otro catálogo, lo que hay que arreglar es el tipo.
+      if (match.id === row.tmdb_id && match.type === type) {
+        // El id es el bueno, pero la ficha puede no haberse llegado a rellenar: si TMDB falla al
+        // pedir los detalles, el enriquecido conserva el id real y se queda con la metadata del
+        // sitio de origen (`metadata_source: 'source'`), es decir, sin sinopsis, sin géneros y
+        // con el póster de la fuente. Coincidir en el id no basta para darla por buena.
+        if (withMetadataSource && row.tmdb_id > 0 && row.metadata_source === 'source') {
+          const filled = await rewriteRowFromMatch(row, match.type, match.id, signals, { apply, withMetadataSource });
+          if (filled.title) {
+            console.log(`   ✓ ${row.id}\n     "${row.title}" tenía el id correcto (${match.id}) pero sin metadata de TMDB → "${filled.title}"`);
+            fixed++;
+          }
+          continue;
+        }
         okRematch++;
         continue;
       }
@@ -845,6 +881,19 @@ async function verifyAgainstSource(apply: boolean, limitArg?: number, restart = 
       // se le da a esa fila su propia verificación; si su página la desmiente, se corrige, el
       // hueco queda libre y las dos fichas acaban bien.
       if (twin && (twin.type === 'tvseries' ? 'tvseries' : 'movie') !== match.type) {
+        // Que el número lo tenga una ficha del OTRO catálogo puede no ser ningún impedimento:
+        // con el UNIQUE ampliado a (tmdb_id, type) —migración 006— una película y una serie
+        // conviven con el mismo número, que es lo que TMDB hace de partida. Así que primero se
+        // INTENTA escribir y se deja que responda la restricción de la tabla; solo si la rechaza
+        // se busca desalojar al ocupante, y solo si eso tampoco puede, se da por bloqueada.
+        const direct = await rewriteRowFromMatch(row, match.type, match.id, signals, { apply, withMetadataSource, quiet: true });
+        if (direct.title) {
+          console.log(`   ✓ ${row.id}\n     "${row.title}" → "${direct.title}" (tmdb ${row.tmdb_id} → ${match.id}, comparte número con ${twin.id} pero en otro catálogo)`);
+          fixed++;
+          continue;
+        }
+        if (!direct.taken) continue;
+
         const evicted = await relocateOccupant(twin, { apply, withMetadataSource, withMultiSource });
         if (!evicted.freed) {
           blocked++;
@@ -855,13 +904,6 @@ async function verifyAgainstSource(apply: boolean, limitArg?: number, restart = 
           continue;
         }
         relocated++;
-        // En dry-run el hueco no se libera de verdad, así que aquí solo se informa de que la
-        // corrección de esta fila vendría DESPUÉS de mover a la ocupante.
-        if (!apply) {
-          console.log(`   ✓ ${row.id}\n     "${row.title}" → tmdb ${match.id} (una vez desalojada ${twin.id})`);
-          fixed++;
-          continue;
-        }
         twin = null;
       }
 
@@ -880,9 +922,9 @@ async function verifyAgainstSource(apply: boolean, limitArg?: number, restart = 
       }
 
       // Ficha nueva completa, partiendo del título REAL que publica la fuente.
-      const newTitle = await rewriteRowFromMatch(row, type, match.id, signals, { apply, withMetadataSource });
-      if (newTitle) {
-        console.log(`   ✓ ${row.id}\n     "${row.title}" → "${newTitle}" (tmdb ${row.tmdb_id} → ${match.id}, la fuente dice "${signals.title}" ${signals.year || 's/a'})`);
+      const rewritten = await rewriteRowFromMatch(row, match.type, match.id, signals, { apply, withMetadataSource });
+      if (rewritten.title) {
+        console.log(`   ✓ ${row.id}\n     "${row.title}" → "${rewritten.title}" (tmdb ${row.tmdb_id} → ${match.id}, la fuente dice "${signals.title}" ${signals.year || 's/a'})`);
         fixed++;
       }
     }
