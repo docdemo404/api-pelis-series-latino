@@ -49,6 +49,15 @@ export interface TmdbMatch {
 interface ScoredResult {
   score: number;
   verified: boolean;
+  /**
+   * El título ORIGINAL de la ficha coincide con el que publica la fuente.
+   *
+   * Es la señal que desempata a los que se llaman igual Y se estrenaron el mismo año, donde ni
+   * el título ni la fecha distinguen nada: buscando "Big Bang" (2007), TMDB devuelve la serie
+   * "Big Bang" (2 votos) con el nombre calcado y The Big Bang Theory rotulada "La Teoría del
+   * Big Bang", que se parece menos. Solo el original —"The Big Bang Theory"— dice cuál es.
+   */
+  originalMatch: boolean;
 }
 
 /** Un resultado de /search ya puntuado, tal y como circula por la escalera de `resolveTmdb`. */
@@ -276,7 +285,7 @@ function scoreResult(
   // Solo CONFIRMA; si no coincide no penaliza —la página pudo usar el póster de otro idioma—.
   if (imageHint) {
     if (imageHint === tmdbImagePath(result.poster_path) || imageHint === tmdbImagePath(result.backdrop_path)) {
-      return { score: 1, verified: true };
+      return { score: 1, verified: true, originalMatch: true };
     }
   }
 
@@ -316,7 +325,7 @@ function scoreResult(
       else best -= 0.45;
     }
   }
-  return { score: Math.max(0, Math.min(1, best)), verified };
+  return { score: Math.max(0, Math.min(1, best)), verified, originalMatch: originalConfirms };
 }
 
 /**
@@ -338,6 +347,7 @@ function beatsCandidate(c: Candidate, best: Candidate | null, wanted: 'movie' | 
   if (c.score > best.score + TIE_MARGIN) return true;
   if (Math.abs(c.score - best.score) > TIE_MARGIN) return false;
   if ((c.endpoint === wanted) !== (best.endpoint === wanted)) return c.endpoint === wanted;
+  if (c.originalMatch !== best.originalMatch) return c.originalMatch;
   if (c.verified !== best.verified) return c.verified;
   return c.credibility > best.credibility;
 }
@@ -524,6 +534,7 @@ export class TmdbService {
     let bestId = 0;
     let bestScore = 0;
     let bestVerified = false;
+    let bestOriginalMatch = false;
     let bestEndpoint: 'movie' | 'tv' = endpoint;
 
     /**
@@ -534,8 +545,16 @@ export class TmdbService {
      * que sí lo desempata. Un acierto en el catálogo contrario tampoco cierra nada: la serie
      * "¿Solo en casa?" (2017) se llama en original "Home Alone" y calcaba las dos consultas,
      * cerrando la búsqueda antes de mirar una sola película.
+     *
+     * Y si la fuente publica un título ORIGINAL que aún no ha confirmado nadie, la búsqueda sigue
+     * abierta por bueno que parezca lo encontrado: para "Big Bang" (2007) TMDB devuelve una serie
+     * de 2 votos llamada exactamente así, que calca título y año, mientras The Big Bang Theory
+     * vuelve rotulada "La Teoría del Big Bang" y puntúa menos. Cerrar ahí guardaba la serie
+     * equivocada sin llegar a preguntar por "The Big Bang Theory", que las separa sin lugar a duda.
      */
-    const settled = () => bestScore >= CONFIDENT_SCORE && bestVerified && bestEndpoint === endpoint;
+    const settled = () =>
+      bestScore >= CONFIDENT_SCORE && bestVerified && bestEndpoint === endpoint
+      && (!useOriginal || bestOriginalMatch);
     // Todos los candidatos vistos en la escalera, para el rescate por título alternativo:
     // el correcto puede estar hundido en la puntuación y no ser nunca "el mejor".
     // La clave lleva el endpoint porque los ids se repiten entre películas y series: con la
@@ -554,6 +573,7 @@ export class TmdbService {
         bestId = best.id;
         bestScore = best.score;
         bestVerified = best.verified;
+        bestOriginalMatch = best.originalMatch;
         bestEndpoint = best.endpoint;
       }
       return settled();
@@ -654,6 +674,7 @@ export class TmdbService {
         bestId = rescued.cand.id;
         bestScore = rescued.score;
         bestVerified = rescued.verified;
+        bestOriginalMatch = rescued.cand.originalMatch;
         bestEndpoint = rescued.cand.endpoint;
       }
     }
@@ -683,12 +704,13 @@ export class TmdbService {
 
           const scored: ScoredResult = details
             ? scoreResult(details, cleanTitle, year, imageHint, knownOriginal)
-            : { score: Math.min(similarity(cleanTitle, cardTitle), MATCH_THRESHOLD - 0.01), verified: false };
+            : { score: Math.min(similarity(cleanTitle, cardTitle), MATCH_THRESHOLD - 0.01), verified: false, originalMatch: false };
 
           if (scored.score > bestScore) {
             bestId = scrapedId;
             bestScore = scored.score;
             bestVerified = scored.verified;
+            bestOriginalMatch = scored.originalMatch;
             bestEndpoint = scrapedEndpoint;
           }
         }
