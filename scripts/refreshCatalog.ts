@@ -112,7 +112,16 @@ async function mergeIntoExisting(
     'id,title,original_title,aliases,poster,backdrop,logo,overview,runtime,director,source_url,trailer' +
     (opts.withMultiSource ? ',source_urls' : '');
 
-  const { data } = await db.from('media_items').select(columns).eq('tmdb_id', tmdbId).limit(1);
+  // El tipo forma parte de la identidad de la ficha: TMDB numera películas y series por
+  // separado y el mismo número designa títulos distintos (movie 108291 "Road Dogz" frente a
+  // tv 108291 "Snowdrop"). Sin filtrar por él, un choque entre catálogos se resolvía volcando
+  // la ficha dentro de una desconocida que solo compartía el número.
+  const { data } = await db
+    .from('media_items')
+    .select(columns)
+    .eq('tmdb_id', tmdbId)
+    .eq('type', row.type as string)
+    .limit(1);
 
   const existing: any = data && data[0];
   if (!existing) return false;

@@ -3,7 +3,11 @@
 -- 1. Tabla Principal de Películas y Series
 CREATE TABLE IF NOT EXISTS media_items (
     id VARCHAR(255) PRIMARY KEY,
-    tmdb_id INT UNIQUE NOT NULL,
+    -- TMDB numera películas y series por separado y los números se repiten (movie 108291 es
+    -- "Road Dogz" y tv 108291 es "Snowdrop"), así que la clave real es el par con el tipo.
+    -- Con el UNIQUE solo sobre tmdb_id, la segunda de las dos no podía guardarse nunca bien.
+    -- Ver src/db/migrations/006_tmdb_id_unique_por_tipo.sql.
+    tmdb_id INT NOT NULL,
     imdb_id VARCHAR(50),
     type VARCHAR(20) NOT NULL CHECK (type IN ('movie', 'tvseries')),
     title VARCHAR(500) NOT NULL,
@@ -40,7 +44,9 @@ CREATE TABLE IF NOT EXISTS media_items (
     has_streams BOOLEAN,
     streams_checked_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    -- Una ficha de TMDB queda identificada por su número Y su catálogo (ver tmdb_id).
+    CONSTRAINT media_items_tmdb_id_type_key UNIQUE (tmdb_id, type)
 );
 
 -- Desactivar RLS o permitir acceso de lectura/escritura público para la API
@@ -48,6 +54,8 @@ ALTER TABLE media_items DISABLE ROW LEVEL SECURITY;
 
 -- 2. Índices de Búsqueda Instantánea (< 10ms)
 CREATE INDEX IF NOT EXISTS idx_media_type ON media_items(type);
+-- Resolución de una ficha por su id numérico de TMDB (catalogService, mergeIntoExisting).
+CREATE INDEX IF NOT EXISTS idx_media_tmdb_id ON media_items (tmdb_id);
 CREATE INDEX IF NOT EXISTS idx_media_title ON media_items USING gin(to_tsvector('spanish', title));
 CREATE INDEX IF NOT EXISTS idx_media_aliases ON media_items USING gin(aliases);
 

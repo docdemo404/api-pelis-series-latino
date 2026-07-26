@@ -541,6 +541,186 @@ async function fuseSyntheticDuplicates(apply: boolean, limitArg?: number): Promi
  * El punto de guardado va SEPARADO por modo: si el dry-run marcase las fichas como repasadas,
  * la pasada real con --apply se las saltaría enteras y no corregiría nada.
  */
+/**
+ * Reescribe una fila con la ficha que de verdad le corresponde, re-enriquecida desde TMDB a
+ * partir del título REAL que publica su página. Devuelve el título nuevo, o null si falló.
+ */
+async function rewriteRowFromMatch(
+  row: any,
+  type: ContentType,
+  tmdbId: number,
+  signals: SourceSignals,
+  opts: { apply: boolean; withMetadataSource: boolean }
+): Promise<string | null> {
+  const base: MediaItem = {
+    id: row.id,
+    tmdb_id: tmdbId,
+    imdb_id: null,
+    type,
+    title: signals.title,
+    original_title: signals.originalTitle || signals.title,
+    aliases: dedupeTitles([signals.title, row.title]),
+    overview: '',
+    rating: 0,
+    release_date: signals.year || '',
+    genres: [],
+    subcategories: [],
+    poster: null,
+    backdrop: null,
+    logo: null,
+    trailer: null,
+    cast: [],
+    dubbing_cast: []
+  };
+
+  const enriched = await TmdbService.enrichMediaItem(base, { skipSeasons: true });
+  if (!opts.apply) return enriched.title;
+
+  const update: Record<string, unknown> = {
+    tmdb_id: enriched.tmdb_id,
+    type: enriched.type,
+    title: enriched.title,
+    original_title: enriched.original_title || enriched.title,
+    title_normalized: searchIndexKey(enriched.title, enriched.original_title, enriched.aliases),
+    aliases: enriched.aliases || [],
+    tagline: enriched.tagline || '',
+    overview: enriched.overview || '',
+    rating: enriched.rating || 0,
+    content_rating: enriched.content_rating || null,
+    release_date: enriched.release_date || '',
+    genres: enriched.genres || [],
+    poster: enriched.poster,
+    backdrop: enriched.backdrop,
+    logo: enriched.logo,
+    trailer: enriched.trailer,
+    cast_data: (enriched.cast_details && enriched.cast_details.length ? enriched.cast_details : enriched.cast) || [],
+    total_seasons: enriched.total_seasons || 0,
+    total_episodes: enriched.total_episodes || 0,
+    updated_at: new Date().toISOString()
+  };
+  if (opts.withMetadataSource) update.metadata_source = enriched.metadata_source || 'tmdb';
+
+  const { error } = await db.from('media_items').update(update).eq('id', row.id);
+  if (error) {
+    console.warn(`     ⚠ no se pudo guardar ${row.id}: ${error.message}`);
+    return null;
+  }
+  return enriched.title;
+}
+
+/**
+ * Funde una fila dentro de la que ya tiene su ficha oficial y la elimina.
+ *
+ * Lo único que la copia aporta son su(s) página(s) de origen —sus servidores, a menudo de otra
+ * fuente distinta a la de la gemela— y sus nombres: se vuelcan en la canónica ANTES de borrar,
+ * o al eliminar la fila se perderían enlaces de reproducción.
+ */
+async function fuseRowInto(
+  row: any,
+  twin: any,
+  extraAliases: string[],
+  opts: { apply: boolean; withMultiSource: boolean }
+): Promise<{ ok: boolean; urls: [number, number]; aliases: [number, number] }> {
+  const currentUrls: string[] = twin.source_urls || [];
+  const mergedUrls = Array.from(new Set(
+    [...currentUrls, twin.source_url, ...(row.source_urls || []), row.source_url].filter(Boolean) as string[]
+  ));
+  const currentAliases: string[] = twin.aliases || [];
+  const mergedAliases = dedupeTitles([...currentAliases, ...(row.aliases || []), row.title, ...extraAliases]);
+
+  const sizes = {
+    urls: [currentUrls.length, mergedUrls.length] as [number, number],
+    aliases: [currentAliases.length, mergedAliases.length] as [number, number]
+  };
+  if (!opts.apply) return { ok: true, ...sizes };
+
+  const patch: Record<string, unknown> = {};
+  if (opts.withMultiSource && mergedUrls.length > currentUrls.length) patch.source_urls = mergedUrls;
+  if (mergedAliases.length > currentAliases.length) {
+    patch.aliases = mergedAliases;
+    patch.title_normalized = searchIndexKey(twin.title, twin.original_title, mergedAliases);
+  }
+
+  if (Object.keys(patch).length > 0) {
+    const { error } = await db.from('media_items').update(patch).eq('id', twin.id);
+    if (error) {
+      console.warn(`     ⚠ no se pudo enriquecer ${twin.id}: ${error.message} (no se borra el duplicado)`);
+      return { ok: false, ...sizes };
+    }
+  }
+  const { error: delErr } = await db.from('media_items').delete().eq('id', row.id);
+  if (delErr) {
+    console.warn(`     ⚠ no se pudo borrar ${row.id}: ${delErr.message}`);
+    return { ok: false, ...sizes };
+  }
+  return { ok: true, ...sizes };
+}
+
+/**
+ * Intenta DESALOJAR al ocupante de un tmdb_id verificándolo contra SU propia página.
+ *
+ * La columna `tmdb_id` es UNIQUE para películas y series a la vez, pero TMDB las numera por
+ * separado y los números se repiten, así que una ficha correcta puede encontrarse su hueco
+ * ocupado por otra que no tiene nada que ver. Ahora bien, en la práctica el ocupante suele ser
+ * el que está mal: la fila `campanilla` guardaba "Road Dogz" (movie 108291) cuando su página
+ * dice Tinker Bell (2008), y era ella quien le bloqueaba el número a la serie "Snowdrop"
+ * (tv 108291). Corregir al ocupante libera el hueco y las DOS fichas quedan bien.
+ *
+ * Solo se mueve al ocupante si su propia página lo desmiente con respaldo, y nunca en cadena:
+ * si su id correcto también está pillado, se deja todo como está.
+ */
+async function relocateOccupant(
+  twin: any,
+  opts: { apply: boolean; withMetadataSource: boolean; withMultiSource: boolean }
+): Promise<{ freed: boolean; reason: string }> {
+  const twinType: ContentType = twin.type === 'tvseries' ? 'tvseries' : 'movie';
+  const signals = await refetchSourceSignals(twin);
+  if (!signals || !signals.title) return { freed: false, reason: 'su página no responde' };
+
+  const own = await TmdbService.resolveTmdb(signals.title, twinType, signals.year || undefined, twin.id, {
+    originalTitle: signals.originalTitle || null,
+    imageHint: signals.imageHint || null
+  }).catch(() => null);
+
+  if (!own || !own.matched || !own.verified) return { freed: false, reason: 'su página no confirma otra ficha' };
+  if (own.id === twin.tmdb_id) return { freed: false, reason: 'su página confirma que el id es suyo' };
+  if (own.type !== twinType) return { freed: false, reason: 'su ficha correcta es de otro catálogo' };
+
+  const { data: nextClash } = await db
+    .from('media_items')
+    .select(opts.withMultiSource
+      ? 'id,type,title,original_title,aliases,source_url,source_urls'
+      : 'id,type,title,original_title,aliases,source_url')
+    .eq('tmdb_id', own.id)
+    .neq('id', twin.id)
+    .limit(1);
+
+  const owner: any = nextClash && nextClash.length > 0 ? nextClash[0] : null;
+
+  // Su ficha correcta ya está en el catálogo: entonces el ocupante no es una fila que haya que
+  // mover, es un DUPLICADO de aquella. Fundirlo la enriquece con su fuente y libera el número
+  // igual de bien. Es el caso real: `campanilla` guardaba "Road Dogz" (108291) cuando su página
+  // dice Tinker Bell, y Tinker Bell (13179) ya existía como ficha de FuegoCine.
+  if (owner) {
+    if ((owner.type === 'tvseries' ? 'tvseries' : 'movie') !== own.type) {
+      return { freed: false, reason: `su id correcto (${own.id}) lo ocupa una ficha de otro catálogo` };
+    }
+    const merged = await fuseRowInto(twin, owner, [signals.title], opts);
+    if (!merged.ok) return { freed: false, reason: 'no se pudo fundir con su ficha oficial' };
+    console.log(
+      `     ↳ se desaloja ${twin.id}: "${twin.title}" era un duplicado de ${owner.id} = "${owner.title}" (tmdb ${own.id}), su página dice "${signals.title}" ${signals.year || 's/a'}` +
+      `\n       se funde ahí (fuentes ${merged.urls[0]}→${merged.urls[1]}, alias ${merged.aliases[0]}→${merged.aliases[1]}) y libera el ${twin.tmdb_id}`
+    );
+    return { freed: true, reason: '' };
+  }
+
+  const newTitle = await rewriteRowFromMatch(twin, twinType, own.id, signals, opts);
+  if (!newTitle) return { freed: false, reason: 'no se pudo reescribir' };
+
+  console.log(`     ↳ se desaloja ${twin.id}: "${twin.title}" → "${newTitle}" (tmdb ${twin.tmdb_id} → ${own.id}), su página dice "${signals.title}" ${signals.year || 's/a'}`);
+  return { freed: true, reason: '' };
+}
+
 const verifyCheckpointFile = (apply: boolean) =>
   apply ? 'repair_verify_progress.json' : 'repair_verify_progress.dry.json';
 
@@ -584,6 +764,10 @@ async function verifyAgainstSource(apply: boolean, limitArg?: number, restart = 
   let doubtful = 0;
   let noSignals = 0;
   let unresolved = 0;
+  /** Fichas que le robaban el número a otra y su propia página desmintió: se movieron. */
+  let relocated = 0;
+  /** Choques de id entre catálogos que NO se pudieron deshacer (requieren la migración 006). */
+  let blocked = 0;
 
   const CONCURRENCY = 6;
   for (let i = 0; i < targets.length; i += CONCURRENCY) {
@@ -643,134 +827,70 @@ async function verifyAgainstSource(apply: boolean, limitArg?: number, restart = 
         continue;
       }
 
+      const clashColumns = withMultiSource
+        ? 'id,tmdb_id,type,title,original_title,aliases,source_url,source_urls'
+        : 'id,tmdb_id,type,title,original_title,aliases,source_url';
       const { data: clash } = await db
-        .from('media_items')
-        .select(withMultiSource
-          ? 'id,type,title,original_title,aliases,source_url,source_urls'
-          : 'id,type,title,original_title,aliases,source_url')
-        .eq('tmdb_id', match.id)
-        .neq('id', row.id)
-        .limit(1);
+        .from('media_items').select(clashColumns).eq('tmdb_id', match.id).neq('id', row.id).limit(1);
 
-      const twin: any = clash && clash.length > 0 ? clash[0] : null;
+      let twin: any = clash && clash.length > 0 ? clash[0] : null;
 
       // Mismo número, otro catálogo: NO es un duplicado. TMDB numera películas y series por
       // separado y los ids se repiten, pero la columna tmdb_id es UNIQUE para las dos, así que
       // la serie "Snowdrop" (tv 108291) choca con la película "Road Dogz" (movie 108291) sin
-      // tener nada que ver. Fundir ahí mezclaría dos títulos ajenos: se informa y se deja.
+      // tener nada que ver. Fundirlas mezclaría dos títulos ajenos.
+      //
+      // Casi siempre el que sobra es el OCUPANTE, no quien reclama el número: "Road Dogz" estaba
+      // en la fila `campanilla`, cuya página dice Tinker Bell (2008). Así que antes de rendirse
+      // se le da a esa fila su propia verificación; si su página la desmiente, se corrige, el
+      // hueco queda libre y las dos fichas acaban bien.
       if (twin && (twin.type === 'tvseries' ? 'tvseries' : 'movie') !== match.type) {
-        doubtful++;
-        console.log(
-          `   ! ${row.id}\n     "${row.title}" es tmdb ${match.id} (${match.type}), pero ese número ya lo ocupa ${twin.id} = "${twin.title}" (${twin.type}).` +
-          `\n       Son fichas distintas con el mismo id en catálogos distintos: no se toca ninguna.`
-        );
-        continue;
+        const evicted = await relocateOccupant(twin, { apply, withMetadataSource, withMultiSource });
+        if (!evicted.freed) {
+          blocked++;
+          console.log(
+            `   ! ${row.id}\n     "${row.title}" es tmdb ${match.id} (${match.type}), pero ese número lo ocupa ${twin.id} = "${twin.title}" (${twin.type}), y ${evicted.reason}.` +
+            `\n       Son fichas distintas con el mismo id en catálogos distintos: no se toca ninguna (ver migración 006).`
+          );
+          continue;
+        }
+        relocated++;
+        // En dry-run el hueco no se libera de verdad, así que aquí solo se informa de que la
+        // corrección de esta fila vendría DESPUÉS de mover a la ocupante.
+        if (!apply) {
+          console.log(`   ✓ ${row.id}\n     "${row.title}" → tmdb ${match.id} (una vez desalojada ${twin.id})`);
+          fixed++;
+          continue;
+        }
+        twin = null;
       }
 
       // El tmdb_id es UNIQUE: si la ficha correcta ya está en el catálogo, esta fila es un
       // DUPLICADO. Lo único que aporta son su página de origen (sus servidores, a menudo de otra
       // fuente) y su nombre: se vuelcan en la canónica ANTES de borrarla o se perderían enlaces.
       if (twin) {
-        const currentUrls: string[] = twin.source_urls || [];
-        const mergedUrls = Array.from(
-          new Set([...currentUrls, twin.source_url, ...(row.source_urls || []), row.source_url].filter(Boolean) as string[])
-        );
-        const currentAliases: string[] = twin.aliases || [];
-        const mergedAliases = dedupeTitles([...currentAliases, ...(row.aliases || []), row.title, signals.title]);
-
-        const patch: Record<string, unknown> = {};
-        if (withMultiSource && mergedUrls.length > currentUrls.length) patch.source_urls = mergedUrls;
-        if (mergedAliases.length > currentAliases.length) {
-          patch.aliases = mergedAliases;
-          patch.title_normalized = searchIndexKey(twin.title, twin.original_title, mergedAliases);
-        }
-
+        const merged = await fuseRowInto(row, twin, [signals.title], { apply, withMultiSource });
+        if (!merged.ok) continue;
         console.log(
           `   ⇄ ${row.id}\n     "${row.title}" (tmdb ${row.tmdb_id}) era en realidad "${signals.title}" = tmdb ${match.id}, que ya es ${twin.id} = "${twin.title}"` +
-          `\n       se funde ahí (fuentes ${currentUrls.length}→${mergedUrls.length}, alias ${currentAliases.length}→${mergedAliases.length}) y se elimina el duplicado`
+          `\n       se funde ahí (fuentes ${merged.urls[0]}→${merged.urls[1]}, alias ${merged.aliases[0]}→${merged.aliases[1]}) y se elimina el duplicado`
         );
-
-        if (apply) {
-          if (Object.keys(patch).length > 0) {
-            const { error: mergeErr } = await db.from('media_items').update(patch).eq('id', twin.id);
-            if (mergeErr) {
-              console.warn(`     ⚠ no se pudo enriquecer ${twin.id}: ${mergeErr.message} (no se borra el duplicado)`);
-              continue;
-            }
-          }
-          const { error: delErr } = await db.from('media_items').delete().eq('id', row.id);
-          if (delErr) {
-            console.warn(`     ⚠ no se pudo borrar ${row.id}: ${delErr.message}`);
-            continue;
-          }
-        }
         fused++;
         continue;
       }
 
       // Ficha nueva completa, partiendo del título REAL que publica la fuente.
-      const base: MediaItem = {
-        id: row.id,
-        tmdb_id: match.id,
-        imdb_id: null,
-        type,
-        title: signals.title,
-        original_title: signals.originalTitle || signals.title,
-        aliases: dedupeTitles([signals.title, row.title]),
-        overview: '',
-        rating: 0,
-        release_date: signals.year || '',
-        genres: [],
-        subcategories: [],
-        poster: null,
-        backdrop: null,
-        logo: null,
-        trailer: null,
-        cast: [],
-        dubbing_cast: []
-      };
-
-      const enriched = await TmdbService.enrichMediaItem(base, { skipSeasons: true });
-      console.log(`   ✓ ${row.id}\n     "${row.title}" → "${enriched.title}" (tmdb ${row.tmdb_id} → ${enriched.tmdb_id}, la fuente dice "${signals.title}" ${signals.year || 's/a'})`);
-
-      if (!apply) {
+      const newTitle = await rewriteRowFromMatch(row, type, match.id, signals, { apply, withMetadataSource });
+      if (newTitle) {
+        console.log(`   ✓ ${row.id}\n     "${row.title}" → "${newTitle}" (tmdb ${row.tmdb_id} → ${match.id}, la fuente dice "${signals.title}" ${signals.year || 's/a'})`);
         fixed++;
-        continue;
       }
-
-      const update: Record<string, unknown> = {
-        tmdb_id: enriched.tmdb_id,
-        type: enriched.type,
-        title: enriched.title,
-        original_title: enriched.original_title || enriched.title,
-        title_normalized: searchIndexKey(enriched.title, enriched.original_title, enriched.aliases),
-        aliases: enriched.aliases || [],
-        tagline: enriched.tagline || '',
-        overview: enriched.overview || '',
-        rating: enriched.rating || 0,
-        content_rating: enriched.content_rating || null,
-        release_date: enriched.release_date || '',
-        genres: enriched.genres || [],
-        poster: enriched.poster,
-        backdrop: enriched.backdrop,
-        logo: enriched.logo,
-        trailer: enriched.trailer,
-        cast_data: (enriched.cast_details && enriched.cast_details.length ? enriched.cast_details : enriched.cast) || [],
-        total_seasons: enriched.total_seasons || 0,
-        total_episodes: enriched.total_episodes || 0,
-        updated_at: new Date().toISOString()
-      };
-      if (withMetadataSource) update.metadata_source = enriched.metadata_source || 'tmdb';
-
-      const { error } = await db.from('media_items').update(update).eq('id', row.id);
-      if (error) console.warn(`     ⚠ no se pudo guardar: ${error.message}`);
-      else fixed++;
     }
 
     saveCheckpoint(checkpoint, done);
     const seen = Math.min(i + CONCURRENCY, targets.length);
     if (seen % 300 === 0 || seen === targets.length) {
-      console.log(`   …${seen}/${targets.length} · ${okImage + okRematch} correctas · ${fixed + fused} con problema · ${doubtful} dudosas`);
+      console.log(`   …${seen}/${targets.length} · ${okImage + okRematch} correctas · ${fixed + fused + relocated} con problema · ${doubtful} dudosas · ${blocked} bloqueadas`);
     }
   }
 
@@ -778,8 +898,13 @@ async function verifyAgainstSource(apply: boolean, limitArg?: number, restart = 
     `\n${apply ? '✅ Verificación aplicada' : '📋 Dry-run'}: ` +
     `${okImage} confirmadas por imagen, ${okRematch} confirmadas al re-resolver, ` +
     `${fixed} ${apply ? 'corregidas' : 'a corregir'}, ${fused} duplicados ${apply ? 'fundidos' : 'a fundir'}, ` +
-    `${doubtful} dudosas (solo informadas), ${unresolved} sin match fiable, ${noSignals} sin señales en su página`
+    `${relocated} ocupantes ${apply ? 'desalojadas' : 'a desalojar'} de un id ajeno, ` +
+    `${doubtful} dudosas (solo informadas), ${blocked} bloqueadas por choque de id entre catálogos, ` +
+    `${unresolved} sin match fiable, ${noSignals} sin señales en su página`
   );
+  if (blocked > 0) {
+    console.log(`   ⚠ ${blocked} choques no se pueden deshacer sin ampliar el UNIQUE de tmdb_id: aplica src/db/migrations/006_tmdb_id_unique_por_tipo.sql`);
+  }
   if (!apply && (fixed > 0 || fused > 0)) console.log('   Ejecuta de nuevo con --verify --apply para escribir los cambios.');
 }
 

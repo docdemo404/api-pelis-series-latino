@@ -220,10 +220,13 @@ export class CatalogService {
       if (data && data.length > 0) return { row: data[0], score: 100 };
     } catch {}
 
-    // b) tmdb_id numérico.
+    // b) tmdb_id numérico. Un mismo número puede designar una película Y una serie —TMDB las
+    //    numera por separado—, así que cuando el llamador dice de cuál habla, se le hace caso;
+    //    si no lo dice, la primera que aparezca es lo mejor que se puede ofrecer.
     if (!isNaN(Number(slug))) {
       try {
-        const { data } = await supabase.from('media_items').select('*').eq('tmdb_id', Number(slug)).limit(1);
+        const byTmdb = supabase.from('media_items').select('*').eq('tmdb_id', Number(slug));
+        const { data } = await (typeHint ? byTmdb.eq('type', typeHint) : byTmdb).limit(1);
         if (data && data.length > 0) return { row: data[0], score: 100 };
       } catch {}
     }
