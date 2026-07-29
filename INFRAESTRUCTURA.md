@@ -93,14 +93,20 @@ npx vercel --prod
 
 ## Comprobar que funcionó
 
-Pega esto. Antes de la tarea 2 devuelve `200`; después tiene que devolver `302` y una dirección
-que acabe en `workers.dev`:
+Pega esto:
 
 ```bash
-curl -s -o /dev/null -w "%{http_code} -> %{redirect_url}\n" "https://api-pelis-series-latino.vercel.app/api/v1/stream/direct?e=aHR0cHM6Ly92aWRoaWRlcGx1cy5jb20vdi8xMTlid290ZmJ4MXI"
+curl -s -o /dev/null -w "%{http_code} -> %{redirect_url}\n" "https://api-pelis-series-latino.vercel.app/api/v1/stream/direct?e=aHR0cHM6Ly92aWRoaWRlcGx1cy5jb20vdi81d3dmMnplcm50cGY"
 ```
 
-Si sale `302` y apunta a `workers.dev`, está funcionando: ese vídeo ya no pasa por Vercel.
+**Lo único que importa es la dirección de la derecha.** Si acaba en `workers.dev`, funcionó: ese
+vídeo ya no pasa por Vercel.
+
+- Antes de la tarea 2: sale `200` y ninguna dirección (lo sirve Vercel).
+- Después: sale `302` y una dirección `…workers.dev/?e=…`.
+
+Si en vez de eso ves `502`, prueba con otra película: significa que ese vídeo concreto ya no
+existe en el host, no que algo esté mal montado.
 
 **Pásame la URL del Worker y lo verifico yo de punta a punta**, que es lo que de verdad demuestra
 que reproduce.
