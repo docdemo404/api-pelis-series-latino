@@ -31,7 +31,31 @@ import { streamClient } from '../utils/httpClient';
 /** Cuánto se recuerda si un host está o no alcanzable. Un dominio que no existe tarda en volver. */
 const HOST_TTL_MS = 10 * 60 * 1000;
 
-const hostCache = new Map<string, { vivo: boolean; cors: boolean; expira: number }>();
+/**
+ * Por qué se ha dado por muerto un destino. NO es decoración para el log: hay un motivo que
+ * depende de QUIÉN pregunta y el resto que no, y esa diferencia decide si el veredicto puede
+ * guardarse en el catálogo —donde lo hereda cualquier cliente— o solo vale para esta petición.
+ *
+ *   no-responde      la conexión falla o el host no existe   → vale para todos
+ *   no-esta          404/410: el fichero no está             → vale para todos
+ *   no-es-lo-pedido  contesta, pero no con lo que se pidió   → vale para todos
+ *   prohibido        403 sobre lo que íbamos a entregar tal cual  → SOLO para este cliente
+ *
+ * `prohibido` es el que no se puede generalizar: un cliente nativo fija `Referer` y
+ * `User-Agent` y pasa por donde un navegador se estrella. Anotarlo en el catálogo enterraría
+ * para todo el mundo un servidor que a media plataforma le funciona.
+ */
+export type MotivoMuerte = 'no-responde' | 'no-esta' | 'no-es-lo-pedido' | 'prohibido';
+
+export interface Sondeo {
+  vivo: boolean;
+  /** Solo cuando `vivo` es falso. */
+  motivo?: MotivoMuerte;
+  /** El destino manda `Access-Control-Allow-Origin`: un navegador puede leerlo. */
+  cors: boolean;
+}
+
+const hostCache = new Map<string, { sondeo: Sondeo; expira: number }>();
 
 /**
  * ¿Este destino deja que un NAVEGADOR lea su respuesta?
@@ -50,7 +74,7 @@ export function destinoSirveCors(url: string): boolean | undefined {
     return undefined;
   }
   for (const [clave, entrada] of hostCache) {
-    if (clave.startsWith(host + '|') && Date.now() < entrada.expira) return entrada.cors;
+    if (clave.startsWith(host + '|') && Date.now() < entrada.expira) return entrada.sondeo.cors;
   }
   return undefined;
 }
@@ -80,7 +104,7 @@ export function destinoSirveCors(url: string): boolean | undefined {
  * Se cachea por host y por tipo de sonda: un maestro lista varias calidades que suelen compartir
  * dominio, y así se paga una sonda por host y no una por variante.
  */
-export async function hostAlcanzable(
+export async function sondearDestino(
   url: string,
   referer: string,
   esperaManifiesto = false,
@@ -89,20 +113,22 @@ export async function hostAlcanzable(
    * un 403 SÍ condena: lo verá igual y no tiene forma de arreglarlo.
    */
   entregaLiteral = false
-): Promise<boolean> {
+): Promise<Sondeo> {
   let host: string;
   try {
     host = new URL(url).hostname;
   } catch {
-    return false;
+    return { vivo: false, motivo: 'no-responde', cors: false };
   }
 
   const clave = `${host}|${esperaManifiesto}|${entregaLiteral}`;
   const cacheado = hostCache.get(clave);
-  if (cacheado && Date.now() < cacheado.expira) return cacheado.vivo;
+  if (cacheado && Date.now() < cacheado.expira) return cacheado.sondeo;
 
   let vivo = true;
+  let motivo: MotivoMuerte | undefined;
   let cors = false;
+  const condenar = (m: MotivoMuerte) => { vivo = false; motivo = m; };
   try {
     const res = await streamClient.get(url, {
       // `Range` NO es una optimización, es lo que hace viable la sonda: sin él, comprobar un mp4
@@ -134,21 +160,26 @@ export async function hostAlcanzable(
     // sí, y por eso se perdona — puede ser una cabecera que solo el reproductor sabe poner.
     cors = res.headers['access-control-allow-origin'] !== undefined;
 
-    if (res.status === 404 || res.status === 410) vivo = false;
-    if (entregaLiteral && res.status >= 400) vivo = false;
+    if (res.status === 404 || res.status === 410) condenar('no-esta');
+    // Un 403 aquí es el único veredicto que depende del cliente, y por eso lleva su propio
+    // motivo: para el que sigue nuestro 302 es definitivo, para un nativo que fija cabeceras
+    // puede no serlo, y quien guarde esto en el catálogo tiene que poder distinguirlo.
+    if (vivo && entregaLiteral && res.status >= 400) {
+      condenar(res.status === 403 || res.status === 401 ? 'prohibido' : 'no-esta');
+    }
 
     // Y la prueba definitiva cuando lo que se pidió es una playlist: que el cuerpo SEA una
     // playlist. Un manifiesto empieza por `#EXTM3U`; una página de aparcamiento, no. Esto
     // distingue al CDN vivo del dominio revendido sin depender de ningún código de error.
     if (vivo && esperaManifiesto && !String(res.data || '').trimStart().startsWith('#EXTM3U')) {
-      vivo = false;
+      condenar('no-es-lo-pedido');
     }
 
     // Y con `entregaLiteral` sobre algo que no es playlist —un mp4 que vamos a redirigir— la
     // pregunta equivalente es si lo que empieza a llegar son bytes de medio. Varios blogspot
     // redirigían tan contentos a una página de error de su alojador, que responde 200.
     if (vivo && entregaLiteral && !esperaManifiesto) {
-      if (/^\s*<(!doctype|html|\?xml)/i.test(String(res.data || ''))) vivo = false;
+      if (/^\s*<(!doctype|html|\?xml)/i.test(String(res.data || ''))) condenar('no-es-lo-pedido');
     }
   } catch (err: any) {
     // Un timeout no condena: un CDN lento no es un CDN caído. Y pasarse del tope de bytes tampoco
@@ -157,11 +188,22 @@ export async function hostAlcanzable(
     const codigo = err?.code || err?.errno || err?.cause?.code;
     const esTimeout = codigo === 'ECONNABORTED' || codigo === 'ETIMEDOUT';
     const seLePasoElTope = /maxContentLength/i.test(String(err?.message || ''));
-    if (!esTimeout && !seLePasoElTope) vivo = false;
+    if (!esTimeout && !seLePasoElTope) condenar('no-responde');
   }
 
-  hostCache.set(clave, { vivo, cors, expira: Date.now() + HOST_TTL_MS });
-  return vivo;
+  const sondeo: Sondeo = { vivo, motivo, cors };
+  hostCache.set(clave, { sondeo, expira: Date.now() + HOST_TTL_MS });
+  return sondeo;
+}
+
+/** `sondearDestino` cuando solo interesa el sí o el no. */
+export async function hostAlcanzable(
+  url: string,
+  referer: string,
+  esperaManifiesto = false,
+  entregaLiteral = false
+): Promise<boolean> {
+  return (await sondearDestino(url, referer, esperaManifiesto, entregaLiteral)).vivo;
 }
 
 function hostDe(uri: string, base: string): string {

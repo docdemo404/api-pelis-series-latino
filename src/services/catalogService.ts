@@ -6,6 +6,7 @@ import { sortServersBySourcePriority, getPrimaryStream } from './streamSorter';
 import { normalizeTitle, slugify } from '../utils/text';
 import { CacheStore } from '../cache/store';
 import { unwrapRedirector } from '../scrapers/directStream';
+import { revisarServidores, aplicarVeredictosRecordados } from './playbackHealth';
 
 // TTL del caché de catálogo/búsqueda. Con Redis (KV_REST_API_* / UPSTASH_*) las entradas
 // se comparten entre lambdas y sobreviven cold starts; sin Redis degrada a memoria local.
@@ -651,6 +652,26 @@ export class CatalogService {
    * sin esto, cualquier ficha ya guardada seguiría sirviendo solo embeds hasta que caducara
    * por su cuenta. Es una re-resolución única por título, no una invalidación permanente.
    */
+  /**
+   * Aplica a una ficha ya resuelta lo que se haya aprendido DESPUÉS de guardarla.
+   *
+   * Los dos caminos rápidos —ficha en caché y enlaces frescos de la DB— devuelven servidores con
+   * el `status` que tenían al escribirlos, y entre medias puede haber pasado lo más informativo
+   * que le ocurre a esta API: que alguien pulsara Reproducir y el CDN no tuviera el vídeo. Ese
+   * 502 deja anotado el veredicto bajo el embed, y aquí se cobra — sin una sola petición de red,
+   * porque estos caminos existen justamente para responder en milisegundos.
+   *
+   * No muta la ficha original: el caché entrega la MISMA referencia en cada acierto, y escribir
+   * sobre ella dejaría el veredicto pegado a una entrada que nadie va a volver a revisar.
+   */
+  private static conSaludAlDia(item: MediaItem): MediaItem {
+    if (!item.servers || item.servers.length === 0) return item;
+    const revisados = aplicarVeredictosRecordados(item.servers);
+    if (revisados === item.servers) return item;
+    const servers = sortServersBySourcePriority(revisados);
+    return { ...item, servers, primary_stream: getPrimaryStream(servers) };
+  }
+
   private static hasFreshStreams(item: MediaItem): boolean {
     if (!item.servers || item.servers.length === 0) return false;
     if (!item.streams_updated_at) return false;
@@ -969,7 +990,7 @@ export class CatalogService {
     const cacheKey = this.cacheKeyFor(q, typeHint);
 
     const cached = await CacheStore.get<MediaItem>(`byid:${cacheKey}`);
-    if (cached && !opts.deep) return cached;
+    if (cached && !opts.deep) return this.conSaludAlDia(cached);
 
     const result = await this.getMetadata(q, typeHint);
     if (!result) return null;
@@ -977,7 +998,7 @@ export class CatalogService {
     // A. Enlaces persistidos y frescos: nada que scrapear.
     if (!opts.deep && this.hasFreshStreams(result)) {
       await this.cacheItem('byid', cacheKey, result, CACHE_TTL_SECONDS);
-      return result;
+      return this.conSaludAlDia(result);
     }
 
     const allServers: ServerOption[] = [...(result.servers || [])];
@@ -1107,7 +1128,30 @@ export class CatalogService {
       } catch {}
     }
 
-    result.servers = sortServersBySourcePriority(allServers);
+    /**
+     * ANTES DE ENTREGAR: que el de arriba reproduzca de verdad.
+     *
+     * Lo que se ordenaba hasta aquí venía con el `status` que puso `inspectEmbed`, que solo mira
+     * si el reproductor del host carga. Se puede cargar entero y no tener vídeo detrás — el caso
+     * que lo destapó fue «Sin salida» (2024): su servidor #1 era un emturbovid cuyo maestro
+     * respondía 200 y listaba dos calidades en dominios que ya no existen. La API lo entregaba
+     * como `online` y como `primary_stream`, y su propio `/stream/direct` contestaba 502 al
+     * intentarlo. O sea que ya lo sabíamos y aun así lo poníamos el primero.
+     *
+     * `revisarServidores` es la comprobación de reproducir aplicada a la lista: baja hasta un
+     * segmento real, empezando por la cabeza y con tope de tiempo. Se ordena OTRA VEZ después
+     * porque puede haber degradado servidores, y es el sorter quien recoloca lo que queda
+     * `offline` y vuelve a sellar el nombre como `[Embed]`.
+     *
+     * En `deep` (el job de refresco, sin nadie esperando) se repasa más lista y sin parar en el
+     * primero: es la pasada que deja el veredicto escrito en la DB para todas las aperturas
+     * siguientes, y la única que puede resucitar lo que se marcó caído y ha vuelto.
+     */
+    const revisados = await revisarServidores(sortServersBySourcePriority(allServers), opts.deep
+      ? { presupuestoMs: 15000, maximo: 5, hastaElPrimeroUtil: false, resucitar: 2 }
+      : { presupuestoMs: 4000, maximo: 3 });
+
+    result.servers = sortServersBySourcePriority(revisados);
     if (result.servers.length > 0) {
       result.primary_stream = getPrimaryStream(result.servers);
       result.streams_updated_at = new Date().toISOString();

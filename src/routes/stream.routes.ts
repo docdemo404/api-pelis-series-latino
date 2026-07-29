@@ -7,8 +7,8 @@ import { bestMode, policyFor } from '../scrapers/hostPolicy';
 import { DirectMode } from '../types';
 import { sendErrorResponse } from '../utils/apiHelpers';
 import { USER_AGENT, streamClient } from '../utils/httpClient';
-import { bajarManifiesto, revisarManifiesto, hostAlcanzable, segmentoDescargable, destinoSirveCors } from '../services/manifestHealth';
-import { CacheStore } from '../cache/store';
+import { destinoSirveCors } from '../services/manifestHealth';
+import { comprobarDestino } from '../services/playbackHealth';
 import { externalProxyEnabled, proxyUrlFor } from '../utils/externalProxy';
 
 /**
@@ -400,110 +400,6 @@ function resolveMode(
 }
 
 /**
- * Cuánto se recuerda el veredicto de un destino. La clave es la URL FIRMADA del CDN, así que
- * identifica un vídeo concreto; y lo que se comprueba —que el dominio exista— no cambia de un
- * minuto para otro.
- */
-const VEREDICTO_TTL_SECONDS = 10 * 60;
-
-type Veredicto =
-  /**
-   * `cuerpo` es el maestro YA DESCARGADO, para que quien lo sirva no vuelva a pedirlo. Viene
-   * vacío cuando el veredicto salió del caché o cuando no había manifiesto que bajar (mp4).
-   * `filtrado` avisa de que se le han quitado calidades muertas: entonces hay que servir ese
-   * cuerpo y no se puede redirigir al original, que sigue envenenado.
-   */
-  | { kind: 'vivo'; cuerpo?: string; filtrado?: boolean }
-  | { kind: 'muerto' };
-
-/**
- * ¿Se puede entregar esta URL con un 302 y olvidarse?
- *
- * Existe porque un 302 es un billete sin vuelta: en cuanto sale, el reproductor queda a solas con
- * el CDN y ningún fallo suyo puede ya convertirse en el 502 que haría al cliente probar otro
- * servidor. Y lo que se ha medido es que el maestro RESPONDE aunque el vídeo no esté: emturbovid
- * reparte sus calidades entre dominios desechables que caducan (19 de 25 fichas no reproducían,
- * 16 por dominios en NXDOMAIN). Ver src/services/manifestHealth.ts.
- *
- * Para un mp4 basta con mirar su host: no hay manifiesto que abrir y la comprobación es DNS puro,
- * sin ninguna petición HTTP. Para HLS hay que bajar el maestro —unos KB— y mirar a dónde apunta.
- *
- * Ante cualquier duda se contesta `vivo`: si el maestro no se deja bajar puede ser un CDN lento o
- * una cabecera que solo el reproductor sabe poner, y en ese caso el 302 es justamente lo que hay
- * que intentar. Solo se corta con la certeza de un dominio que no existe.
- */
-async function comprobarDestino(minted: MintedStream, mode: DirectMode): Promise<Veredicto> {
-  const cacheKey = `verdict:${minted.url}`;
-  const cacheado = await CacheStore.get<Veredicto>(cacheKey);
-  if (cacheado) return cacheado;
-
-  /**
-   * PRESUPUESTO DE TIEMPO, y está aquí por un destrozo propio: al añadir la comprobación del
-   * segmento, los hosts lentos (ok.ru, los blogspot con pixeldrain) dejaron de responder — la
-   * petición a la PROPIA API se comía 45 s y expiraba. Se había cambiado "entrega vídeo roto" por
-   * "no entrega nada", que es peor.
-   *
-   * Así que la verificación tiene un tope y falla A FAVOR del vídeo: si no le da tiempo a
-   * demostrar que algo está muerto, se entrega igual. Comprobar es un extra, no un peaje —
-   * ninguna reproducción puede morir esperando a que terminemos de comprobarla.
-   */
-  const limite = Date.now() + 3500;
-  const hayTiempo = () => Date.now() < limite;
-
-  // Se cachea el VEREDICTO, nunca el cuerpo: guardar manifiestos enteros en KV no compensa, y
-  // además el cuerpo solo sirve para ahorrarse una descarga dentro de esta misma petición.
-  const guardar = async (v: Veredicto): Promise<Veredicto> => {
-    await CacheStore.set(cacheKey, v.kind === 'muerto' ? v : { kind: 'vivo' }, VEREDICTO_TTL_SECONDS);
-    return v;
-  };
-
-  // El destino de primer nivel. Si ni siquiera se puede conectar con él, no hay nada que bajar
-  // ni que redirigir. Para un mp4 esto es toda la comprobación: no hay manifiesto que abrir.
-  //
-  // `entregaLiteral` cambia lo que cuenta como muerto. Con un 302 la respuesta del CDN es
-  // EXACTAMENTE lo que va a recibir el reproductor, así que un 403 ahí no admite indulto: verá el
-  // mismo 403, y no hay cabecera que lo salve porque a `redirect` solo se llega cuando el host no
-  // exige ninguna. En los demás modos se sigue perdonando — esas peticiones las hacemos nosotros,
-  // con el Referer bueno, y un 403 aislado puede no repetirse.
-  const entregaLiteral = mode === 'redirect';
-  if (!(await hostAlcanzable(minted.url, minted.referer, false, entregaLiteral))) {
-    return guardar({ kind: 'muerto' });
-  }
-
-  if (minted.kind !== 'hls') return guardar({ kind: 'vivo' });
-
-  const manifiesto = await bajarManifiesto(minted.url, minted.referer);
-  if (!manifiesto) return { kind: 'vivo' };
-
-  // Un maestro sin una sola URI no es un vídeo: no hay nada que reproducir en él.
-  if (!manifiesto.split(/\r?\n/).some(l => l.trim() && !l.trim().startsWith('#'))) {
-    console.warn(`[direct] manifiesto sin contenido: ${minted.url.slice(0, 90)}`);
-    return guardar({ kind: 'muerto' });
-  }
-
-  if (!hayTiempo()) return { kind: 'vivo', cuerpo: manifiesto };
-
-  const estado = await revisarManifiesto(manifiesto, minted.url, minted.referer);
-  if (estado.muerto) {
-    console.warn(`[direct] destino muerto (${estado.muertos.join(', ')}): ${minted.url.slice(0, 90)}`);
-    return guardar({ kind: 'muerto' });
-  }
-  // Y la prueba de fuego: que un segmento de verdad se deje descargar. Sin esto se cuela el
-  // fallo más común —playlist impecable, segmentos en 404— que además es el que peor llega al
-  // cliente: la API dice 200, el reproductor arranca y se cae cuando ya nadie prueba otra cosa.
-  if (hayTiempo() && !(await segmentoDescargable(estado.cuerpo, minted.url, minted.referer))) {
-    console.warn(`[direct] segmentos no descargables: ${minted.url.slice(0, 90)}`);
-    return guardar({ kind: 'muerto' });
-  }
-
-  if (estado.parcial) {
-    console.warn(`[direct] calidades caídas (${estado.muertos.join(', ')}): ${minted.url.slice(0, 90)}`);
-    return { kind: 'vivo', cuerpo: estado.cuerpo, filtrado: true };
-  }
-  return guardar({ kind: 'vivo', cuerpo: manifiesto });
-}
-
-/**
  * Entrega la URL del CDN y se aparta.
  *
  * `Referrer-Policy: no-referrer` no es decorativo: la familia upns y varios más aceptan una
@@ -549,8 +445,21 @@ router.get(DIRECT_BASE, async (req: Request, res: Response, next: NextFunction) 
     // `manifest` y `proxy` la API contesta 200 con el maestro y el cliente no descubre que no hay
     // vídeo hasta que pide un segmento, cuando ya ha dado la reproducción por empezada y la
     // cascada al embed no se dispara. Un 502 aquí es lo único que le deja probar otro servidor.
-    const veredicto = await comprobarDestino(minted, mode);
-    if (veredicto.kind === 'muerto') {
+    //
+    // Se le pasa el `embedUrl` para que lo que se descubra aquí no se quede aquí: un veredicto
+    // que valga para cualquier cliente queda anotado bajo el embed, y la próxima vez que alguien
+    // pida la ficha el catálogo ya sabrá que este servidor no puede ir el primero.
+    //
+    // `entregaLiteral` cambia lo que cuenta como muerto. Con un 302 la respuesta del CDN es
+    // EXACTAMENTE lo que va a recibir el reproductor, así que un 403 ahí no admite indulto: verá
+    // el mismo 403, y no hay cabecera que lo salve porque a `redirect` solo se llega cuando el
+    // host no exige ninguna. En los demás modos se sigue perdonando — esas peticiones las hacemos
+    // nosotros, con el Referer bueno, y un 403 aislado puede no repetirse.
+    const veredicto = await comprobarDestino(minted, { entregaLiteral: mode === 'redirect', embedUrl });
+    if (veredicto.motivo) {
+      console.warn(`[direct] ${veredicto.veredicto} (${veredicto.motivo}): ${minted.url.slice(0, 90)}`);
+    }
+    if (veredicto.veredicto === 'muerto') {
       return sendErrorResponse(res, 502, 'DIRECT_UNAVAILABLE', 'El vídeo ya no existe en este host. Reproduce con embed_url u otro servidor.');
     }
 
