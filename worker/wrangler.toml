@@ -1,0 +1,11 @@
+name = "api-pelis-proxy"
+main = "src/index.js"
+compatibility_date = "2026-07-29"
+
+# El secreto NO va aquí: se sube con `npx wrangler secret put PROXY_SIGNING_KEY`, que lo guarda
+# cifrado en Cloudflare y no lo deja escrito en el repositorio.
+#
+# Sin observabilidad no hay forma de saber si el Worker está sirviendo o fallando, y este proyecto
+# ya se ha llevado dos sustos por dar por bueno algo sin mirarlo desplegado.
+[observability]
+enabled = true

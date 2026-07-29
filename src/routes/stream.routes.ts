@@ -9,6 +9,7 @@ import { sendErrorResponse } from '../utils/apiHelpers';
 import { USER_AGENT, streamClient } from '../utils/httpClient';
 import { bajarManifiesto, revisarManifiesto, hostAlcanzable, segmentoDescargable, destinoSirveCors } from '../services/manifestHealth';
 import { CacheStore } from '../cache/store';
+import { externalProxyEnabled, proxyUrlFor } from '../utils/externalProxy';
 
 /**
  * Streaming: resolución de tokens dinámicos, proxy con soporte de Range
@@ -594,6 +595,23 @@ router.get(DIRECT_BASE, async (req: Request, res: Response, next: NextFunction) 
     // Presupuesto de tránsito agotado: se entrega la URL acuñada y que el cliente lo intente
     // por su cuenta. Puede fallar por la atadura de IP, pero le queda el embed como respaldo.
     // En `manifest` no aplica: lo que se sirve son kilobytes de texto, no vídeo.
+    /**
+     * DELEGACIÓN AL PROXY EXTERNO. Es lo único que quita el techo de ancho de banda: el modo
+     * `proxy` es el que reenvía la película entera, y aquí se le pasa a un Worker de Cloudflare,
+     * que no cobra egreso.
+     *
+     * Se le manda el EMBED, no la URL del CDN, y esa diferencia lo es todo: 793 de las 797
+     * reproducciones que obligan a proxear están atadas por IP, así que el proxy tiene que acuñar
+     * y descargar él. Pasarle una URL acuñada aquí le habría dado 403 en todas.
+     *
+     * Va antes del presupuesto a propósito: si el vídeo sale por fuera, no hay presupuesto que
+     * gastar.
+     */
+    if (mode === 'proxy' && externalProxyEnabled()) {
+      const externa = proxyUrlFor(embedUrl);
+      if (externa) return sendRedirect(res, externa);
+    }
+
     /**
      * PRESUPUESTO AGOTADO. Antes se entregaba la URL acuñada con un 302 y que el cliente lo
      * intentara por su cuenta. Suena razonable y es justo lo que NO funciona, porque el único
