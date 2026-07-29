@@ -7,6 +7,8 @@ import { bestMode } from '../scrapers/hostPolicy';
 import { DirectMode } from '../types';
 import { sendErrorResponse } from '../utils/apiHelpers';
 import { USER_AGENT, streamClient } from '../utils/httpClient';
+import { bajarManifiesto, revisarManifiesto, hostResuelve } from '../services/manifestHealth';
+import { CacheStore } from '../cache/store';
 
 /**
  * Streaming: resolución de tokens dinámicos, proxy con soporte de Range
@@ -387,6 +389,73 @@ function resolveMode(
 }
 
 /**
+ * Cuánto se recuerda el veredicto de un destino. La clave es la URL FIRMADA del CDN, así que
+ * identifica un vídeo concreto; y lo que se comprueba —que el dominio exista— no cambia de un
+ * minuto para otro.
+ */
+const VEREDICTO_TTL_SECONDS = 10 * 60;
+
+type Veredicto =
+  | { kind: 'vivo' }
+  | { kind: 'muerto' }
+  | { kind: 'filtrado'; cuerpo: string };
+
+/**
+ * ¿Se puede entregar esta URL con un 302 y olvidarse?
+ *
+ * Existe porque un 302 es un billete sin vuelta: en cuanto sale, el reproductor queda a solas con
+ * el CDN y ningún fallo suyo puede ya convertirse en el 502 que haría al cliente probar otro
+ * servidor. Y lo que se ha medido es que el maestro RESPONDE aunque el vídeo no esté: emturbovid
+ * reparte sus calidades entre dominios desechables que caducan (19 de 25 fichas no reproducían,
+ * 16 por dominios en NXDOMAIN). Ver src/services/manifestHealth.ts.
+ *
+ * Para un mp4 basta con mirar su host: no hay manifiesto que abrir y la comprobación es DNS puro,
+ * sin ninguna petición HTTP. Para HLS hay que bajar el maestro —unos KB— y mirar a dónde apunta.
+ *
+ * Ante cualquier duda se contesta `vivo`: si el maestro no se deja bajar puede ser un CDN lento o
+ * una cabecera que solo el reproductor sabe poner, y en ese caso el 302 es justamente lo que hay
+ * que intentar. Solo se corta con la certeza de un dominio que no existe.
+ */
+async function comprobarDestino(minted: MintedStream): Promise<Veredicto> {
+  const cacheKey = `verdict:${minted.url}`;
+  const cacheado = await CacheStore.get<Veredicto>(cacheKey);
+  if (cacheado) return cacheado;
+
+  const guardar = async (v: Veredicto): Promise<Veredicto> => {
+    // Un cuerpo filtrado no se cachea: es el caso raro, y guardar manifiestos enteros en KV por
+    // cada calidad caída no compensa. Se vuelve a filtrar en la siguiente reproducción.
+    if (v.kind !== 'filtrado') await CacheStore.set(cacheKey, v, VEREDICTO_TTL_SECONDS);
+    return v;
+  };
+
+  let host = '';
+  try {
+    host = new URL(minted.url).hostname;
+  } catch {
+    return { kind: 'vivo' };
+  }
+
+  // El host del propio maestro. Si ni eso existe, no hay nada que bajar ni que redirigir.
+  if (!(await hostResuelve(host))) return guardar({ kind: 'muerto' });
+
+  if (minted.kind !== 'hls') return guardar({ kind: 'vivo' });
+
+  const manifiesto = await bajarManifiesto(minted.url, minted.referer);
+  if (!manifiesto) return { kind: 'vivo' };
+
+  const estado = await revisarManifiesto(manifiesto, minted.url);
+  if (estado.muerto) {
+    console.warn(`[direct] destino muerto (${estado.muertos.join(', ')}): ${minted.url.slice(0, 90)}`);
+    return guardar({ kind: 'muerto' });
+  }
+  if (estado.parcial) {
+    console.warn(`[direct] calidades caídas (${estado.muertos.join(', ')}): ${minted.url.slice(0, 90)}`);
+    return { kind: 'filtrado', cuerpo: estado.cuerpo };
+  }
+  return guardar({ kind: 'vivo' });
+}
+
+/**
  * Entrega la URL del CDN y se aparta.
  *
  * `Referrer-Policy: no-referrer` no es decorativo: la familia upns y varios más aceptan una
@@ -425,8 +494,26 @@ router.get(DIRECT_BASE, async (req: Request, res: Response, next: NextFunction) 
       clientSendsReferer(req)
     );
 
-    // El camino normal: el CDN del host sirve el vídeo y nosotros no tocamos un byte.
-    if (mode === 'redirect') return sendRedirect(res, minted.url);
+    // El camino normal: el CDN del host sirve el vídeo y nosotros no tocamos un byte. Pero antes
+    // hay que comprobar que ese vídeo EXISTE, porque un 302 es irrevocable: una vez entregado, lo
+    // que le pase al reproductor ya no se puede convertir en el 502 que dispara la cascada.
+    if (mode === 'redirect') {
+      const veredicto = await comprobarDestino(minted);
+      if (veredicto.kind === 'muerto') {
+        return sendErrorResponse(res, 502, 'DIRECT_UNAVAILABLE', 'El vídeo ya no existe en este host. Reproduce con embed_url u otro servidor.');
+      }
+      // Alguna calidad sigue viva y otras no: se sirve el maestro filtrado desde aquí (unos KB)
+      // en vez del original. El vídeo sigue yendo del CDN al reproductor, igual que con el 302.
+      if (veredicto.kind === 'filtrado') {
+        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+        res.setHeader('Referrer-Policy', 'no-referrer');
+        applyCachePolicy(res, 'no-store');
+        res.send(veredicto.cuerpo);
+        void BandwidthService.add(Buffer.byteLength(veredicto.cuerpo));
+        return;
+      }
+      return sendRedirect(res, minted.url);
+    }
 
     // Presupuesto de tránsito agotado: se entrega la URL acuñada y que el cliente lo intente
     // por su cuenta. Puede fallar por la atadura de IP, pero le queda el embed como respaldo.
