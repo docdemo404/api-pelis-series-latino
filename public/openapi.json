@@ -1037,8 +1037,8 @@
           },
           "direct_stream": {
             "type": "string",
-            "description": "FUENTE PRIORITARIA: el vídeo real (HLS/MP4). Intenta SIEMPRE esta antes que `embed_url`. Ningún host permite publicar la URL cruda de su CDN —la firman entera y le ponen caducidad—, así que apunta a esta misma API, que la resuelve en el momento de reproducir. Para el cliente es una URL permanente y sin token: basta con dársela al reproductor y seguir la respuesta. Si devuelve error, cae a `embed_url`.",
-            "example": "/api/v1/stream/direct?e=aHR0cHM6Ly92aWRoaWRlcGx1cy5jb20vdi8zMHdyMGd1Mzhxc2I"
+            "description": "FUENTE PRIORITARIA: el vídeo real (HLS/MP4). Intenta SIEMPRE esta antes que `embed_url`. Ningún host permite publicar la URL cruda de su CDN —la firman entera y le ponen caducidad—, así que apunta a esta misma API, que la resuelve en el momento de reproducir. Para el cliente es una URL permanente y sin token: basta con dársela al reproductor y seguir la respuesta. Si devuelve error, cae a `embed_url`.\n\nSe entrega SIEMPRE como URL absoluta, sobre el mismo dominio por el que has pedido la ficha, para que se le pueda pasar a un reproductor tal cual. La única excepción es `direct_mode: public`, donde el valor es directamente la URL del CDN.",
+            "example": "https://api-pelis-series-latino.vercel.app/api/v1/stream/direct?e=aHR0cHM6Ly92aWRoaWRlcGx1cy5jb20vdi8zMHdyMGd1Mzhxc2I"
           },
           "direct_kind": {
             "type": "string",

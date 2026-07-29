@@ -36,6 +36,11 @@ export interface ServerOption {
    * reproducción, porque todos los hosts la firman con caducidad. Funciona en CUALQUIER
    * reproductor sin que el cliente tenga que saber nada: según el host, responderá con un 302 al
    * CDN (`redirect`), con un manifiesto reescrito (`manifest`) o reenviando los bytes (`proxy`).
+   *
+   * OJO CON LA FORMA SEGÚN DÓNDE SE MIRE: aquí dentro y en la base de datos se guarda RELATIVO,
+   * para que el dato no quede atado al dominio del despliegue. Al cliente sale siempre ABSOLUTO,
+   * porque un reproductor resolvería la ruta relativa contra su propio dominio y no reproduciría.
+   * Lo convierte el envoltorio de `res.json` en api/index.ts (ver src/utils/publicUrl.ts).
    */
   direct_stream?: string;
   direct_kind?: 'hls' | 'mp4';

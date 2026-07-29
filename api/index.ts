@@ -8,6 +8,7 @@ import searchRoutes from '../src/routes/search.routes';
 import mediaRoutes from '../src/routes/media.routes';
 import streamRoutes from '../src/routes/stream.routes';
 import { sendErrorResponse } from '../src/utils/apiHelpers';
+import { publicOrigin, withAbsoluteDirectStreams } from '../src/utils/publicUrl';
 
 /**
  * Bootstrap de la API: middlewares globales, estáticos y montaje de routers.
@@ -25,6 +26,24 @@ const parseJson = express.json();
 app.use((req: Request, res: Response, next: NextFunction) => {
   if (req.path.includes('/stream/direct')) return next();
   return parseJson(req, res, next);
+});
+
+// `direct_stream` se guarda relativo (portable entre despliegues) pero se ENTREGA absoluto: un
+// reproductor resuelve una ruta relativa contra su propio dominio, no contra el de esta API, y
+// entonces no reproduce nada. Se hace aquí, envolviendo `res.json`, porque los servidores salen
+// por muchas puertas —listados, detalle, `primary_stream`, y los de cada episodio dentro de
+// `seasons`— y no hay un serializador común donde ponerlo una sola vez. Ver src/utils/publicUrl.ts.
+//
+// El camino de vídeo se salta el envoltorio por el mismo motivo que se salta el parser de JSON:
+// son cientos de peticiones por película y ahí no viaja ninguna ficha que reescribir.
+app.use((req: Request, res: Response, next: NextFunction) => {
+  if (req.path.includes('/stream/direct')) return next();
+  const origin = publicOrigin(req);
+  if (!origin) return next();
+
+  const json = res.json.bind(res);
+  res.json = (body: any) => json(withAbsoluteDirectStreams(body, origin));
+  next();
 });
 
 // Cabeceras HTTP de Caché en Borde (Edge CDN & Stale-While-Revalidate)
