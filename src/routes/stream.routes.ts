@@ -7,7 +7,7 @@ import { bestMode } from '../scrapers/hostPolicy';
 import { DirectMode } from '../types';
 import { sendErrorResponse } from '../utils/apiHelpers';
 import { USER_AGENT, streamClient } from '../utils/httpClient';
-import { bajarManifiesto, revisarManifiesto, hostResuelve } from '../services/manifestHealth';
+import { bajarManifiesto, revisarManifiesto, hostAlcanzable } from '../services/manifestHealth';
 import { CacheStore } from '../cache/store';
 
 /**
@@ -428,22 +428,16 @@ async function comprobarDestino(minted: MintedStream): Promise<Veredicto> {
     return v;
   };
 
-  let host = '';
-  try {
-    host = new URL(minted.url).hostname;
-  } catch {
-    return { kind: 'vivo' };
-  }
-
-  // El host del propio maestro. Si ni eso existe, no hay nada que bajar ni que redirigir.
-  if (!(await hostResuelve(host))) return guardar({ kind: 'muerto' });
+  // El destino de primer nivel. Si ni siquiera se puede conectar con él, no hay nada que bajar
+  // ni que redirigir. Para un mp4 esto es toda la comprobación: no hay manifiesto que abrir.
+  if (!(await hostAlcanzable(minted.url, minted.referer))) return guardar({ kind: 'muerto' });
 
   if (minted.kind !== 'hls') return guardar({ kind: 'vivo' });
 
   const manifiesto = await bajarManifiesto(minted.url, minted.referer);
   if (!manifiesto) return { kind: 'vivo' };
 
-  const estado = await revisarManifiesto(manifiesto, minted.url);
+  const estado = await revisarManifiesto(manifiesto, minted.url, minted.referer);
   if (estado.muerto) {
     console.warn(`[direct] destino muerto (${estado.muertos.join(', ')}): ${minted.url.slice(0, 90)}`);
     return guardar({ kind: 'muerto' });

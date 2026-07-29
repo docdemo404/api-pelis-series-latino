@@ -1,4 +1,4 @@
-import * as dns from 'dns';
+
 import { streamClient } from '../utils/httpClient';
 
 /**
@@ -28,38 +28,70 @@ import { streamClient } from '../utils/httpClient';
  * ───────────────────────────────────────────────────────────────────────────────────────────
  */
 
-/** Cuánto se recuerda que un host resuelve (o no). Un NXDOMAIN no se arregla en un minuto. */
-const DNS_TTL_MS = 10 * 60 * 1000;
+/** Cuánto se recuerda si un host está o no alcanzable. Un dominio que no existe tarda en volver. */
+const HOST_TTL_MS = 10 * 60 * 1000;
 
-const dnsCache = new Map<string, { vivo: boolean; expira: number }>();
+const hostCache = new Map<string, { vivo: boolean; expira: number }>();
 
 /**
- * ¿Existe este dominio?
+ * Códigos con los que el sistema dice "no he podido ni empezar a hablar con ese servidor".
  *
- * Se resuelve con el resolutor del sistema y se cachea en proceso: un maestro lista varias
- * variantes que suelen repetir host, y en una instancia serverless caliente las reproducciones
- * seguidas de la misma película preguntarían lo mismo una y otra vez.
- *
- * Ante la duda se contesta que SÍ. Un fallo de DNS por timeout o por un resolutor saturado no
- * puede tumbar una reproducción que habría funcionado: lo que se busca aquí es el NXDOMAIN
- * rotundo, no cualquier tropiezo.
+ * `EAI_AGAIN` está aquí por una razón medida: en el sandbox de Vercel, pedir un dominio que no
+ * existe NO devuelve `ENOTFOUND` como en una máquina normal, sino un fallo temporal de
+ * resolución. La primera versión de esto comprobaba el DNS con `dns.lookup` y trataba cualquier
+ * cosa que no fuera `ENOTFOUND` como host sano — en local acertaba y en producción daba por
+ * bueno TODO, que es exactamente el fallo que venía a arreglar. Se desplegó así y no sirvió de
+ * nada hasta que se miró contra producción.
  */
-export async function hostResuelve(host: string): Promise<boolean> {
-  if (!host) return false;
+const CODIGOS_INALCANZABLE = new Set([
+  'ENOTFOUND',
+  'ENODATA',
+  'EAI_AGAIN',
+  'ECONNREFUSED',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+]);
 
-  const cacheado = dnsCache.get(host);
+/**
+ * ¿Hay algo al otro lado de esta URL?
+ *
+ * NO se pregunta por DNS sino intentando la petición de verdad, y es por lo aprendido arriba: el
+ * resolutor contesta cosas distintas según dónde corra el proceso, mientras que "la conexión no
+ * llegó a establecerse" significa lo mismo en todas partes. De paso cubre el dominio que resuelve
+ * pero cuyo servidor ya no está.
+ *
+ * NO se mira el status. Un 403 o un 404 pueden venir de una cabecera que solo el reproductor sabe
+ * poner, y con eso no se puede condenar un vídeo: lo único que cuenta como muerto es no haber
+ * podido conectar. Un timeout tampoco cuenta — un CDN lento no es un CDN caído.
+ *
+ * Se cachea por HOST: un maestro lista varias calidades que suelen compartir dominio, y así se
+ * paga una sonda por host y no una por variante.
+ */
+export async function hostAlcanzable(url: string, referer: string): Promise<boolean> {
+  let host: string;
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    return false;
+  }
+
+  const cacheado = hostCache.get(host);
   if (cacheado && Date.now() < cacheado.expira) return cacheado.vivo;
 
   let vivo = true;
   try {
-    await dns.promises.lookup(host);
+    await streamClient.get(url, {
+      headers: { Referer: referer, Range: 'bytes=0-0' },
+      responseType: 'text',
+      timeout: 8000,
+      validateStatus: () => true,
+    });
+    // Cualquier respuesta, del status que sea, demuestra que el servidor existe.
   } catch (err: any) {
-    // Solo estos dos códigos significan "este nombre no existe". `ETIMEOUT`, `ESERVFAIL` y
-    // compañía son problemas NUESTROS, y con ellos se da el host por bueno.
-    vivo = !(err?.code === 'ENOTFOUND' || err?.code === 'ENODATA');
+    if (CODIGOS_INALCANZABLE.has(err?.code)) vivo = false;
   }
 
-  dnsCache.set(host, { vivo, expira: Date.now() + DNS_TTL_MS });
+  hostCache.set(host, { vivo, expira: Date.now() + HOST_TTL_MS });
   return vivo;
 }
 
@@ -94,7 +126,11 @@ export interface EstadoManifiesto {
  * Las URIs se absolutizan siempre. El cuerpo filtrado se sirve desde NUESTRO origen, y una URI
  * relativa que se dejara tal cual resolvería contra la API en vez de contra el CDN.
  */
-export async function revisarManifiesto(manifiesto: string, urlBase: string): Promise<EstadoManifiesto> {
+export async function revisarManifiesto(
+  manifiesto: string,
+  urlBase: string,
+  referer: string
+): Promise<EstadoManifiesto> {
   const lineas = manifiesto.split(/\r?\n/);
   const salida: string[] = [];
   const muertos = new Set<string>();
@@ -114,8 +150,12 @@ export async function revisarManifiesto(manifiesto: string, urlBase: string): Pr
     }
 
     total++;
+    let absolutaCruda = limpia;
+    try {
+      absolutaCruda = new URL(limpia, urlBase).toString();
+    } catch {}
     const host = hostDe(limpia, urlBase);
-    if (host && !(await hostResuelve(host))) {
+    if (host && !(await hostAlcanzable(absolutaCruda, referer))) {
       muertos.add(host);
       // Quitar también la etiqueta de cabecera que acabábamos de escribir, si la había.
       if (salida.length && /^#EXT-X-STREAM-INF/i.test(salida[salida.length - 1].trim())) salida.pop();
@@ -123,11 +163,7 @@ export async function revisarManifiesto(manifiesto: string, urlBase: string): Pr
     }
 
     vivas++;
-    let absoluta = limpia;
-    try {
-      absoluta = new URL(limpia, urlBase).toString();
-    } catch {}
-    salida.push(absoluta);
+    salida.push(absolutaCruda);
   }
 
   return {
