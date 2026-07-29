@@ -5,6 +5,7 @@ import { SourceManager } from './sourceManager';
 import { TmdbService } from './tmdbService';
 import { USER_AGENT, httpClient } from '../utils/httpClient';
 import { inspectEmbed, getServerName } from '../scrapers/embedHealth';
+import { nombreConTipo } from './streamSorter';
 import { extractDirect, describeDirect, deferredDirectFields, unwrapRedirector } from '../scrapers/directStream';
 import { yearFromSlug } from '../utils/text';
 
@@ -440,13 +441,16 @@ export class RealScraperService {
       serverVerifications.forEach((res, i) => {
         if (res.status === 'fulfilled' && res.value && res.value.embedUrl) {
           const { embedUrl, status, direct, label } = res.value;
+          // Los campos de vídeo directo se resuelven ANTES del nombre porque el nombre los
+          // describe: son ellos los que deciden si esto es un vídeo directo o un embed.
+          const directo = direct ? describeDirect(embedUrl, direct) : deferredDirectFields(embedUrl);
           servers.push({
             id: `srv_tio_${slug}_${i + 1}`,
-            name: `${getServerName(embedUrl, '')} - ${label}`,
+            name: nombreConTipo(`${getServerName(embedUrl, '')} - ${label}`, Boolean(directo.direct_stream)),
             quality: direct?.quality || '1080p',
             language: 'latino',
             embed_url: embedUrl,
-            ...(direct ? describeDirect(embedUrl, direct) : deferredDirectFields(embedUrl)),
+            ...directo,
             status: status,
             last_checked: new Date().toISOString(),
             source_id: 'tioplus',
@@ -758,13 +762,14 @@ export class RealScraperService {
           if (embedUrl) {
             const { status, html: embedHtml } = await inspectEmbed(embedUrl, 'https://www.fuegocine.com');
             const direct = await extractDirect(embedUrl, embedHtml);
+            const directo = direct ? describeDirect(embedUrl, direct) : deferredDirectFields(embedUrl);
             servers.push({
               id: `srv_fc_${slug}_${idx++}`,
-              name: `FuegoCine - ${rawName}`,
+              name: nombreConTipo(`FuegoCine - ${rawName}`, Boolean(directo.direct_stream)),
               quality: direct?.quality || '1080p',
               language: lang.includes('sub') ? 'subtitulado' : lang.includes('cas') ? 'castellano' : 'latino',
               embed_url: embedUrl,
-              ...(direct ? describeDirect(embedUrl, direct) : deferredDirectFields(embedUrl)),
+              ...directo,
               status,
               last_checked: new Date().toISOString(),
               source_id: 'fuegocine'

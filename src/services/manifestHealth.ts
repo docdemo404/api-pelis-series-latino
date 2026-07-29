@@ -50,10 +50,10 @@ const hostCache = new Map<string, { vivo: boolean; expira: number }>();
  * cumple un CDN vivo y no lo cumple ni un dominio revendido ni un resolutor creativo, y no depende
  * de códigos de error que cambian según dónde corra el proceso.
  *
- * Lo que NO condena: un 403 (puede ser una cabecera que solo el reproductor sabe poner) ni un
- * timeout (un CDN lento no es un CDN caído). Equivocarse hacia "muerto" manda al cliente al embed
- * o a otro servidor, que es recuperable; equivocarse hacia "vivo" lo deja mirando una pantalla
- * negra, que no lo es.
+ * Lo que NO condena: un timeout (un CDN lento no es un CDN caído) y, salvo en `entregaLiteral`,
+ * tampoco un 403 — puede ser una cabecera que solo el reproductor sabe poner. Equivocarse hacia
+ * "muerto" manda al cliente al embed o a otro servidor, que es recuperable; equivocarse hacia
+ * "vivo" lo deja mirando una pantalla negra, que no lo es.
  *
  * Se cachea por host y por tipo de sonda: un maestro lista varias calidades que suelen compartir
  * dominio, y así se paga una sonda por host y no una por variante.
@@ -61,7 +61,12 @@ const hostCache = new Map<string, { vivo: boolean; expira: number }>();
 export async function hostAlcanzable(
   url: string,
   referer: string,
-  esperaManifiesto = false
+  esperaManifiesto = false,
+  /**
+   * Esta respuesta es la que va a recibir el cliente tal cual (vamos a redirigirle aquí). Entonces
+   * un 403 SÍ condena: lo verá igual y no tiene forma de arreglarlo.
+   */
+  entregaLiteral = false
 ): Promise<boolean> {
   let host: string;
   try {
@@ -70,16 +75,30 @@ export async function hostAlcanzable(
     return false;
   }
 
-  const clave = `${host}|${esperaManifiesto}`;
+  const clave = `${host}|${esperaManifiesto}|${entregaLiteral}`;
   const cacheado = hostCache.get(clave);
   if (cacheado && Date.now() < cacheado.expira) return cacheado.vivo;
 
   let vivo = true;
   try {
     const res = await streamClient.get(url, {
-      headers: { Referer: referer },
+      // `Range` NO es una optimización, es lo que hace viable la sonda: sin él, comprobar un mp4
+      // se descarga la película ENTERA en memoria antes de contestar. Se probó sin esto y los
+      // hosts de mp4 (los blogspot con pixeldrain) dejaron de responder — 45 s y timeout.
+      // Con 2 KB sobra: es más que suficiente para ver si el cuerpo empieza por `#EXTM3U`.
+      //
+      // Y el REFERER se manda o no según a quién estemos imitando. Con `entregaLiteral` el que va
+      // a pedir esto es el reproductor siguiendo nuestro 302, y ese NO manda Referer —lo quita
+      // nuestra `Referrer-Policy: no-referrer`—. Sondear con el Referer del embed medía a un
+      // cliente que no existe: el CDN nos contestaba 200 y al navegador 403, así que la
+      // comprobación daba luz verde a vídeos que nadie podía ver.
+      headers: entregaLiteral
+        ? { Range: 'bytes=0-2047' }
+        : { Referer: referer, Range: 'bytes=0-2047' },
       responseType: 'text',
       timeout: 8000,
+      // Cinturón por si el host ignora el `Range` y empieza a mandar el fichero completo.
+      maxContentLength: 256 * 1024,
       validateStatus: () => true,
     });
 
@@ -91,6 +110,7 @@ export async function hostAlcanzable(
     // Un 404 o un 410 sobre una playlist no admiten interpretación: el fichero no está. Un 403
     // sí, y por eso se perdona — puede ser una cabecera que solo el reproductor sabe poner.
     if (res.status === 404 || res.status === 410) vivo = false;
+    if (entregaLiteral && res.status >= 400) vivo = false;
 
     // Y la prueba definitiva cuando lo que se pidió es una playlist: que el cuerpo SEA una
     // playlist. Un manifiesto empieza por `#EXTM3U`; una página de aparcamiento, no. Esto
@@ -98,11 +118,21 @@ export async function hostAlcanzable(
     if (vivo && esperaManifiesto && !String(res.data || '').trimStart().startsWith('#EXTM3U')) {
       vivo = false;
     }
+
+    // Y con `entregaLiteral` sobre algo que no es playlist —un mp4 que vamos a redirigir— la
+    // pregunta equivalente es si lo que empieza a llegar son bytes de medio. Varios blogspot
+    // redirigían tan contentos a una página de error de su alojador, que responde 200.
+    if (vivo && entregaLiteral && !esperaManifiesto) {
+      if (/^\s*<(!doctype|html|\?xml)/i.test(String(res.data || ''))) vivo = false;
+    }
   } catch (err: any) {
-    // Un timeout no condena: un CDN lento no es un CDN caído. Cualquier otro fallo de conexión sí.
+    // Un timeout no condena: un CDN lento no es un CDN caído. Y pasarse del tope de bytes tampoco
+    // —al revés: significa que el host está mandando el fichero, que es la prueba de vida más
+    // rotunda que hay—. Cualquier otro fallo de conexión sí condena.
     const codigo = err?.code || err?.errno || err?.cause?.code;
     const esTimeout = codigo === 'ECONNABORTED' || codigo === 'ETIMEDOUT';
-    if (!esTimeout) vivo = false;
+    const seLePasoElTope = /maxContentLength/i.test(String(err?.message || ''));
+    if (!esTimeout && !seLePasoElTope) vivo = false;
   }
 
   hostCache.set(clave, { vivo, expira: Date.now() + HOST_TTL_MS });
@@ -187,6 +217,77 @@ export async function revisarManifiesto(
     cuerpo: salida.join('\n'),
     muertos: [...muertos],
   };
+}
+
+/** ¿Son bytes de vídeo? Una página de error también viaja con 200 y con su Content-Length. */
+function pareceVideo(buf: Buffer): boolean {
+  if (buf.length < 16) return false;
+  const cabecera = buf.slice(0, 400).toString('latin1');
+  if (/^\s*<(!doctype|html|\?xml)/i.test(cabecera)) return false;
+  // MPEG-TS empieza por 0x47; fMP4 declara `ftyp`/`moof`/`styp` en los primeros bytes. Se acepta
+  // lo desconocido: hay CDN que sirven contenedores raros y no se va a condenar un vídeo por eso.
+  return true;
+}
+
+/**
+ * Baja hasta un SEGMENTO de verdad y comprueba que se puede descargar.
+ *
+ * Es el escalón que faltaba. Comprobar el maestro y sus variantes deja fuera el fallo más
+ * frecuente de todos —la playlist está perfecta y los segmentos dan 404 o 403—, y ese fallo llega
+ * al cliente de la peor manera: la API contesta 200, el reproductor arranca, y la reproducción se
+ * cae cuando ya nadie va a intentar otro servidor.
+ *
+ * Se pide solo el primer kilobyte con `Range`, así que cuesta lo que una cabecera aunque el
+ * segmento pese megabytes. Y se hace UNA vez por acuñado, porque el veredicto se cachea.
+ *
+ * Devuelve `true` también cuando no hay nada que comprobar (un manifiesto sin segmentos a la
+ * vista): lo que no se ha podido medir no se condena.
+ */
+export async function segmentoDescargable(
+  manifiesto: string,
+  urlBase: string,
+  referer: string
+): Promise<boolean> {
+  const uris = manifiesto.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+  if (!uris.length) return true;
+
+  let objetivo: string;
+  try {
+    objetivo = new URL(uris[0], urlBase).toString();
+  } catch {
+    return true;
+  }
+
+  // Si el primer nivel es otra playlist, se baja un escalón más para llegar al segmento.
+  if (/\.m3u8(\?|$)/i.test(objetivo)) {
+    const variante = await bajarManifiesto(objetivo, referer);
+    if (!variante) return true;
+    const hijos = variante.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+    if (!hijos.length) return true;
+    try {
+      objetivo = new URL(hijos[0], objetivo).toString();
+    } catch {
+      return true;
+    }
+    if (/\.m3u8(\?|$)/i.test(objetivo)) return true; // tres niveles: se deja pasar
+  }
+
+  try {
+    const res = await streamClient.get(objetivo, {
+      headers: { Referer: referer, Range: 'bytes=0-1023' },
+      responseType: 'arraybuffer',
+      timeout: 10000,
+      validateStatus: () => true,
+    });
+    // Un 403 se perdona igual que arriba: puede ser una cabecera que solo el reproductor pone.
+    if (res.status === 404 || res.status === 410) return false;
+    if (res.status >= 500) return false;
+    if (res.status >= 200 && res.status < 300) return pareceVideo(Buffer.from(res.data));
+    return true;
+  } catch (err: any) {
+    const codigo = err?.code || err?.errno || err?.cause?.code;
+    return codigo === 'ECONNABORTED' || codigo === 'ETIMEDOUT';
+  }
 }
 
 /** Descarga un manifiesto. Devuelve null si no se pudo (red o status de error). */

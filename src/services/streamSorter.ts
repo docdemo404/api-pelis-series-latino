@@ -31,6 +31,36 @@ export function effectiveDirectMode(server: ServerOption): DirectMode | undefine
 }
 
 /**
+ * Marcador de tipo de reproducción al final del nombre. Se busca con esta misma expresión para
+ * poder QUITARLO antes de volver a ponerlo.
+ *
+ * Limpiar antes no es una precaución vacía: la lista que sale de `sortServersBySourcePriority` es
+ * la que catalogService persiste en la DB, así que el nombre ya etiquetado vuelve a entrar por
+ * aquí en la siguiente apertura. Sin este paso, cada pasada añadiría otro marcador y el nombre
+ * acabaría siendo una cola de corchetes.
+ *
+ * Acepta las dos grafías de «vídeo» porque el nombre viaja por una base de datos y no siempre
+ * vuelve con la tilde intacta.
+ */
+const MARCADOR_TIPO = /\s*\[(?:v[íi]deo\s+directo|embed)\]\s*$/i;
+
+/**
+ * Nombre del servidor con el tipo de reproducción escrito EN EL TÍTULO.
+ *
+ * `direct_stream` y `embed_url` no son dos alternativas equivalentes: el primero es el vídeo real
+ * (m3u8/mp4), que se le pasa al reproductor tal cual; el segundo es un reproductor de terceros que
+ * hay que incrustar en un iframe. Un nombre como «Streamwish - Latino» no distinguía uno de otro,
+ * y para saber qué se iba a reproducir había que mirar los campos de cada servidor uno a uno.
+ *
+ * Todo servidor con vídeo directo conserva además su `embed_url` como respaldo, así que la
+ * etiqueta dice cuál es la fuente PRIORITARIA, no la única.
+ */
+export function nombreConTipo(name: string, tieneVideoDirecto: boolean): string {
+  const base = (name || 'Servidor').replace(MARCADOR_TIPO, '').trim();
+  return `${base} [${tieneVideoDirecto ? 'Vídeo directo' : 'Embed'}]`;
+}
+
+/**
  * Infiere la fuente de un servidor si no tiene source_id asignado
  */
 export function getSourceId(server: ServerOption): string {
@@ -86,9 +116,18 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
   // repetiría en cada comparación. Y de paso se publica, para que el campo deje de mentir —
   // `direct_mode` es informativo (lo dice openapi.json) y anunciar el valor guardado describía un
   // comportamiento que ya no ocurre.
+  //
+  // El nombre se sella aquí por la misma razón: es el ÚLTIMO sitio por el que pasan todas las
+  // listas antes de salir, vengan del scraper o de la DB. Los servidores guardados hace meses
+  // llevan nombres de cuando no existía el vídeo directo, y catalogService le trasplanta
+  // `direct_stream` a una ficha vieja cuando lo encuentra: en los dos casos el tipo real solo se
+  // sabe con certeza aquí. No se muta el original —el caché en memoria entrega la misma
+  // referencia en cada acierto—, se clona solo lo que cambia.
   const withEffectiveMode = activeServers.map(s => {
     const mode = effectiveDirectMode(s);
-    return mode && mode !== s.direct_mode ? { ...s, direct_mode: mode } : s;
+    const name = nombreConTipo(s.name, Boolean(s.direct_stream));
+    if (name === s.name && (!mode || mode === s.direct_mode)) return s;
+    return { ...s, name, ...(mode ? { direct_mode: mode } : {}) };
   });
 
   /**

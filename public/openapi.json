@@ -1020,7 +1020,9 @@
             "type": "string"
           },
           "name": {
-            "type": "string"
+            "type": "string",
+            "description": "Nombre del servidor, y termina SIEMPRE diciendo cómo se reproduce:\n\n- `[Vídeo directo]`: trae `direct_stream`, el vídeo real (HLS/MP4). Se le pasa al reproductor tal cual. Conserva además su `embed_url` como respaldo por si falla.\n- `[Embed]`: solo hay `embed_url`, un reproductor de terceros que hay que incrustar en un iframe.\n\nEs la misma información que se deduce de la presencia de `direct_stream`, escrita en el título para poder mostrar la lista de servidores sin inspeccionar campo por campo.",
+            "example": "Streamwish - Latino [Vídeo directo]"
           },
           "quality": {
             "type": "string",
