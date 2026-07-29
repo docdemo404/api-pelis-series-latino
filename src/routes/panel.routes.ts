@@ -4,6 +4,8 @@ import { SourceManager } from '../services/sourceManager';
 import { TmdbService } from '../services/tmdbService';
 import { OverrideService } from '../services/overrideService';
 import { sendErrorResponse } from '../utils/apiHelpers';
+import { BandwidthService } from '../services/bandwidthService';
+import { externalProxyEnabled } from '../utils/externalProxy';
 
 /**
  * Panel de administración: página estática + API de fuentes y overrides.
@@ -16,11 +18,36 @@ router.get('/panel', (_req: Request, res: Response) => {
   res.sendFile(path.join(__dirname, '../../public/panel.html'));
 });
 
-// Estado del panel y fuentes activas
+/**
+ * Estado del panel: fuentes activas y consumo de tránsito.
+ *
+ * El bloque `bandwidth` no es adorno. El contador vive en `CacheStore`, que solo se comparte
+ * entre instancias si hay Redis configurado; sin él, cada lambda de Vercel cuenta únicamente sus
+ * propios bytes y el tope del mes NO SALTA NUNCA. Eso estuvo pasando sin que nada lo dijera, y
+ * la única forma de detectarlo era leer el código. Ahora `shared_counter` lo canta:
+ *
+ *   true  → contador real, el presupuesto protege de verdad.
+ *   false → falta UPSTASH_REDIS_REST_URL / _TOKEN y el presupuesto es decorativo.
+ */
 router.get('/api/v1/panel', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const sources = await SourceManager.getSourcesAsync();
-    res.json({ status: 'success', sources });
+    const [sources, bandwidth] = await Promise.all([
+      SourceManager.getSourcesAsync(),
+      BandwidthService.status(),
+    ]);
+    const gb = (bytes: number) => Number((bytes / 1024 ** 3).toFixed(2));
+    res.json({
+      status: 'success',
+      sources,
+      bandwidth: {
+        ...bandwidth,
+        used_gb: gb(bandwidth.used_bytes),
+        budget_gb: gb(bandwidth.budget_bytes),
+        // Cuánto del vídeo sale por fuera del plan. Con el proxy externo activo, el modo `proxy`
+        // —el único que reenvía la película entera— se delega y deja de contar aquí.
+        external_proxy: externalProxyEnabled(),
+      },
+    });
   } catch (err) {
     next(err);
   }
