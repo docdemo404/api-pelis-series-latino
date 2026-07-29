@@ -34,40 +34,35 @@ const HOST_TTL_MS = 10 * 60 * 1000;
 const hostCache = new Map<string, { vivo: boolean; expira: number }>();
 
 /**
- * Códigos con los que el sistema dice "no he podido ni empezar a hablar con ese servidor".
+ * ¿Sirve de algo esta URL?
  *
- * `EAI_AGAIN` está aquí por una razón medida: en el sandbox de Vercel, pedir un dominio que no
- * existe NO devuelve `ENOTFOUND` como en una máquina normal, sino un fallo temporal de
- * resolución. La primera versión de esto comprobaba el DNS con `dns.lookup` y trataba cualquier
- * cosa que no fuera `ENOTFOUND` como host sano — en local acertaba y en producción daba por
- * bueno TODO, que es exactamente el fallo que venía a arreglar. Se desplegó así y no sirvió de
- * nada hasta que se miró contra producción.
+ * DOS INTENTOS ANTERIORES FALLARON AQUÍ, y los dos por creerle a la red equivocada:
+ *
+ *   1. Preguntar al DNS con `dns.lookup` y contar como muerto solo un `ENOTFOUND`. En el sandbox
+ *      de Vercel un dominio inexistente no contesta eso, así que la regla "ante la duda, vivo"
+ *      daba por bueno TODO. Acertaba en local y no servía de nada desplegado.
+ *   2. Intentar la petición y aceptar cualquier respuesta como prueba de vida. Pero es que esos
+ *      dominios SÍ resuelven desde la red de Vercel: van a una página de aparcamiento que
+ *      responde 200 tan contenta. Otra vez el 302 de siempre.
+ *
+ * De ahí que ahora la pregunta no sea "¿existe el dominio?" sino "¿me está devolviendo lo que
+ * pedí?". Cuando lo pedido es una playlist, la respuesta tiene que EMPEZAR POR `#EXTM3U`: eso lo
+ * cumple un CDN vivo y no lo cumple ni un dominio revendido ni un resolutor creativo, y no depende
+ * de códigos de error que cambian según dónde corra el proceso.
+ *
+ * Lo que NO condena: un 403 (puede ser una cabecera que solo el reproductor sabe poner) ni un
+ * timeout (un CDN lento no es un CDN caído). Equivocarse hacia "muerto" manda al cliente al embed
+ * o a otro servidor, que es recuperable; equivocarse hacia "vivo" lo deja mirando una pantalla
+ * negra, que no lo es.
+ *
+ * Se cachea por host y por tipo de sonda: un maestro lista varias calidades que suelen compartir
+ * dominio, y así se paga una sonda por host y no una por variante.
  */
-const CODIGOS_INALCANZABLE = new Set([
-  'ENOTFOUND',
-  'ENODATA',
-  'EAI_AGAIN',
-  'ECONNREFUSED',
-  'EHOSTUNREACH',
-  'ENETUNREACH',
-]);
-
-/**
- * ¿Hay algo al otro lado de esta URL?
- *
- * NO se pregunta por DNS sino intentando la petición de verdad, y es por lo aprendido arriba: el
- * resolutor contesta cosas distintas según dónde corra el proceso, mientras que "la conexión no
- * llegó a establecerse" significa lo mismo en todas partes. De paso cubre el dominio que resuelve
- * pero cuyo servidor ya no está.
- *
- * NO se mira el status. Un 403 o un 404 pueden venir de una cabecera que solo el reproductor sabe
- * poner, y con eso no se puede condenar un vídeo: lo único que cuenta como muerto es no haber
- * podido conectar. Un timeout tampoco cuenta — un CDN lento no es un CDN caído.
- *
- * Se cachea por HOST: un maestro lista varias calidades que suelen compartir dominio, y así se
- * paga una sonda por host y no una por variante.
- */
-export async function hostAlcanzable(url: string, referer: string): Promise<boolean> {
+export async function hostAlcanzable(
+  url: string,
+  referer: string,
+  esperaManifiesto = false
+): Promise<boolean> {
   let host: string;
   try {
     host = new URL(url).hostname;
@@ -75,23 +70,42 @@ export async function hostAlcanzable(url: string, referer: string): Promise<bool
     return false;
   }
 
-  const cacheado = hostCache.get(host);
+  const clave = `${host}|${esperaManifiesto}`;
+  const cacheado = hostCache.get(clave);
   if (cacheado && Date.now() < cacheado.expira) return cacheado.vivo;
 
   let vivo = true;
   try {
-    await streamClient.get(url, {
-      headers: { Referer: referer, Range: 'bytes=0-0' },
+    const res = await streamClient.get(url, {
+      headers: { Referer: referer },
       responseType: 'text',
       timeout: 8000,
       validateStatus: () => true,
     });
-    // Cualquier respuesta, del status que sea, demuestra que el servidor existe.
+
+    // Que conteste algo no basta, y esto también salió de mirar producción: el dominio que da
+    // NXDOMAIN desde una red normal SÍ resuelve desde la red de Vercel —a una página de
+    // aparcamiento que responde encantada—, así que "hubo respuesta" daba el vídeo por vivo y
+    // volvía a entregar el 302 de siempre.
+    //
+    // Un 404 o un 410 sobre una playlist no admiten interpretación: el fichero no está. Un 403
+    // sí, y por eso se perdona — puede ser una cabecera que solo el reproductor sabe poner.
+    if (res.status === 404 || res.status === 410) vivo = false;
+
+    // Y la prueba definitiva cuando lo que se pidió es una playlist: que el cuerpo SEA una
+    // playlist. Un manifiesto empieza por `#EXTM3U`; una página de aparcamiento, no. Esto
+    // distingue al CDN vivo del dominio revendido sin depender de ningún código de error.
+    if (vivo && esperaManifiesto && !String(res.data || '').trimStart().startsWith('#EXTM3U')) {
+      vivo = false;
+    }
   } catch (err: any) {
-    if (CODIGOS_INALCANZABLE.has(err?.code)) vivo = false;
+    // Un timeout no condena: un CDN lento no es un CDN caído. Cualquier otro fallo de conexión sí.
+    const codigo = err?.code || err?.errno || err?.cause?.code;
+    const esTimeout = codigo === 'ECONNABORTED' || codigo === 'ETIMEDOUT';
+    if (!esTimeout) vivo = false;
   }
 
-  hostCache.set(host, { vivo, expira: Date.now() + HOST_TTL_MS });
+  hostCache.set(clave, { vivo, expira: Date.now() + HOST_TTL_MS });
   return vivo;
 }
 
@@ -155,7 +169,8 @@ export async function revisarManifiesto(
       absolutaCruda = new URL(limpia, urlBase).toString();
     } catch {}
     const host = hostDe(limpia, urlBase);
-    if (host && !(await hostAlcanzable(absolutaCruda, referer))) {
+    const esPlaylist = /\.m3u8(\?|$)/i.test(absolutaCruda);
+    if (host && !(await hostAlcanzable(absolutaCruda, referer, esPlaylist))) {
       muertos.add(host);
       // Quitar también la etiqueta de cabecera que acabábamos de escribir, si la había.
       if (salida.length && /^#EXT-X-STREAM-INF/i.test(salida[salida.length - 1].trim())) salida.pop();
