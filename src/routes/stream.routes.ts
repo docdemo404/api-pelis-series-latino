@@ -567,7 +567,12 @@ router.get(DIRECT_BASE, async (req: Request, res: Response, next: NextFunction) 
      */
     const esNavegador = Boolean(req.headers.origin);
     const sinCors = destinoSirveCors(minted.url) === false;
-    if (mode === 'redirect' && esNavegador && sinCors) {
+    // Pedir `?mode=redirect` a mano gana siempre. Un `<video src>` reproduce un mp4 SIN pasar por
+    // CORS —solo lo necesita quien lee por fetch/MSE o pone `crossorigin`—, así que un cliente que
+    // sabe cómo reproduce puede quedarse el 302 y ahorrarnos el tránsito. Degradarle "por su bien"
+    // era gastar ancho de banda del plan en un problema que ese cliente no tiene.
+    const pidioRedirect = String(req.query.mode || '').toLowerCase() === 'redirect';
+    if (mode === 'redirect' && esNavegador && sinCors && !pidioRedirect) {
       console.warn(`[direct] sin CORS y el cliente es navegador, se proxea: ${minted.url.slice(0, 80)}`);
       mode = 'proxy';
     }

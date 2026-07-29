@@ -811,7 +811,12 @@
             "description": "Cómo entregar el vídeo.\n\n- `auto` (por defecto): lo más rápido que funcione en CUALQUIER reproductor. Un navegador no necesita declarar nada. La elección tiene en cuenta si tu petición trae `Referer`/`Origin`, porque hay hosts cuyos segmentos responden 403 sin él.\n- `redirect`: para clientes NATIVOS (ExoPlayer, AVPlayer, VLC) que saben fijar `Referer` y `User-Agent`. Devuelve 302 también en los hosts que exigen esas cabeceras — hay que copiarlas del campo `headers` del servidor y aplicarlas TAMBIÉN a los segmentos, o el CDN responderá 403. Un navegador NO debe usarlo: no puede fijarlas.\n- `manifest`: sirve las playlists desde esta API y deja los segmentos apuntando al CDN. Escalón intermedio para cuando el 302 no reproduce pero no hace falta reenviar vídeo.\n- `proxy`: fuerza el reenvío de bytes. Es la salida de emergencia si nada de lo anterior reproduce en tu cliente.",
             "schema": {
               "type": "string",
-              "enum": ["auto", "redirect", "manifest", "proxy"],
+              "enum": [
+                "auto",
+                "redirect",
+                "manifest",
+                "proxy"
+              ],
               "default": "auto"
             }
           }
@@ -862,7 +867,9 @@
             "description": "Modo de reescritura heredado del manifiesto padre, para que una playlist anidada trate sus segmentos con el mismo criterio. Lo pone `/api/v1/stream/direct`; no hay que tocarlo.",
             "schema": {
               "type": "string",
-              "enum": ["manifest"]
+              "enum": [
+                "manifest"
+              ]
             }
           }
         ],
@@ -1053,12 +1060,11 @@
           "direct_mode": {
             "type": "string",
             "enum": [
-              "public",
               "redirect",
               "manifest",
               "proxy"
             ],
-            "description": "Qué hará `direct_stream` con este servidor.\n\n- `public`: la URL del CDN no caduca y se entrega tal cual.\n- `redirect`: responde 302 a la URL del CDN. El vídeo va directo del CDN a tu reproductor, sin pasar por esta API: es el camino rápido.\n- `manifest`: las playlists se sirven desde esta API (unos KB) y los segmentos van del CDN a tu reproductor. Ocurre cuando las playlists del host y sus segmentos exigen cosas contrarias y ningún navegador puede cumplir las dos.\n- `proxy`: esta API reenvía los bytes, porque el CDN valida la IP que acuñó la URL o exige cabeceras que un navegador no puede poner ni siquiera en los segmentos.\n\nEs informativo, y además solo un anuncio: `/api/v1/stream/direct` vuelve a decidir en cada reproducción según tu cliente, así que un valor que se quede viejo no rompe nada."
+            "description": "Qué hará `direct_stream` con este servidor.\n\n- `redirect`: responde 302 a la URL del CDN. El vídeo va directo del CDN a tu reproductor, sin pasar por esta API: es el camino rápido.\n- `manifest`: las playlists se sirven desde esta API (unos KB) y los segmentos van del CDN a tu reproductor. Ocurre cuando las playlists del host y sus segmentos exigen cosas contrarias y ningún navegador puede cumplir las dos.\n- `proxy`: esta API reenvía los bytes, porque el CDN valida la IP que acuñó la URL o exige cabeceras que un navegador no puede poner ni siquiera en los segmentos.\n\nEs informativo, y además solo un anuncio: `/api/v1/stream/direct` vuelve a decidir en cada reproducción según tu cliente, así que un valor que se quede viejo no rompe nada.\n\nEl modo `public` ya no existe: entregaba la URL cruda del CDN, y eso dejaba fuera tanto las cabeceras CORS como la comprobacion de que el video siga vivo. Ahora todo pasa por esta API.\n\nCORS: si tu cliente manda `Origin` (un navegador) y el CDN de destino no devuelve `Access-Control-Allow-Origin`, un `redirect` se degrada solo a `proxy` para que tu reproductor pueda leer la respuesta. Si sabes que no lo necesitas -un `<video src>` reproduce un mp4 sin pasar por CORS- pide `?mode=redirect` y conservaras el 302."
           },
           "direct_host": {
             "type": "string",
