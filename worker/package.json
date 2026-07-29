@@ -1,0 +1,15 @@
+{
+  "name": "api-pelis-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Proxy de vídeo en Cloudflare Workers: acuña y sirve el vídeo de los hosts que atan la URL a la IP, para que ese tránsito no salga del plan de Vercel.",
+  "scripts": {
+    "login": "wrangler login",
+    "secret": "wrangler secret put PROXY_SIGNING_KEY",
+    "deploy": "wrangler deploy",
+    "logs": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^3.90.0"
+  }
+}

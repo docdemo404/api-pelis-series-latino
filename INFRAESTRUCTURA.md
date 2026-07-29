@@ -1,125 +1,137 @@
-# Quitar el techo de ancho de banda
+# Qué tienes que hacer tú
 
-Todo el código está hecho y desplegado. Quedan **dos cosas** que requieren crear cuentas, y por
-eso no las puedo hacer yo. Las dos son gratis.
+Dos tareas. **Las dos gratis y para siempre** (no piden tarjeta). Unos 15 minutos en total.
 
-Mientras no las hagas, la API funciona exactamente igual que ahora: el código nuevo está apagado
-hasta que existan las variables de entorno.
+El código ya está hecho y desplegado. Hasta que hagas esto, la API funciona igual que ahora: lo
+nuevo está apagado y no rompe nada.
 
----
-
-## Por qué hacen falta (los números)
-
-De 28 744 reproducciones posibles del catálogo:
-
-| se sirve como | reproducciones | coste por película |
-| --- | --- | --- |
-| `redirect` | 19 961 (75,6 %) | **0 bytes** |
-| `manifest` | 5 661 (21,4 %) | ~200 KB |
-| `proxy` | **797 (3,0 %)** | **~3,2 GB** |
-
-Todo el riesgo está en ese 3 %: con ~3,2 GB por película, unas 30 reproducciones agotan los 100 GB
-del plan Hobby de Vercel.
-
-Y hay un detalle que condiciona la solución: **793 de esas 797 están atadas por IP** (vidhideplus
-772, ok.ru 26). Medido — la misma URL responde 200 desde la máquina que la acuñó y 403 desde
-cualquier otra. Por eso el proxy externo no puede limitarse a reenviar: tiene que acuñar y
-descargar él mismo.
+Ve de arriba abajo. Cada bloque de comandos se copia y se pega tal cual.
 
 ---
 
-## Tarea 1 — Contador de tránsito compartido (5 minutos)
+## Tarea 1 · Upstash — 5 minutos
 
-**Qué arregla:** ahora mismo el límite de 80 GB **no funciona**. Está comprobado
-(`shared_counter: false`): sin Redis, cada instancia de Vercel cuenta solo sus propios bytes, así
-que el tope no se dispara nunca. Tienes la protección apagada sin saberlo.
+> Arregla el contador de tránsito, que **hoy no funciona**. Sin él, el tope de 80 GB no salta
+> nunca y puedes pasarte del plan sin enterarte.
 
-1. Crea una base gratuita en <https://upstash.com> → *Create Database* → tipo **Redis**.
-2. Copia `UPSTASH_REDIS_REST_URL` y `UPSTASH_REDIS_REST_TOKEN` de la pestaña *REST API*.
-3. Ejecuta esto y pega cada valor cuando lo pida:
+**1.** Entra en <https://console.upstash.com> y regístrate con Google (no pide tarjeta).
+
+**2.** Pulsa **Create Database**. Ponle el nombre que quieras, deja todo lo demás como viene y
+crea.
+
+**3.** Baja hasta la sección **REST API**. Verás dos valores. Déjalos a mano:
+- `UPSTASH_REDIS_REST_URL` → empieza por `https://`
+- `UPSTASH_REDIS_REST_TOKEN` → una cadena larga
+
+**4.** En la carpeta del proyecto, ejecuta esto. Te pedirá pegar el valor de la **URL**:
 
 ```bash
 npx vercel env add UPSTASH_REDIS_REST_URL production
 ```
 
+**5.** Ahora el token. Te pedirá pegar el valor del **TOKEN**:
+
 ```bash
 npx vercel env add UPSTASH_REDIS_REST_TOKEN production
 ```
 
-Con esto el contador pasa a ser real y, al llegar al tope, los vídeos que atan por IP caen al
-`embed_url` en vez de dejar al usuario con la pantalla en negro.
+✅ Tarea 1 lista.
 
 ---
 
-## Tarea 2 — Proxy en Cloudflare (10 minutos)
+## Tarea 2 · Cloudflare — 10 minutos
 
-**Qué arregla:** el 3 % caro deja de gastar plan. Cloudflare no cobra egreso, así que el vídeo
-puede pasar por ahí sin límite de tránsito.
+> Es lo que quita el techo de ancho de banda. Cloudflare no cobra por el tráfico de salida, así
+> que el vídeo pesado deja de gastar tu plan de Vercel.
 
-1. Crea una cuenta gratuita en <https://dash.cloudflare.com/sign-up>.
-2. Inventa una contraseña larga cualquiera (es el secreto compartido; sirve cualquier cosa difícil
-   de adivinar) y guárdala a mano — hace falta en los pasos 4 y 6.
-3. Desde la carpeta `worker/`, entra con tu cuenta:
+**1.** Regístrate en <https://dash.cloudflare.com/sign-up> (el plan gratuito vale; no pide
+tarjeta).
 
-```bash
-npx wrangler login
-```
+**2.** Inventa una contraseña larga, por ejemplo `mi-clave-secreta-2026-pelis-xyz`. **Apúntala**,
+la vas a pegar dos veces (pasos 4 y 6). No tiene que ser nada especial, solo difícil de adivinar.
 
-4. Sube el secreto (te pedirá pegar la contraseña del paso 2):
+**3.** Entra con tu cuenta. Se abrirá el navegador para que autorices:
 
 ```bash
-npx wrangler secret put PROXY_SIGNING_KEY
+cd worker && npx wrangler login
 ```
 
-5. Despliega el Worker. Al terminar imprime su URL, algo como
-   `https://api-pelis-proxy.TU-CUENTA.workers.dev` — cópiala:
+**4.** Sube la contraseña del paso 2 al Worker. Te la pedirá por pantalla:
 
 ```bash
-npx wrangler deploy
+cd worker && npx wrangler secret put PROXY_SIGNING_KEY
 ```
 
-6. Vuelve a la carpeta raíz del proyecto y dale a la API esos dos datos (la URL del paso 5 y la
-   contraseña del paso 2):
+**5.** Despliega. Al terminar imprime una línea con la URL del Worker, parecida a
+`https://api-pelis-proxy.algo.workers.dev`. **Cópiala**:
+
+```bash
+cd worker && npx wrangler deploy
+```
+
+**6.** Dale esos dos datos a la API. Primero la **URL del paso 5**:
 
 ```bash
 npx vercel env add VIDEO_PROXY_URL production
 ```
 
+Y ahora la **contraseña del paso 2** (la misma, exactamente igual):
+
 ```bash
 npx vercel env add VIDEO_PROXY_KEY production
 ```
 
-7. Redespliega para que la API recoja las variables:
+**7.** Redespliega para que la API las recoja:
 
 ```bash
 npx vercel --prod
 ```
 
+✅ Tarea 2 lista.
+
 ---
 
-## Cómo saber que funcionó
+## Comprobar que funcionó
 
-Pásame la URL del Worker y lo verifico yo. Si prefieres comprobarlo tú, esto tiene que devolver
-`302` y apuntar al Worker:
+Pega esto. Antes de la tarea 2 devuelve `200`; después tiene que devolver `302` y una dirección
+que acabe en `workers.dev`:
 
 ```bash
 curl -s -o /dev/null -w "%{http_code} -> %{redirect_url}\n" "https://api-pelis-series-latino.vercel.app/api/v1/stream/direct?e=aHR0cHM6Ly92aWRoaWRlcGx1cy5jb20vdi8xMTlid290ZmJ4MXI"
 ```
 
-Antes de la tarea 2 responde `200` y sirve el vídeo desde Vercel (gastando plan). Después responde
-`302` hacia Cloudflare y Vercel no transporta ni un byte.
+Si sale `302` y apunta a `workers.dev`, está funcionando: ese vídeo ya no pasa por Vercel.
+
+**Pásame la URL del Worker y lo verifico yo de punta a punta**, que es lo que de verdad demuestra
+que reproduce.
 
 ---
 
-## Lo que queda sin resolver, para que lo sepas
+## Por qué esto basta (y por qué no hace falta pagar nada)
 
-El Worker acuña y descarga en la misma invocación, que es lo que permite servir hosts atados por
-IP. Lo que **no está medido todavía** es si Cloudflare mantiene la misma IP de salida entre la
-petición del embed y la de cada segmento. Si no la mantuviera, el Worker lo detecta (un 403) y
-vuelve a acuñar por su cuenta, que es la misma red de seguridad que ya usa la API — pero eso hay
-que verlo funcionando de verdad, no darlo por hecho. Es lo primero que comprobaré en cuanto esté
-desplegado.
+De 28 744 reproducciones posibles del catálogo:
 
-Si resultara que no aguanta, la alternativa es un VPS pequeño con IP fija (unos 4-5 €/mes con
-20 TB de tráfico), donde el problema desaparece por completo. El mismo código del Worker sirve
-casi igual.
+| se sirve como | reproducciones | coste |
+| --- | --- | --- |
+| `redirect` | 19 961 (75,6 %) | **0 bytes** |
+| `manifest` | 5 661 (21,4 %) | ~200 KB |
+| `proxy` | 797 (3,0 %) | ~3,2 GB → **pasa a Cloudflare** |
+
+El 97 % ya no gastaba nada. El 3 % que sí gastaba es justo lo que se va al Worker, y Cloudflare no
+cobra el tráfico de salida. Con cientos de usuarios al mes te sobra de largo.
+
+**Si algún día el Worker fallara**, no te quedas sin nada ni tienes que pagar: la API responde 502
+y el cliente reproduce con `embed_url`, que sirve el propio host y también es gratis. Ese respaldo
+ya está implementado y probado.
+
+---
+
+## Lo único que queda por confirmar
+
+El Worker acuña el vídeo y lo descarga en la misma invocación, que es lo que permite servir los
+hosts que atan la URL a una IP (el 99 % del 3 % caro).
+
+Si Cloudflare saliera por otra IP entre una petición y la siguiente, el CDN respondería 403 — y el
+Worker ya lo contempla: vuelve a acuñar por su cuenta y sigue. El coste sería alguna petición
+extra, no un fallo. Aun así **no lo doy por bueno hasta verlo desplegado**, que es justo lo que
+esta semana ya me falló dos veces por confiarme.
