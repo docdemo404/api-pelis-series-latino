@@ -31,7 +31,29 @@ import { streamClient } from '../utils/httpClient';
 /** Cuánto se recuerda si un host está o no alcanzable. Un dominio que no existe tarda en volver. */
 const HOST_TTL_MS = 10 * 60 * 1000;
 
-const hostCache = new Map<string, { vivo: boolean; expira: number }>();
+const hostCache = new Map<string, { vivo: boolean; cors: boolean; expira: number }>();
+
+/**
+ * ¿Este destino deja que un NAVEGADOR lea su respuesta?
+ *
+ * Lo apunta la sonda de `hostAlcanzable`, que ya tiene la respuesta en la mano — preguntarlo
+ * aparte sería otra petición para un dato que acabamos de ver pasar.
+ *
+ * Devuelve `undefined` si aún no se ha sondeado ese host: eso NO es "no tiene CORS", es "no se
+ * sabe", y quien lo consulte tiene que tratarlo como tal.
+ */
+export function destinoSirveCors(url: string): boolean | undefined {
+  let host: string;
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    return undefined;
+  }
+  for (const [clave, entrada] of hostCache) {
+    if (clave.startsWith(host + '|') && Date.now() < entrada.expira) return entrada.cors;
+  }
+  return undefined;
+}
 
 /**
  * ¿Sirve de algo esta URL?
@@ -80,6 +102,7 @@ export async function hostAlcanzable(
   if (cacheado && Date.now() < cacheado.expira) return cacheado.vivo;
 
   let vivo = true;
+  let cors = false;
   try {
     const res = await streamClient.get(url, {
       // `Range` NO es una optimización, es lo que hace viable la sonda: sin él, comprobar un mp4
@@ -109,6 +132,8 @@ export async function hostAlcanzable(
     //
     // Un 404 o un 410 sobre una playlist no admiten interpretación: el fichero no está. Un 403
     // sí, y por eso se perdona — puede ser una cabecera que solo el reproductor sabe poner.
+    cors = res.headers['access-control-allow-origin'] !== undefined;
+
     if (res.status === 404 || res.status === 410) vivo = false;
     if (entregaLiteral && res.status >= 400) vivo = false;
 
@@ -135,7 +160,7 @@ export async function hostAlcanzable(
     if (!esTimeout && !seLePasoElTope) vivo = false;
   }
 
-  hostCache.set(clave, { vivo, expira: Date.now() + HOST_TTL_MS });
+  hostCache.set(clave, { vivo, cors, expira: Date.now() + HOST_TTL_MS });
   return vivo;
 }
 

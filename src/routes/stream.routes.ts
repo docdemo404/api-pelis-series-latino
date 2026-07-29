@@ -7,7 +7,7 @@ import { bestMode } from '../scrapers/hostPolicy';
 import { DirectMode } from '../types';
 import { sendErrorResponse } from '../utils/apiHelpers';
 import { USER_AGENT, streamClient } from '../utils/httpClient';
-import { bajarManifiesto, revisarManifiesto, hostAlcanzable, segmentoDescargable } from '../services/manifestHealth';
+import { bajarManifiesto, revisarManifiesto, hostAlcanzable, segmentoDescargable, destinoSirveCors } from '../services/manifestHealth';
 import { CacheStore } from '../cache/store';
 
 /**
@@ -534,7 +534,7 @@ router.get(DIRECT_BASE, async (req: Request, res: Response, next: NextFunction) 
       return sendErrorResponse(res, 502, 'DIRECT_UNAVAILABLE', 'No se pudo extraer el vídeo de este embed. Reproduce con embed_url.');
     }
 
-    const mode = resolveMode(
+    let mode = resolveMode(
       String(req.query.mode || 'auto').toLowerCase(),
       embedUrl,
       minted.kind,
@@ -551,6 +551,25 @@ router.get(DIRECT_BASE, async (req: Request, res: Response, next: NextFunction) 
     const veredicto = await comprobarDestino(minted, mode);
     if (veredicto.kind === 'muerto') {
       return sendErrorResponse(res, 502, 'DIRECT_UNAVAILABLE', 'El vídeo ya no existe en este host. Reproduce con embed_url u otro servidor.');
+    }
+
+    /**
+     * Un navegador NO PUEDE leer una respuesta sin `Access-Control-Allow-Origin`, así que
+     * redirigirle a un host que no la manda es entregarle un vídeo que su reproductor va a
+     * bloquear. Pasa de verdad: archive.org sirve sus mp4 sin ninguna cabecera CORS.
+     *
+     * Se sabe quién es un navegador porque manda `Origin`, y se sabe si el destino trae CORS
+     * porque la sonda de `comprobarDestino` acaba de verlo — ninguna de las dos cosas cuesta una
+     * petición extra. Un cliente nativo (sin `Origin`) no pasa por CORS y conserva su 302.
+     *
+     * Solo se degrada con un `false` seguro; si el host no llegó a sondearse, se redirige como
+     * siempre. Es el mismo sesgo de toda la verificación: no romper lo que no se ha medido.
+     */
+    const esNavegador = Boolean(req.headers.origin);
+    const sinCors = destinoSirveCors(minted.url) === false;
+    if (mode === 'redirect' && esNavegador && sinCors) {
+      console.warn(`[direct] sin CORS y el cliente es navegador, se proxea: ${minted.url.slice(0, 80)}`);
+      mode = 'proxy';
     }
 
     if (mode === 'redirect') {

@@ -1,6 +1,7 @@
 import { ServerOption, DirectMode } from '../types';
 import { SourceManager, SourceConfig } from './sourceManager';
 import { bestMode } from '../scrapers/hostPolicy';
+import { directEndpointUrl } from '../scrapers/directStream';
 
 /**
  * Cómo se va a servir este servidor HOY, no cómo se guardó.
@@ -24,10 +25,36 @@ import { bestMode } from '../scrapers/hostPolicy';
  */
 export function effectiveDirectMode(server: ServerOption): DirectMode | undefined {
   if (!server.direct_stream) return undefined;
-  // Una URL `public` es del CDN y ya no depende de ninguna política: se queda como está.
-  if (server.direct_mode === 'public') return 'public';
+  // El modo `public` ya no existe, ni siquiera para las 1 115 fichas que lo llevan guardado: se
+  // recalcula como cualquier otra. Ver `enlaceDirecto` justo debajo.
   if (!server.embed_url) return server.direct_mode;
   return bestMode(server.embed_url, server.direct_kind ?? 'hls', { sendsReferer: true });
+}
+
+/**
+ * El `direct_stream` que se entrega hoy, aunque en la DB se guardara la URL cruda del CDN.
+ *
+ * Hubo un modo `public` que publicaba directamente el enlace del CDN cuando el mp4 no llevaba
+ * firma: se ahorraba el salto por la API. Quedaron 1 115 servidores así (1,5 %) y salió mal por
+ * tres sitios a la vez —lo reportó un cliente y lo confirmó la medición—:
+ *
+ *   1. CORS. archive.org (189) no manda `Access-Control-Allow-Origin` NINGUNO, así que un
+ *      reproductor web que lea por fetch/MSE lo tiene bloqueado, y como la URL no es nuestra no
+ *      hay forma de añadirle la cabecera.
+ *   2. Se saltaba TODA la verificación de destino vivo: lo que no pasa por /stream/direct no se
+ *      comprueba.
+ *   3. Caducaba igual. 192 apuntaban a `cdn3.turboviplay.com`, que firma sus URLs — el enlace
+ *      "permanente" que se guardó lleva meses muerto.
+ *
+ * Se corrige en la SALIDA y no solo en el scraper para no tener que esperar a que se vuelvan a
+ * rastrear esas fichas: en cuanto se piden, ya salen apuntando a la API.
+ */
+export function enlaceDirecto(server: ServerOption): string | undefined {
+  const actual = server.direct_stream;
+  if (!actual || !server.embed_url) return actual;
+  // Lo que ya apunta a la API (relativo o absoluto) se queda como está.
+  if (!/^https?:\/\//i.test(actual) || actual.includes('/api/v1/stream/direct')) return actual;
+  return directEndpointUrl(server.embed_url);
 }
 
 /**
@@ -126,8 +153,14 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
   const withEffectiveMode = activeServers.map(s => {
     const mode = effectiveDirectMode(s);
     const name = nombreConTipo(s.name, Boolean(s.direct_stream));
-    if (name === s.name && (!mode || mode === s.direct_mode)) return s;
-    return { ...s, name, ...(mode ? { direct_mode: mode } : {}) };
+    const stream = enlaceDirecto(s);
+    if (name === s.name && stream === s.direct_stream && (!mode || mode === s.direct_mode)) return s;
+    return {
+      ...s,
+      name,
+      ...(stream ? { direct_stream: stream } : {}),
+      ...(mode ? { direct_mode: mode } : {}),
+    };
   });
 
   /**
@@ -152,7 +185,7 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
    */
   const directScore = (s: ServerOption): number => {
     if (!s.direct_stream) return 0;
-    if (s.direct_mode === 'public' || s.direct_mode === 'redirect') return 3;
+    if (s.direct_mode === 'redirect') return 3;
     if (s.direct_mode === 'manifest') return 2;
     return 1;
   };

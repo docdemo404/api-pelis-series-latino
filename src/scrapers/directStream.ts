@@ -538,17 +538,29 @@ export function deferredDirectFields(embedUrl: string): DirectFields {
  * nada — como mucho desactualiza lo que se muestra.
  */
 export function describeDirect(embedUrl: string, direct: DirectStream): DirectFields {
-  // `isPubliclyShareable` ya no decide si se proxea, solo si la URL se puede PERSISTIR: una
-  // URL sin firma ni caducidad sigue valiendo mañana, y esa es la única que se guarda cruda.
-  const shareable = direct.kind === 'mp4' && isPubliclyShareable(direct.url);
-  const mode: DirectMode = shareable ? 'public' : bestMode(embedUrl, direct.kind);
+  // YA NO SE PUBLICA NINGUNA URL CRUDA DE CDN, aunque parezca permanente.
+  //
+  // Existía el modo `public` para los mp4 sin firma ni caducidad: se entregaba la URL del CDN tal
+  // cual y el cliente se ahorraba el salto por la API. Llegó a 1 115 servidores (1,5%) y trajo
+  // tres problemas, los tres reportados o medidos:
+  //
+  //   1. CORS. archive.org (189 servidores) no manda `Access-Control-Allow-Origin`, así que un
+  //      reproductor web que lea el vídeo por fetch/MSE lo tiene bloqueado y no hay nada que el
+  //      cliente pueda hacer: la URL no es nuestra y no podemos añadirle cabeceras.
+  //   2. Se saltaba TODA la verificación. Una URL cruda no pasa por /stream/direct, así que
+  //      ninguna de las comprobaciones de destino vivo llega a ejecutarse sobre ella.
+  //   3. Caducaba igual. 192 de esos servidores apuntaban a `cdn3.turboviplay.com`, que firma sus
+  //      URLs — o sea que el enlace "permanente" que se guardó lleva meses muerto.
+  //
+  // Ahora todo pasa por la API, que decide en cada reproducción y puede proxear si hace falta.
+  const mode: DirectMode = bestMode(embedUrl, direct.kind);
   let host = '';
   try {
     host = new URL(direct.url).hostname;
   } catch {}
 
   return {
-    direct_stream: shareable ? direct.url : directEndpointUrl(embedUrl),
+    direct_stream: directEndpointUrl(embedUrl),
     direct_kind: direct.kind,
     direct_mode: mode,
     direct_host: host || undefined,
