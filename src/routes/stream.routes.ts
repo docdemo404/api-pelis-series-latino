@@ -3,7 +3,7 @@ import { ResolverService } from '../services/resolverService';
 import { BandwidthService } from '../services/bandwidthService';
 import { mintDirect, MintedStream } from '../services/directResolver';
 import { decodeEmbedParam } from '../scrapers/directStream';
-import { bestMode } from '../scrapers/hostPolicy';
+import { bestMode, policyFor } from '../scrapers/hostPolicy';
 import { DirectMode } from '../types';
 import { sendErrorResponse } from '../utils/apiHelpers';
 import { USER_AGENT, streamClient } from '../utils/httpClient';
@@ -594,7 +594,22 @@ router.get(DIRECT_BASE, async (req: Request, res: Response, next: NextFunction) 
     // Presupuesto de tránsito agotado: se entrega la URL acuñada y que el cliente lo intente
     // por su cuenta. Puede fallar por la atadura de IP, pero le queda el embed como respaldo.
     // En `manifest` no aplica: lo que se sirve son kilobytes de texto, no vídeo.
-    if (overBudget && mode !== 'manifest') return sendRedirect(res, minted.url);
+    /**
+     * PRESUPUESTO AGOTADO. Antes se entregaba la URL acuñada con un 302 y que el cliente lo
+     * intentara por su cuenta. Suena razonable y es justo lo que NO funciona, porque el único
+     * modo que gasta ancho de banda de verdad es `proxy`, y a `proxy` solo se llega por dos
+     * caminos: el CDN ata por IP, o exige cabeceras que el cliente no puede poner. En los dos
+     * casos ese 302 es un enlace que el cliente NO va a poder abrir — y como es un 302 y no un
+     * error, tampoco dispara la cascada al `embed_url`. O sea: el mecanismo que debía proteger el
+     * plan dejaba al usuario sin nada, teniendo el embed al lado y costándonos cero.
+     *
+     * Ahora se redirige solo si el destino admite de verdad ser redirigido; si no, se devuelve
+     * 502 y el cliente reproduce con el embed, que no gasta plan porque lo sirve el host.
+     */
+    if (overBudget && mode !== 'manifest') {
+      if (!policyFor(embedUrl).ipBound) return sendRedirect(res, minted.url);
+      return sendErrorResponse(res, 502, 'DIRECT_UNAVAILABLE', 'Presupuesto de tránsito agotado este mes. Reproduce con embed_url.');
+    }
 
     // En `manifest` solo viajan por aquí las playlists; los segmentos van del CDN al reproductor.
     const rewriteMode: RewriteMode = mode === 'manifest' ? 'manifest' : 'proxy';
