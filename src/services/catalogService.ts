@@ -3,7 +3,7 @@ import { supabase, getSupabaseAdmin } from './supabaseService';
 import { RealScraperService } from './realScraperService';
 import { TmdbService } from './tmdbService';
 import { sortServersBySourcePriority, getPrimaryStream } from './streamSorter';
-import { normalizeTitle, slugify } from '../utils/text';
+import { normalizeTitle, slugify, yearFromSlug } from '../utils/text';
 import { CacheStore } from '../cache/store';
 import { unwrapRedirector } from '../scrapers/directStream';
 import { revisarServidores, aplicarVeredictosRecordados } from './playbackHealth';
@@ -70,6 +70,103 @@ function canonicalTitleKey(t: string): string {
 /** Normalización estricta alfanumérica para comparación EXACTA de títulos/slugs. */
 function strictKey(t: string): string {
   return (t || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/g, '').trim();
+}
+
+/**
+ * Año de estreno de una ficha o de un candidato de las fuentes, mire donde mire.
+ *
+ * Ninguna de las dos vías está siempre: `release_date` lo pone TMDB (ISO completo) o la tarjeta
+ * de la fuente (solo el año, entre paréntesis en el título), y el slug lo lleva embebido justo
+ * cuando la fuente ha tenido que desambiguar homónimos (`sin-salida-2011`,
+ * `2026-03-sin-salida-2022-html`). Se mira primero la fecha, que es el dato explícito; el slug
+ * es el último recurso —un título que acaba en número ("Mujer Maravilla 1984") lo confundiría—.
+ */
+export function yearOf(item: { release_date?: string; id?: string; _tioplus_url?: string; _source_url?: string }): string | undefined {
+  const fromDate = String(item.release_date || '').match(/\b(1[89]\d{2}|20\d{2})\b/);
+  if (fromDate) return fromDate[1];
+  const url = item._tioplus_url || item._source_url || '';
+  return yearFromSlug(item.id) || yearFromSlug(slugify(url));
+}
+
+/**
+ * ¿Un candidato de las fuentes es LA MISMA OBRA que la ficha que estamos resolviendo?
+ *
+ * Es la pregunta que autoriza a adoptar sus servidores, y hasta ahora se contestaba SOLO con el
+ * título: cualquier candidato que se llamara igual entraba. Eso mezcla películas distintas de
+ * forma sistemática, porque el catálogo está lleno de homónimos exactos y porque el título de la
+ * ficha es el de TMDB en español, que multiplica las colisiones. Medido en vivo, "Sin salida"
+ * devuelve CUATRO películas sin relación (Abduction 2011, Not Safe for Work 2014, No Exit 2022 y
+ * la de 2024), y "The Firm" (1993) se llama "Sin salida" en es-MX: las cuatro acabaron
+ * volcándose unas en otras. "Carrie" son tres (1976, 2002, 2013).
+ *
+ * El año es lo que las separa, así que aquí es REQUISITO, no desempate. Se contesta una de tres:
+ *
+ *   'misma'       → hay prueba de identidad: el mismo tmdb_id real, o mismo tipo + mismo título
+ *                   + años que cuadran (±1, el desfase de distribución que ya tolera el matcher
+ *                   de TMDB: festival un año, estreno el siguiente).
+ *   'distinta'    → hay prueba de que NO lo es. Se descarta sin más.
+ *   'sin-pruebas' → el candidato no trae año y no hay tmdb_id que valga: es indecidible. También
+ *                   se descarta —mezclar es peor que perder un servidor—, pero el que llama debe
+ *                   saberlo, porque una resolución con candidatos indecidibles NO puede concluir
+ *                   que la ficha no tenga enlaces en ninguna parte.
+ */
+export type VeredictoIdentidad = 'misma' | 'distinta' | 'sin-pruebas';
+
+export function mismaObra(target: MediaItem, cand: MediaItem): VeredictoIdentidad {
+  // 1. tmdb_id REAL en los dos lados: identidad resuelta, en un sentido o en el otro. Se exige
+  //    positivo porque los ids sintéticos se derivan del título (tmdbService.syntheticTmdbId) y
+  //    dos homónimos sin match en TMDB comparten el mismo número negativo.
+  if (target.tmdb_id > 0 && cand.tmdb_id > 0) {
+    return target.tmdb_id === cand.tmdb_id ? 'misma' : 'distinta';
+  }
+
+  // 2. Una película y una serie no son la misma obra ni compartiendo nombre y año.
+  if (cand.type !== target.type) return 'distinta';
+
+  const targetStrict = strictKey(target.title);
+  const targetCanonical = canonicalTitleKey(target.title);
+  const mismoTitulo =
+    (!!targetStrict && strictKey(cand.title) === targetStrict) ||
+    (!!targetCanonical && canonicalTitleKey(cand.title) === targetCanonical);
+  if (!mismoTitulo) return 'distinta';
+
+  // 3. Mismo nombre: decide el año. Sin él no hay identidad que probar.
+  const targetYear = yearOf(target);
+  const candYear = yearOf(cand);
+  if (!targetYear || !candYear) return 'sin-pruebas';
+
+  return Math.abs(Number(targetYear) - Number(candYear)) <= 1 ? 'misma' : 'distinta';
+}
+
+/**
+ * ¿Los años de estreno DEMUESTRAN que son obras distintas?
+ *
+ * Es la mitad "solo con prueba" de `mismaObra`, para cuando la identidad ya viene declarada por
+ * otra vía (una url guardada en `source_urls`) y lo único que se busca es un desmentido. Que
+ * falte el año en un lado no prueba nada, y que los títulos no se parezcan tampoco: los nombres
+ * regionales de la misma película no se parecen entre sí ("En la tormenta" es "Sin salida").
+ */
+export function anosIncompatibles(
+  a: { release_date?: string; id?: string },
+  b: { release_date?: string; id?: string }
+): boolean {
+  const ya = yearOf(a);
+  const yb = yearOf(b);
+  if (!ya || !yb) return false;
+  // ±1: el desfase de distribución que ya tolera el matcher de TMDB (festival vs. estreno).
+  return Math.abs(Number(ya) - Number(yb)) > 1;
+}
+
+/**
+ * ¿Esta url es la página de la que SALIÓ la ficha? El id de la fila ES el slug de su fuente
+ * (ver mapDbItemToMediaItem), así que se compara contra el id y NO contra el título: comparar
+ * títulos es justo lo que confunde homónimos —`carrie-2002` no debe reconocer como propia la
+ * página `carrie-1976`—. Sirve para no dudar nunca del origen de la propia ficha.
+ */
+export function esPaginaPropia(id: string | undefined, url: string): boolean {
+  if (!id || !url) return false;
+  const slug = slugify(url);
+  return slug === id || slug.endsWith(`-${id}`);
 }
 
 export class CatalogService {
@@ -887,7 +984,21 @@ export class CatalogService {
 
           const getCanonicalKey = (t: string) => t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "").trim();
           const targetKey = getCanonicalKey(title);
-          const match = searchResults.find(r => r.tmdb_id === tmdbNumericId || getCanonicalKey(r.title) === targetKey);
+          // El tmdb_id es la identidad pedida y manda. El t\u00edtulo es solo un ATAJO para reconocer
+          // la ficha ya guardada, y por s\u00ed solo no identifica nada: hay tres fichas tituladas
+          // "Sin salida" (The Firm 1993, No Exit 2022 y la de 2024) y la primera que pasara por
+          // aqu\u00ed se devolv\u00eda como si fuera la pedida, con sus servidores y todo. Cuando se cae al
+          // atajo, el a\u00f1o tiene que cuadrar.
+          const targetYear = String(tmdbData.release_date || tmdbData.first_air_date || '').slice(0, 4);
+          const match =
+            searchResults.find(r => r.tmdb_id === tmdbNumericId) ||
+            searchResults.find(r => {
+              if (getCanonicalKey(r.title) !== targetKey) return false;
+              // Una ficha con OTRO tmdb_id real ya se ha declarado otra obra: no es esta.
+              if (r.tmdb_id > 0 && r.tmdb_id !== tmdbNumericId) return false;
+              const y = yearOf(r);
+              return !targetYear || !y || Math.abs(Number(targetYear) - Number(y)) <= 1;
+            });
 
           if (match) {
             result = await TmdbService.enrichMediaItem(match);
@@ -936,7 +1047,19 @@ export class CatalogService {
       if (scraped.length > 0) {
         const norm = (t: string) => t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "").trim();
         const targetNorm = norm(q);
-        const match = scraped.find(r => r.id === q || String(r.tmdb_id) === q || norm(r.title) === targetNorm || (r.aliases && r.aliases.some(a => norm(a) === targetNorm)));
+        // Identidad exacta primero: el id o el tmdb_id pedidos designan UNA ficha. El nombre es
+        // un desempate posterior, y entre hom\u00f3nimos (tres fichas "Sin salida") no desempata
+        // nada: si el slug pedido trae a\u00f1o \u2014as\u00ed es como las fuentes los distinguen,
+        // `sin-salida-2011`\u2014 tiene que cuadrar con el de la ficha.
+        const pedidoYear = yearFromSlug(q);
+        const porNombre = (r: MediaItem) => {
+          if (norm(r.title) !== targetNorm && !(r.aliases || []).some(a => norm(a) === targetNorm)) return false;
+          const y = yearOf(r);
+          return !pedidoYear || !y || Math.abs(Number(pedidoYear) - Number(y)) <= 1;
+        };
+        const match =
+          scraped.find(r => r.id === q || String(r.tmdb_id) === q) ||
+          scraped.find(porNombre);
         if (match) {
           result = match;
         }
@@ -1036,6 +1159,23 @@ export class CatalogService {
         }
       }
     };
+    /**
+     * Expulsa de la lista los servidores que sirve una página que NO es de esta obra.
+     *
+     * Hace falta porque `allServers` arranca con lo que había guardado en la DB, y ahí puede
+     * haber servidores de otra película metidos por la fusión por título de antes. Un servidor
+     * no recuerda de qué página salió (`source_id` es el sitio, no la url), pero la página
+     * intrusa recién scrapeada SÍ enseña los suyos: son los que se retiran, por su embed.
+     */
+    const dropServers = (servers?: ServerOption[] | null) => {
+      for (const s of servers || []) {
+        if (!s) continue;
+        const key = keyOf(s);
+        if (!byUrl.delete(key)) continue;
+        const i = allServers.findIndex(x => keyOf(x) === key);
+        if (i >= 0) allServers.splice(i, 1);
+      }
+    };
     const adoptSeasons = (seasons?: any[] | null) => {
       if (seasons && seasons.length > 0 && (!result.seasons || result.seasons.length === 0)) {
         result.seasons = seasons;
@@ -1057,12 +1197,39 @@ export class CatalogService {
       // ficha con 5 servidores no cabe ahí: se queda siempre a medias. En el camino `deep`
       // (job de pre-calentado) la latencia no importa y sí importa terminar, que es lo que
       // deja los enlaces —y su vídeo directo— escritos en la DB para las siguientes aperturas.
+      // Y en `deep` se visitan más: con el tope de 4 una ficha con cinco fuentes dejaba la
+      // quinta sin repasar nunca, así que ni aportaba sus servidores ni se la podía descartar.
       const details = await Promise.all(
-        Array.from(knownSources).slice(0, 4).map(u => this.scrapeDetailWithTimeout(u, opts.deep ? 20000 : 2500))
+        Array.from(knownSources).slice(0, opts.deep ? 8 : 4).map(async url => ({
+          url,
+          detail: await this.scrapeDetailWithTimeout(url, opts.deep ? 20000 : 2500)
+        }))
       );
-      for (const detail of details) {
-        addServers(detail?.servers);
-        adoptSeasons(detail?.seasons);
+      // Esta lista se pobló durante meses aceptando cualquier candidato que se LLAMARA igual, así
+      // que puede traer páginas de otra película (la ficha de "Sin salida" de 2024 tenía apuntadas
+      // las de 2011, 2014, 2022 y la de "The Firm", que en es-MX se titula igual). La página que
+      // acabamos de scrapear dice su año: si desmiente al de la ficha, sus servidores no son de
+      // esta obra. No se le exige que el título coincida —los nombres regionales de la misma
+      // película no se parecen: "En la tormenta" ES "Sin salida"—, solo que el año no lo desmienta.
+      const intrusas = details.filter(d =>
+        d.detail && !esPaginaPropia(result.id, d.url) && anosIncompatibles(result, d.detail)
+      );
+
+      // Las intrusas se expulsan ANTES de adoptar nada, para que un embed que además sirviera una
+      // fuente legítima no se pierda por el orden en que se recorrieron las páginas.
+      for (const { url, detail } of intrusas) {
+        knownSources.delete(url);            // y no se le vuelve a preguntar
+        dropServers(detail!.servers);        // incluidos los que ya estaban guardados en la DB
+      }
+      // La principal puede haber sido justo una de ellas: la ficha se queda con la primera suya.
+      if (result._source_url && !knownSources.has(result._source_url)) {
+        result._source_url = Array.from(knownSources)[0];
+      }
+
+      for (const { detail } of details) {
+        if (!detail || intrusas.some(i => i.detail === detail)) continue;
+        addServers(detail.servers);
+        adoptSeasons(detail.seasons);
       }
     }
 
@@ -1079,22 +1246,30 @@ export class CatalogService {
     //    Es también el ÚNICO camino lo bastante exhaustivo como para concluir que una ficha
     //    no tiene enlaces en ninguna parte (ver `exhaustive` más abajo).
     const exhaustive = (allServers.length === 0 && !opts.cheap) || Boolean(opts.deep);
+
+    // Candidatos que se llamaban igual pero no se pudo demostrar que fueran esta obra. Mientras
+    // haya alguno, la fusión no ha mirado todo lo que había: no autoriza el veredicto de fantasma.
+    let indecidibles = 0;
+
     if (exhaustive) {
-      const targetStrict = strictKey(result.title);
-      const targetCanonical = canonicalTitleKey(result.title);
-
-      const matchesTarget = (it: MediaItem) =>
-        (!!it.tmdb_id && !!result.tmdb_id && it.tmdb_id === result.tmdb_id) ||
-        strictKey(it.title) === targetStrict ||
-        (!!targetCanonical && canonicalTitleKey(it.title) === targetCanonical);
-
       // Candidatos por título de AMBAS fuentes (scrapeRealMovies itera tioplus + fuegocine).
       const candidates = await RealScraperService.scrapeRealMovies(result.title, 8).catch(() => [] as MediaItem[]);
 
       const sourceUrls: string[] = [];
       for (const cand of candidates) {
-        if (!matchesTarget(cand)) continue;
-        const url = (cand as any)._tioplus_url;
+        const url = (cand as any)._tioplus_url as string | undefined;
+
+        // La página de la que SALIÓ la ficha no necesita demostrar nada: es suya. Importa porque
+        // es la única de la que a veces no se puede sacar el año, y porque una ficha sin
+        // `source_url` guardada (filas antiguas) la descubre justamente aquí.
+        const esPropia = !!url && esPaginaPropia(result.id, url);
+
+        if (!esPropia) {
+          const veredicto = mismaObra(result, cand);
+          if (veredicto === 'sin-pruebas') indecidibles++;
+          if (veredicto !== 'misma') continue;
+        }
+
         if (url && !sourceUrls.includes(url)) sourceUrls.push(url);
         addServers(cand.servers);
         adoptSeasons(cand.seasons);
@@ -1124,7 +1299,17 @@ export class CatalogService {
       try {
         const titleSlug = normalizeTitle(result.title || '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
         const ep1Detail = await RealScraperService.scrapeEpisodeDetail(titleSlug, 1, 1);
-        addServers(ep1Detail?.servers);
+        // El slug se INVENTA a partir del título, así que la página que contesta puede ser otra
+        // serie que se llame igual (los homónimos de "Drácula" son cuatro). `scrapeEpisodeDetail`
+        // resuelve el tmdb_id de la serie que ha contestado de verdad: solo se adoptan sus
+        // enlaces si es esta misma, o si el slug resultó ser literalmente el id de la ficha.
+        const mismaSerie = titleSlug === result.id
+          || (!!ep1Detail && ep1Detail.tmdb_id > 0 && result.tmdb_id > 0 && ep1Detail.tmdb_id === result.tmdb_id);
+        if (mismaSerie) {
+          addServers(ep1Detail?.servers);
+        } else if (ep1Detail && ep1Detail.servers && ep1Detail.servers.length > 0) {
+          indecidibles++;
+        }
       } catch {}
     }
 
@@ -1163,7 +1348,13 @@ export class CatalogService {
     // Veredicto de disponibilidad: solo una resolución EXHAUSTIVA puede concluir que una
     // ficha no tiene enlaces en ninguna fuente. Es lo que permite dejar de anunciar en el
     // home y en la búsqueda títulos que nunca podrán reproducirse (fichas fantasma).
-    if (exhaustive) {
+    //
+    // Y solo si además fue CONCLUYENTE: si algún candidato homónimo se descartó por no poder
+    // demostrar que fuera esta obra, puede que sus enlaces sí fueran suyos. Anotar "no tiene"
+    // en ese caso escondería del catálogo una ficha reproducible; se deja sin comprobar y el
+    // siguiente pase (con más datos en la fuente) lo decidirá.
+    const veredictoFiable = exhaustive && indecidibles === 0;
+    if (veredictoFiable) {
       result.has_streams = result.servers.length > 0 || this.hasEpisodeServers(result);
       result.streams_checked_at = new Date().toISOString();
     }
@@ -1184,7 +1375,7 @@ export class CatalogService {
     // resultado negativo el que marca la ficha como fantasma, y sin guardarlo la API
     // repetiría la fusión multifuente completa en cada petición del mismo título.
     if (result.servers.length > 0 || exhaustive) {
-      void this.persistStreams(result, exhaustive).catch(() => {});
+      void this.persistStreams(result, veredictoFiable).catch(() => {});
     }
 
     return result;
@@ -1399,9 +1590,14 @@ export class CatalogService {
     const grouped = new Map<string, MediaItem>();
 
     for (const item of items) {
+      // Sin tmdb_id real la clave es el título… y el título SOLO agrupa homónimos que no tienen
+      // nada que ver ("Carrie" son tres películas: 1976, 2002 y 2013). El año forma parte de la
+      // clave para que cada estreno siga siendo un resultado propio.
       const key = (item.tmdb_id && item.tmdb_id > 0)
         ? `${item.type}:${item.tmdb_id}`
-        : (canonicalTitleKey(item.title) || strictKey(item.title) || item.id);
+        : (canonicalTitleKey(item.title) || strictKey(item.title)
+            ? `${item.type}:${canonicalTitleKey(item.title) || strictKey(item.title)}:${yearOf(item) || ''}`
+            : item.id);
       if (!key) continue;
 
       const existing = grouped.get(key);

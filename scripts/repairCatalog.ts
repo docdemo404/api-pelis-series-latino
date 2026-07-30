@@ -15,6 +15,9 @@
  *   npm run repair:catalog -- --posters --apply   # los corrige con las imágenes de TMDB
  *   npm run repair:catalog -- --unfuse            # informa de fusiones erróneas
  *   npm run repair:catalog -- --unfuse --apply    # retira alias/fuentes que no corresponden
+ *   npm run repair:catalog -- --fuentes           # informa de fichas que sacan servidores de la
+ *                                                 # página de OTRA película (homónimos)
+ *   npm run repair:catalog -- --fuentes --apply   # retira esas fuentes y vacía sus enlaces
  *   npm run repair:catalog -- --reindex --apply   # reconstruye title_normalized
  *   npm run repair:catalog -- --aliases           # informa de títulos regionales que faltan
  *   npm run repair:catalog -- --aliases --apply   # añade los nombres regionales de TMDB a aliases
@@ -45,6 +48,9 @@ import { TmdbService, tmdbImagePath } from '../src/services/tmdbService';
 import { RealScraperService, SourceSignals } from '../src/services/realScraperService';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
 import { canonicalTitle, normalizeTitle, searchIndexKey, dedupeTitles, sourceTitleFromSlug } from '../src/utils/text';
+// La puerta de identidad de las fuentes vive en catalogService: el script y la API tienen que
+// decidir lo MISMO sobre qué página pertenece a qué ficha.
+import { esPaginaPropia } from '../src/services/catalogService';
 import { MediaItem, ContentType } from '../src/types';
 
 const db = getSupabaseAdmin();
@@ -160,8 +166,19 @@ async function refetchSourceSignals(row: any): Promise<SourceSignals | null> {
 function looksLikeSameTitle(sourceTitle: string, row: any): boolean {
   const candidates: string[] = [row.title, row.original_title].filter(Boolean);
   return candidates.some(c =>
-    similarity(sourceTitle, c) >= SUSPICIOUS_BELOW || charSimilarity(sourceTitle, c) >= CHAR_SIMILARITY_BELOW
+    // Idénticos y ya está. Hace falta decirlo aparte porque las dos similitudes comparan sobre
+    // la clave canónica, que se queda VACÍA en alfabetos no latinos y entonces puntúa 0: el
+    // original coreano "앵커" no se reconocía ni comparándolo consigo mismo.
+    mismoTituloLiteral(sourceTitle, c) ||
+    similarity(sourceTitle, c) >= SUSPICIOUS_BELOW ||
+    charSimilarity(sourceTitle, c) >= CHAR_SIMILARITY_BELOW
   );
+}
+
+/** Mismo título letra por letra, sin acentos ni dobles espacios. Conserva el alfabeto. */
+function mismoTituloLiteral(a: string, b: string): boolean {
+  const k = (t: string) => normalizeTitle(t).replace(/\s+/g, ' ').trim();
+  return !!k(a) && k(a) === k(b);
 }
 
 /** Número de secuela al final del título ("Cambio de bebés 2" → 2). */
@@ -1034,6 +1051,182 @@ async function unfuseWrongMerges(apply: boolean): Promise<void> {
   if (!apply && cleaned > 0) console.log('   Ejecuta de nuevo con --apply para escribir los cambios.');
 }
 
+/**
+ * PURGA DE FUENTES INTRUSAS (`--fuentes`).
+ *
+ * `source_urls` es la lista de páginas de las que una ficha saca servidores, y la fusión
+ * multifuente la rellenaba aceptando cualquier candidato que se LLAMARA igual. El catálogo está
+ * lleno de homónimos exactos —"Sin salida" son cuatro películas distintas, "Carrie" tres— y el
+ * título de la ficha es el de TMDB en español, el que más colisiona, así que fichas enteras
+ * acabaron sirviendo los servidores de otra película. El caso medido: la ficha de "Sin salida"
+ * (2024) llegó a listar como fuentes propias las páginas de Abduction (2011), Not Safe for Work
+ * (2014), No Exit (2022) y The Firm (1993, que en es-MX se titula igual).
+ *
+ * La puerta de identidad de catalogService ya no lo permite, pero lo que se escribió sigue ahí.
+ * Este modo vuelve a cada página de origen (UNA petición ligera: `fetchSourceSignals`, que no
+ * resuelve servidores) y la interroga con las dos llaves que separan obras distintas:
+ *
+ *   1. el AÑO — destapa los homónimos, que son el caso masivo;
+ *   2. el NOMBRE — para lo que el año no separa (dos estrenos del mismo año). Comparar los
+ *      títulos MOSTRADOS entre sí no vale: los nombres regionales de la misma película no se
+ *      parecen ("En la tormenta" y "Sin salida" son las dos No Exit 2022; "Ella" es "Her"), y
+ *      retirar una fuente legítima cuesta servidores reales. Se exige que no la respalde NADA:
+ *      ni el título original que publica la página, ni el mostrado, ni TMDB, que registra los
+ *      títulos alternativos y las traducciones de cada ficha.
+ *
+ * Solo se retira con PRUEBA. Si la página no dice su año y no hay tmdb_id con quien confirmar el
+ * nombre, se conserva y se informa.
+ *
+ * Al quitar una fuente se borran también los `servers` de la ficha: un servidor no guarda de qué
+ * página salió (`source_id` es el sitio, no la url), así que no se puede depurar la lista — se
+ * vacía y la siguiente resolución la reconstruye desde las fuentes que sí son suyas.
+ */
+async function purgeIntruderSources(apply: boolean, limitArg?: number): Promise<void> {
+  console.log(`🧬 Revisando las fuentes de cada ficha${apply ? '' : ' (dry-run: no se escribe nada)'}...`);
+
+  if (!(await hasColumn('source_urls'))) {
+    console.warn('   ⚠ Columna source_urls ausente — ejecuta src/db/migrations/005_multisource_and_availability.sql.');
+    return;
+  }
+  const withAvailability = await hasColumn('has_streams');
+
+  const rows: any[] = [];
+  const PAGE = 1000;
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await db
+      .from('media_items')
+      .select('id,tmdb_id,type,title,original_title,release_date,source_url,source_urls')
+      .range(from, from + PAGE - 1);
+    if (error) throw new Error(error.message);
+    if (!data || data.length === 0) break;
+    rows.push(...data);
+    if (data.length < PAGE) break;
+  }
+
+  // Solo las multifuente pueden tener intrusas: con una sola url, esa url ES la ficha.
+  const multi = rows.filter(r => (r.source_urls || []).filter(Boolean).length > 1);
+  console.log(`   ${multi.length}/${rows.length} fichas con más de una fuente`);
+
+  const targets = Number.isFinite(limitArg) && (limitArg as number) > 0 ? multi.slice(0, limitArg) : multi;
+  let depuradas = 0;
+  let intrusasTotales = 0;
+  let porAno = 0;
+  let porNombre = 0;
+  let sinAno = 0;
+
+  const CONCURRENCY = 4;
+  for (let i = 0; i < targets.length; i += CONCURRENCY) {
+    const chunk = targets.slice(i, i + CONCURRENCY);
+
+    const revisadas = await Promise.all(chunk.map(async row => {
+      const urls: string[] = Array.from(new Set((row.source_urls || []).filter(Boolean)));
+      const fichaYear = Number(String(row.release_date || '').slice(0, 4)) || Number(sourceTitleFromId(row.id).year) || 0;
+
+      const type: ContentType = row.type === 'tvseries' ? 'tvseries' : 'movie';
+
+      const veredictos = await Promise.all(urls.map(async url => {
+        // La página de la que SALIÓ la ficha nunca se pone en duda: si algo no cuadra con ella,
+        // el dato dudoso es el `release_date` guardado. Se reconoce por el id de la fila, que ES
+        // el slug de su fuente, y no por el título —comparar títulos es justo lo que confunde
+        // homónimos: `carrie-2002` no debe reconocer como propia la página `carrie-1976`—.
+        if (sourceUrlOf(row) === url || esPaginaPropia(row.id, url)) {
+          return { url, intrusa: false, motivo: 'su propia página' };
+        }
+
+        const signals = await RealScraperService.fetchSourceSignals(url).catch(() => null);
+        // Página inalcanzable: no es prueba de nada, se conserva.
+        if (!signals) return { url, intrusa: false, motivo: 'ilegible' };
+
+        // PRIMERA LLAVE — el año. Es la que destapa los homónimos, que son el caso masivo.
+        const pageYear = Number(signals.year) || 0;
+        if (fichaYear && pageYear && Math.abs(fichaYear - pageYear) > 1) {
+          return { url, intrusa: true, motivo: `"${signals.title}" (${pageYear}) ≠ ficha de ${fichaYear}` };
+        }
+
+        // SEGUNDA LLAVE — el nombre, para lo que el año no separa (dos estrenos del mismo año).
+        // Aquí hay que ir con mucho cuidado: comparar los títulos MOSTRADOS entre sí no vale de
+        // nada, porque los nombres regionales de la misma película no se parecen ("En la tormenta"
+        // es "Sin salida"; "Ella" es "Her"; "Volver al Futuro 2" es "Regreso al futuro: Parte II")
+        // y retirar una fuente legítima cuesta servidores reales. Así que se pide que NADA la
+        // respalde, mirando por este orden:
+        //
+        //   a) el título ORIGINAL que publica la página ("Back to the Future Part II") — la señal
+        //      fuerte, porque es independiente del doblaje de cada país;
+        //   b) el título mostrado, por si ya se parece al de la ficha;
+        //   c) TMDB, que registra los títulos alternativos y las traducciones de cada ficha.
+        const respaldos = [signals.originalTitle, signals.title].filter(Boolean) as string[];
+        if (respaldos.some(t => looksLikeSameTitle(t, row))) {
+          return { url, intrusa: false, motivo: `"${respaldos.find(t => looksLikeSameTitle(t, row))}" es el nombre de la ficha` };
+        }
+        if (!(row.tmdb_id > 0)) {
+          return { url, intrusa: false, motivo: `"${signals.title}" sin TMDB con quien confirmarlo` };
+        }
+        for (const t of respaldos) {
+          const confirmado = await TmdbService.confirmsTitle(row.tmdb_id, type, t).catch(() => true);
+          if (confirmado) return { url, intrusa: false, motivo: `"${t}" lo registra TMDB como nombre suyo` };
+        }
+        return {
+          url,
+          intrusa: true,
+          motivo: `"${signals.title}"${signals.originalTitle ? ` / "${signals.originalTitle}"` : ''} (${pageYear || '?'}) no es ninguno de los nombres de esta ficha`
+        };
+      }));
+
+      return { row, veredictos };
+    }));
+
+    for (const { row, veredictos } of revisadas) {
+      sinAno += veredictos.filter(v => v.motivo === 'ilegible' || v.motivo.includes('sin TMDB')).length;
+      const intrusas = veredictos.filter(v => v.intrusa);
+      if (intrusas.length === 0) continue;
+
+      const kept = veredictos.filter(v => !v.intrusa).map(v => v.url);
+      intrusasTotales += intrusas.length;
+      porAno += intrusas.filter(v => v.motivo.includes('≠ ficha de')).length;
+      porNombre += intrusas.filter(v => v.motivo.includes('no es ninguno')).length;
+
+      console.log(`   ␡ ${row.id} "${row.title}" (${String(row.release_date || '').slice(0, 4) || '?'})`);
+      for (const v of intrusas) console.log(`       retira ${v.url}\n         ${v.motivo}`);
+
+      // `source_url` (la principal) puede ser justo una de las retiradas.
+      const patch: Record<string, unknown> = {
+        source_urls: kept,
+        source_url: kept.includes(sourceUrlOf(row)) ? sourceUrlOf(row) : (kept[0] || null),
+        // Los servidores mezclados no se pueden separar: se vacían para que la próxima
+        // resolución los rehaga desde las fuentes legítimas.
+        servers: [],
+        streams_updated_at: null,
+        updated_at: new Date().toISOString()
+      };
+      if (withAvailability) {
+        // El veredicto de disponibilidad se apoyaba en servidores ajenos: vuelve a "sin comprobar".
+        patch.has_streams = null;
+        patch.streams_checked_at = null;
+      }
+
+      if (apply) {
+        const { error } = await db.from('media_items').update(patch).eq('id', row.id);
+        if (error) { console.warn(`     ⚠ ${error.message}`); continue; }
+      }
+      depuradas++;
+    }
+  }
+
+  console.log(
+    `\n${apply ? '✅ Purga aplicada' : '📋 Dry-run'}: ${depuradas} ficha(s) ${apply ? 'depuradas' : 'a depurar'}, ` +
+    `${intrusasTotales} fuente(s) de otra película`
+  );
+  // El desglose importa: lo que destapa el año es inequívoco (mismo nombre, otra época), mientras
+  // que lo que destapa el nombre depende de que la ficha esté bien emparejada con TMDB — si su
+  // tmdb_id es el de otra película, lo que sobra es la ficha y no la fuente (ver --verify).
+  console.log(`   por el año: ${porAno} · por el nombre: ${porNombre}`);
+  if (sinAno > 0) console.log(`   ${sinAno} fuente(s) sin nada con que comprobarlas: se conservan (no hay prueba en contra).`);
+  if (depuradas > 0) {
+    console.log('   Sus enlaces se rehacen solos en la próxima apertura, o de golpe con `npm run refresh:catalog`.');
+  }
+  if (!apply && depuradas > 0) console.log('   Ejecuta de nuevo con --apply para escribir los cambios.');
+}
+
 /** Slug de un título, para reconocer la URL de origen que llegó con él. */
 function slugOf(title: string): string {
   return normalizeTitle(title).replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
@@ -1185,6 +1378,11 @@ async function main() {
 
   if (process.argv.includes('--unfuse')) {
     await unfuseWrongMerges(apply);
+    return;
+  }
+
+  if (process.argv.includes('--fuentes')) {
+    await purgeIntruderSources(apply, Number.isFinite(limitArg) ? limitArg : undefined);
     return;
   }
 
