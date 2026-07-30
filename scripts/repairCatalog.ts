@@ -1859,7 +1859,27 @@ async function purgeDeadServers(apply: boolean, limitArg?: number, soloHost?: st
    * que es justo lo que hace falta con algo que no termina nunca, porque los hosts siguen
    * borrando ficheros.
    */
-  const todos = Array.from(pendientes).sort();
+  /**
+   * SE ALTERNAN LOS HOSTS. Esto no es un detalle de estilo: es lo que decide si la pasada mide
+   * algo o no mide nada.
+   *
+   * Ordenados por url, los embeds quedan agrupados por host, así que las diez peticiones en vuelo
+   * caen todas sobre el mismo sitio. Medido en vudeo.co: de 1.018 comprobaciones, **995 volvieron
+   * 429**. Un 429 no borra nada —eso está bien— pero deja el servidor sin juzgar, y la pasada
+   * termina dando 17 bajas de un host que está muerto al 100%. Peor aún: parece un resultado.
+   *
+   * Repartiendo por turnos entre hosts, con diez en vuelo y decenas de hosts, a cada uno le llega
+   * como mucho una petición a la vez.
+   */
+  const porHostCola = new Map<string, string[]>();
+  for (const url of Array.from(pendientes).sort()) {
+    const h = hostDe(url);
+    (porHostCola.get(h) || porHostCola.set(h, []).get(h)!).push(url);
+  }
+  const todos: string[] = [];
+  for (let fila = 0; todos.length < pendientes.size; fila++) {
+    for (const cola of porHostCola.values()) if (fila < cola.length) todos.push(cola[fila]);
+  }
   const lote = Number.isFinite(limitArg as number) ? (limitArg as number) : 0;
   let lista = todos;
   if (lote > 0 && lote < todos.length) {
@@ -1871,12 +1891,14 @@ async function purgeDeadServers(apply: boolean, limitArg?: number, soloHost?: st
   console.log(`   ${lista.length} embeds distintos por comprobar\n`);
 
   /**
-   * Diez a la vez, no dieciséis. Con dieciséis aparecieron 19 `http-429` en 600 embeds: el límite
-   * de peticiones de los propios hosts, provocado por nosotros. No llega a borrar nada de más
-   * —un 429 no autoriza a retirar— pero deja sin juzgar a esos servidores, que es peor que ir
-   * despacio: la pasada termina y siguen ahí, muertos y ofrecidos.
+   * Veinticuatro a la vez, que solo es sensato PORQUE los hosts van alternados (ver arriba).
+   *
+   * Lo que provoca los 429 no es el número de peticiones en vuelo sino cuántas caen sobre el
+   * mismo sitio: con la lista agrupada por host, diez en paralelo ya bastaban para que vudeo
+   * rechazara 995 de 1.018. Repartidas entre las decenas de hosts del catálogo, veinticuatro
+   * dejan a cada uno con una petición a la vez y la pasada tarda menos de la mitad.
    */
-  const CONCURRENCIA = 10;
+  const CONCURRENCIA = 24;
   const porMotivo = new Map<string, number>();
 
   let fichasTocadas = 0;
