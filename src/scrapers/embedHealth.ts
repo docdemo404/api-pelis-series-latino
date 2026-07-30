@@ -72,6 +72,29 @@ function esDominioAparcado(url: string): boolean {
 }
 
 /**
+ * Los aparcadores que NO cambian de dominio: el host sigue siendo el de siempre y responde 200,
+ * pero lo que sirve es el script de una plataforma de monetización.
+ *
+ * Se descubrió con `streamlare.com` y `ahvsh.com` (210 servidores). Su página mide exactamente lo
+ * mismo sea cual sea el id del vídeo —4.711 bytes siempre—, se titula "Redirecting..." y lo único
+ * que hace es un POST a `router.parklogic.com`. Y son un caso especialmente cruel: llevaban meses
+ * apareciendo como "no se alcanza" por un problema de certificados nuestro, así que al arreglarlo
+ * pasaron directamente a "falta extractor" — cuando lo que faltaba era enterarse de que el host
+ * había cerrado.
+ *
+ * Se buscan routers concretos y no la palabra "parking" a secas: un reproductor legítimo no
+ * manda peticiones a la pasarela de un aparcador, pero sí puede llevar esa palabra en cualquier
+ * clase de CSS.
+ */
+const APARCADORES = [
+  /router\.parklogic\.com/i,
+  /parkingcrew\.net/i,
+  /sedoparking\.com/i,
+  /bodis\.com/i,
+  /above\.com\/park/i,
+];
+
+/**
  * Hosts que sirven el fichero tal cual y a los que se les puede PREGUNTAR si sigue ahí.
  *
  * Los reproductores-envoltorio (el fluidplayer de Blogger que usa FuegoCine) cargan igual de bien
@@ -228,6 +251,9 @@ export async function inspectEmbed(
 
     const html = typeof res.data === 'string' ? res.data : JSON.stringify(res.data || '');
     body = html;
+
+    // El host no cambió de dominio: lo vendió. Lo que sirve ahora es un aparcador.
+    if (APARCADORES.some(re => re.test(html))) return { status: 'offline', html: body, motivo: 'dominio-aparcado' };
 
     // Detectar mensajes de error en capa de aplicación (Soft Errors)
     if (hasSoftError(html)) return { status: 'offline', html: body, motivo: 'pagina-dice-borrado' };

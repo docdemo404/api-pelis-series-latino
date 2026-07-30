@@ -1891,14 +1891,15 @@ async function purgeDeadServers(apply: boolean, limitArg?: number, soloHost?: st
   console.log(`   ${lista.length} embeds distintos por comprobar\n`);
 
   /**
-   * Veinticuatro a la vez, que solo es sensato PORQUE los hosts van alternados (ver arriba).
+   * La concurrencia se deriva de CUÁNTOS HOSTS hay, no de un número elegido a ojo.
    *
-   * Lo que provoca los 429 no es el número de peticiones en vuelo sino cuántas caen sobre el
-   * mismo sitio: con la lista agrupada por host, diez en paralelo ya bastaban para que vudeo
-   * rechazara 995 de 1.018. Repartidas entre las decenas de hosts del catálogo, veinticuatro
-   * dejan a cada uno con una petición a la vez y la pasada tarda menos de la mitad.
+   * Lo que provoca los 429 no es el total de peticiones en vuelo sino cuántas caen sobre el mismo
+   * sitio: con la lista agrupada por host, diez en paralelo bastaban para que vudeo rechazara 995
+   * de 1.018 comprobaciones. Con los hosts alternados y dos peticiones por host, cada uno recibe
+   * como mucho un par a la vez — y una pasada acotada a un solo host (`--host=`) baja sola a dos
+   * en vez de arrasarlo con veinticuatro.
    */
-  const CONCURRENCIA = 24;
+  const CONCURRENCIA = Math.max(2, Math.min(24, porHostCola.size * 2));
   const porMotivo = new Map<string, number>();
 
   let fichasTocadas = 0;
