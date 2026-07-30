@@ -212,6 +212,15 @@ function pickCreators(tmdbData: any): string[] | undefined {
 
 /** Similitud 0..1 entre dos títulos: exacto > prefijo > substring > solapamiento de palabras. */
 function similarity(a: string, b: string): number {
+  // IDÉNTICOS letra por letra, aunque el alfabeto no sea latino. Va antes que todo lo demás
+  // porque `canonicalTitle` solo conserva [a-z0-9]: un título tailandés, japonés o coreano se
+  // queda VACÍO y entonces puntuaba 0 incluso comparado consigo mismo. Es la única señal que
+  // tienen esas fichas —su nombre original— y sin esto TMDB no podía confirmarlo, así que
+  // `confirmsTitle` daba por huérfano el original tailandés de una ficha que era el suyo.
+  const la = normalizeTitle(a).replace(/\s+/g, ' ').trim();
+  const lb = normalizeTitle(b).replace(/\s+/g, ' ').trim();
+  if (la && la === lb) return 1;
+
   const ca = canonicalTitle(a);
   const cb = canonicalTitle(b);
   if (!ca || !cb) return 0;
@@ -245,6 +254,16 @@ function similarity(a: string, b: string): number {
     if (empiezaPor(wa, wb) || empiezaPor(wb, wa)) return 0.85;
     const contiene = (corto: string, largo: string) => ` ${largo} `.includes(` ${corto} `);
     if (contiene(wa, wb) || contiene(wb, wa)) return 0.7;
+  }
+
+  // VARIANTES DE ESCRITURA. Por palabras no coinciden porque las palabras están partidas de otra
+  // manera ("SpiderMan: Loto" frente a "Spider-Man: Lotus"), pero seguidas casi calcan. Se acepta
+  // el prefijo/substring a nivel de caracteres SOLO si los dos títulos miden casi lo mismo: eso es
+  // una variante del mismo nombre, mientras que un largo muy distinto es otro título con el que
+  // solo se comparte el arranque —"Humo" dentro de "Humor - Eine Reise mit Bully"—.
+  const proporcion = Math.min(ca.length, cb.length) / Math.max(ca.length, cb.length);
+  if (proporcion >= 0.8 && (ca.startsWith(cb) || cb.startsWith(ca) || ca.includes(cb) || cb.includes(ca))) {
+    return 0.85;
   }
 
   const tokens = (s: string) => new Set(normalizeTitle(s).split(/[^a-z0-9]+/).filter(Boolean));

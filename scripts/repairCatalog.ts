@@ -696,8 +696,13 @@ async function fuseRowInto(
   const mergedUrls = Array.from(new Set(
     [...currentUrls, twin.source_url, ...(row.source_urls || []), row.source_url].filter(Boolean) as string[]
   ));
+  // Del duplicado se absorben sus FUENTES y el nombre que publica su PÁGINA (`extraAliases`), pero
+  // NO su título ni sus alias guardados: aquí se llega justamente porque su tmdb_id era el de otra
+  // obra, así que esos nombres son de esa otra obra. Absorbiéndolos, la ficha buena quedaba
+  // indexada por el nombre ajeno —"Eric" (la miniserie) respondía a "Eric André Live Near
+  // Broadway"— y la búsqueda devolvía una cosa cuando le pedías otra.
   const currentAliases: string[] = twin.aliases || [];
-  const mergedAliases = dedupeTitles([...currentAliases, ...(row.aliases || []), row.title, ...extraAliases]);
+  const mergedAliases = dedupeTitles([...currentAliases, ...extraAliases]);
 
   const sizes = {
     urls: [currentUrls.length, mergedUrls.length] as [number, number],
