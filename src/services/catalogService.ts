@@ -807,6 +807,19 @@ export class CatalogService {
    */
   static async invalidateItem(item: { id?: string; tmdb_id?: number; type?: ContentType }): Promise<void> {
     await CacheStore.del(...this.cacheKeysFor(item));
+
+    /**
+     * Y SUS EPISODIOS, que se cachean por su cuenta bajo `ep:<id>:<temporada>:<episodio>`.
+     *
+     * `cacheKeysFor` no puede enumerarlos —no sabe cuántas temporadas ni cuántos capítulos hay—
+     * así que se buscan por patrón. Sin esto, cualquier arreglo que afecte a episodios queda
+     * INVISIBLE hasta que caduque su clave: al retirar el vídeo directo de vidhideplus, la ficha
+     * ya salía corregida y el episodio seguía entregando el servidor viejo, rotulado "Vídeo
+     * directo". Se persiguió como si fuera un despliegue que no subía.
+     */
+    if (!item.id) return;
+    const claves = await CacheStore.keys(`ep:${item.id}:*`);
+    if (claves.length) await CacheStore.del(...claves);
   }
 
   /**

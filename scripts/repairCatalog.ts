@@ -862,6 +862,16 @@ async function purgarCacheDeTocadas(apply: boolean): Promise<void> {
   const vistas = new Set<string>();
   const unicas = tocadas.filter(t => (vistas.has(t.id) ? false : (vistas.add(t.id), true)));
   const claves = unicas.flatMap(t => CatalogService.cacheKeysFor(t));
+
+  // Los EPISODIOS se cachean aparte, bajo `ep:<id>:<temporada>:<episodio>`, y no se pueden
+  // enumerar sin saber cuántos hay. Se resuelven de una sola pasada: se piden todas las claves
+  // `ep:*` y se cruzan con las fichas tocadas — mucho más barato que un patrón por ficha cuando
+  // se han tocado miles. Sin esto, una reparación de servidores queda arreglada en la ficha y
+  // sigue saliendo mal en el capítulo, que es justo donde el espectador la ve.
+  const idsTocados = new Set(unicas.map(t => t.id));
+  const deEpisodios = (await CacheStore.keys('ep:*')).filter(k => idsTocados.has(k.split(':')[1]));
+  claves.push(...deEpisodios);
+
   const TANDA = 400;
   for (let i = 0; i < claves.length; i += TANDA) await CacheStore.del(...claves.slice(i, i + TANDA));
 
