@@ -196,6 +196,30 @@ function pickContentRating(tmdbData: any): string | undefined {
   return undefined;
 }
 
+/**
+ * Con qué nombre se muestra la ficha.
+ *
+ * Normalmente el de TMDB en es-MX, que es el que busca la audiencia. Pero cuando TMDB no tiene
+ * traducción devuelve el título ORIGINAL, y eso deja fichas rotuladas en coreano o en japonés en
+ * una API que sirve en español: la ficha `submundo` pasó a llamarse "파인: 촌뜨기들". Si la fuente
+ * publicó un nombre en alfabeto latino y TMDB no aporta traducción, manda el de la fuente.
+ *
+ * La condición es estrecha a propósito —que el título de TMDB no tenga NI UNA letra latina—, para
+ * no pisar los títulos en inglés, que sí son legibles y con los que mucha gente busca. El nombre
+ * de TMDB no se pierde: `collectAliases` lo deja como alias, así que la ficha se encuentra igual
+ * por los dos.
+ */
+function pickDisplayTitle(tmdbData: any, sourceTitle: string): string {
+  const tmdbTitle: string = tmdbData.title || tmdbData.name || '';
+  const original: string = tmdbData.original_title || tmdbData.original_name || '';
+  const tieneLatinas = (t: string) => /[a-z]/i.test(normalizeTitle(t));
+
+  const sinTraducir = !!tmdbTitle && tmdbTitle === original && !tieneLatinas(tmdbTitle);
+  if (sinTraducir && sourceTitle && tieneLatinas(sourceTitle)) return sourceTitle;
+
+  return tmdbTitle || sourceTitle;
+}
+
 /** Director (películas) tomado del equipo técnico. */
 function pickDirector(tmdbData: any): string | undefined {
   const crew: any[] = tmdbData?.credits?.crew || [];
@@ -1046,7 +1070,7 @@ export class TmdbService {
         id: canonicalId,
         tmdb_id: tmdbData.id,
         type: contentType,
-        title: tmdbData.title || tmdbData.name || item.title,
+        title: pickDisplayTitle(tmdbData, item.title),
         original_title: tmdbData.original_title || tmdbData.original_name || item.original_title,
         // Nombres regionales que conoce TMDB + el/los que ya traía la fuente. Alimentan
         // title_normalized (la única columna sobre la que busca el RPC), de modo que la ficha
