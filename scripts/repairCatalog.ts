@@ -1263,9 +1263,23 @@ async function verifyAgainstSource(
         ? 'id,tmdb_id,type,title,original_title,aliases,release_date,source_url,source_urls'
         : 'id,tmdb_id,type,title,original_title,aliases,release_date,source_url';
       const { data: clash } = await db
-        .from('media_items').select(clashColumns).eq('tmdb_id', match.id).neq('id', row.id).limit(1);
+        .from('media_items').select(clashColumns).eq('tmdb_id', match.id).neq('id', row.id);
 
-      let twin: any = clash && clash.length > 0 ? clash[0] : null;
+      /**
+       * De todas las que tienen ese número, la que importa es la del MISMO catálogo.
+       *
+       * Antes se pedía `.limit(1)` sin ordenar, y eso dejó a "El Continental: Del mundo de John
+       * Wick" sin arreglo posible. Tres fichas comparten el número 72710: la película "La
+       * Huésped" (legítima), la serie buena de El Continental, y este duplicado. La consulta
+       * devolvía la PELÍCULA, así que el código se iba por la rama de "mismo número, otro
+       * catálogo", intentaba escribir, la tabla lo rechazaba —porque el choque de verdad estaba
+       * en su propio catálogo, no ahí— y acababa dándose por bloqueado señalando una migración
+       * que llevaba tiempo aplicada. El duplicado real nunca llegó a mirarse.
+       *
+       * Con el UNIQUE en (tmdb_id, type), la única fila que puede estorbar es la de su tipo.
+       */
+      const mismoTipo = (f: any) => (f.type === 'tvseries' ? 'tvseries' : 'movie') === match.type;
+      let twin: any = (clash || []).find(mismoTipo) || (clash || [])[0] || null;
 
       // Mismo número, otro catálogo: NO es un duplicado. TMDB numera películas y series por
       // separado y los ids se repiten, pero la columna tmdb_id es UNIQUE para las dos, así que
@@ -2255,14 +2269,18 @@ async function main() {
       const { data: clash } = await db
         .from('media_items')
         .select(withMultiSource
-          ? 'id,title,original_title,release_date,aliases,source_url,source_urls'
-          : 'id,title,original_title,release_date,aliases,source_url')
+          ? 'id,type,title,original_title,release_date,aliases,source_url,source_urls'
+          : 'id,type,title,original_title,release_date,aliases,source_url')
         .eq('tmdb_id', match.id)
-        .neq('id', row.id)
-        .limit(1);
+        .neq('id', row.id);
 
       if (clash && clash.length > 0) {
-        const twin: any = clash[0];
+        // La gemela que cuenta es la del MISMO catálogo, por el mismo motivo que en `--verify`:
+        // con el UNIQUE en (tmdb_id, type), una película y una serie comparten número sin tener
+        // nada que ver, y coger la primera que salga puede llevar a borrar una fila comparándola
+        // con una obra ajena. Ver el comentario largo de la otra consulta de choques.
+        const tipoFila: ContentType = row.type === 'tvseries' ? 'tvseries' : 'movie';
+        const twin: any = clash.find((c: any) => (c.type === 'tvseries' ? 'tvseries' : 'movie') === tipoFila) || clash[0];
         // Solo se borra si la gemela es INEQUÍVOCAMENTE el mismo título: parecido muy alto
         // y sin números de secuela discordantes ("cambio de bebés" vs "cambio de bebés 2"
         // son películas distintas, no un duplicado).
