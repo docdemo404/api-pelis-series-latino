@@ -180,8 +180,14 @@ export function candidateIdsForUrl(url: string): string[] {
   return Array.from(new Set([last, last.toLowerCase(), slugify(path)])).filter(Boolean);
 }
 
-/** La categoría de la ruta de TioPlus dice si la página es de película o de serie. */
-function tipoDeLaRuta(url: string): ContentType | null {
+/**
+ * La categoría de la ruta de TioPlus dice si la página es de película o de serie. Es un dato de
+ * la FUENTE, no una deducción, así que manda sobre lo que crea el matcher: un emparejado que
+ * cruza de catálogo convierte la ficha de una película en la de una serie, con su póster y su
+ * sinopsis (TMDB registra "Die Hart 2: Die Harter", que es una película, como título alternativo
+ * de la SERIE "Die Hart"). Devuelve null en las fuentes cuya url no lo declara.
+ */
+export function tipoDeLaRuta(url: string): ContentType | null {
   if (/\/pelicula\//i.test(url)) return 'movie';
   if (/\/(serie|anime|dorama)\//i.test(url)) return 'tvseries';
   return null;

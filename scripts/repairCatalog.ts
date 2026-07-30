@@ -25,6 +25,9 @@
  *                                                 # origen (og:image + año + título original)
  *   npm run repair:catalog -- --verify --apply    # …y corrige/funde las que estén mal
  *   npm run repair:catalog -- --verify --restart  # ignora el punto de guardado y empieza de cero
+ *   npm run repair:catalog -- --verify --apply --tipos
+ *                                                 # solo las fichas cuya clase (película/serie)
+ *                                                 # contradice a su fuente
  *   npm run repair:catalog -- --verify --apply --rotar --limit=N
  *                                                 # tanda de N elegida por la FECHA, sin punto de
  *                                                 # guardado: barre el catálogo entero en bucle
@@ -54,7 +57,7 @@ import { getSupabaseAdmin } from '../src/services/supabaseService';
 import { canonicalTitle, normalizeTitle, searchIndexKey, dedupeTitles, sourceTitleFromSlug } from '../src/utils/text';
 // La puerta de identidad de las fuentes vive en catalogService: el script y la API tienen que
 // decidir lo MISMO sobre qué página pertenece a qué ficha.
-import { esPaginaPropia, candidateIdsForUrl } from '../src/services/catalogService';
+import { esPaginaPropia, candidateIdsForUrl, tipoDeLaRuta } from '../src/services/catalogService';
 import { MediaItem, ContentType } from '../src/types';
 
 const db = getSupabaseAdmin();
@@ -597,7 +600,10 @@ async function rewriteRowFromMatch(
     release_date: signals.year || '',
     genres: [],
     subcategories: [],
-    poster: null,
+    // El og:image de la página vale dos veces: confirma el candidato de TMDB (es la ruta de una
+    // ficha concreta) y, si al final no hay match, se queda como póster de la ficha — de la
+    // fuente, pero suyo.
+    poster: signals.imageHint || null,
     backdrop: null,
     logo: null,
     trailer: null,
@@ -796,7 +802,7 @@ function saveCheckpoint(file: string, done: Set<string>): void {
   }
 }
 
-async function verifyAgainstSource(apply: boolean, limitArg?: number, restart = false, rotar = false): Promise<void> {
+async function verifyAgainstSource(apply: boolean, limitArg?: number, restart = false, rotar = false, soloTipos = false): Promise<void> {
   console.log(`🔬 Verificando fichas contra su página de origen${apply ? '' : ' (dry-run: no se escribe nada)'}...`);
 
   const withMultiSource = await hasColumn('source_urls');
@@ -812,8 +818,19 @@ async function verifyAgainstSource(apply: boolean, limitArg?: number, restart = 
     ...(withMultiSource ? ['source_urls'] : []),
     ...(withMetadataSource ? ['metadata_source'] : [])
   ];
-  const rows = (await fetchAllRows(extraColumns))
+  let rows = (await fetchAllRows(extraColumns))
     .filter(row => sourceUrlOf(row) && !done.has(row.id));
+
+  // `--tipos`: solo las fichas cuya CLASE contradice a su fuente (una página de `/pelicula/`
+  // guardada como serie, o al revés). Es el residuo que deja un emparejado que cruzó de catálogo,
+  // y sale de una comprobación gratis, así que se puede repasar en minutos en vez de en una hora.
+  if (soloTipos) {
+    rows = rows.filter(row => {
+      const t = tipoDeLaRuta(sourceUrlOf(row));
+      return !!t && t !== (row.type === 'tvseries' ? 'tvseries' : 'movie');
+    });
+    console.log(`   ${rows.length} fichas cuya clase (película/serie) contradice a su fuente`);
+  }
 
   let targets = Number.isFinite(limitArg) && (limitArg as number) > 0 ? rows.slice(0, limitArg) : rows;
 
@@ -856,7 +873,11 @@ async function verifyAgainstSource(apply: boolean, limitArg?: number, restart = 
     const chunk = targets.slice(i, i + CONCURRENCY);
 
     const results = await Promise.all(chunk.map(async row => {
-      const type: ContentType = row.type === 'tvseries' ? 'tvseries' : 'movie';
+      // El tipo lo dice la RUTA de la fuente cuando la declara (`/pelicula/` vs `/serie/`), no la
+      // columna: si un emparejado cruzó de catálogo, `type` ya está mal y verificar con él vuelve
+      // a confirmar el error. La fuente sabe si publicó una película o una serie.
+      const type: ContentType = tipoDeLaRuta(sourceUrlOf(row))
+        || (row.type === 'tvseries' ? 'tvseries' : 'movie');
       const signals = await refetchSourceSignals(row);
       if (!signals || !signals.title) return { row, type, signals: null, confirmedByImage: false, match: null };
 
@@ -931,6 +952,33 @@ async function verifyAgainstSource(apply: boolean, limitArg?: number, restart = 
       // Un id distinto SIN respaldo no autoriza a escribir: podría ser el matcher acertando de
       // menos, y sustituir una ficha buena por otra es exactamente el daño que se quiere evitar.
       if (!match.verified) {
+        /**
+         * Con UNA excepción: que la clase de la ficha contradiga a su fuente.
+         *
+         * Si la página es de `/pelicula/` y la fila está guardada como serie, la ficha NO es de
+         * esa obra — da igual lo que diga el parecido del título. Pasa cuando el emparejado cruza
+         * de catálogo: TMDB registra "Die Hart 2: Die Harter", que es una película de 2024, como
+         * título alternativo de la SERIE "Die Hart" (2020), y la ficha se quedó con el póster, la
+         * sinopsis y las temporadas de la serie.
+         *
+         * Aquí no se puede "dejar igual", porque lo que hay guardado ya es de otra obra. Se
+         * reconstruye desde la página con `tmdbId = 0`, o sea dejando que el emparejado decida de
+         * cero con el tipo correcto: si algo lo respalda, la ficha buena; y si no, la metadata de
+         * su propia fuente. Un póster peor pero SUYO, que es la regla de toda la casa.
+         */
+        const claseGuardada: ContentType = row.type === 'tvseries' ? 'tvseries' : 'movie';
+        if (type !== claseGuardada) {
+          const reset = await rewriteRowFromMatch(row, type, 0, signals, { apply, withMetadataSource });
+          if (reset.title) {
+            fixed++;
+            console.log(
+              `   ✓ ${row.id}\n     "${row.title}" estaba guardada como ${claseGuardada === 'tvseries' ? 'serie' : 'película'}` +
+              ` pero su fuente publica ${type === 'tvseries' ? 'una serie' : 'una película'} → se reconstruye desde la página: "${reset.title}"`
+            );
+            continue;
+          }
+        }
+
         doubtful++;
         console.log(`   ~ ${row.id}\n     "${row.title}" (tmdb ${row.tmdb_id}) · la fuente sugiere tmdb ${match.id} pero sin respaldo (score ${match.score.toFixed(2)}): solo se informa`);
         continue;
@@ -1462,7 +1510,8 @@ async function main() {
       apply,
       Number.isFinite(limitArg) ? limitArg : undefined,
       process.argv.includes('--restart'),
-      process.argv.includes('--rotar')
+      process.argv.includes('--rotar'),
+      process.argv.includes('--tipos')
     );
     return;
   }
