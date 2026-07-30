@@ -210,12 +210,35 @@ function pickCreators(tmdbData: any): string[] | undefined {
   return names.length > 0 ? names : undefined;
 }
 
+/**
+ * Número de entrega de una saga: el que cierra el título ANTES del subtítulo.
+ * "Solo en casa 4" → 4 · "Die Hart 2: Die Harter" → 2 · "Avengers 2: Era de Ultrón" → 2.
+ *
+ * Se corta en los dos puntos porque ahí es donde suele ir el número en castellano, y se piden
+ * como mucho DOS dígitos a propósito: un año dentro del título no es una entrega
+ * ("Blade Runner 2049", "Madrid 1987", "Cherry 2000").
+ */
+function sequelNumber(title: string): number | null {
+  const main = normalizeTitle(title).split(/[:–—]| - /)[0];
+  const m = main.trim().match(/(?:^|\s)(\d{1,2})\s*$/);
+  return m ? Number(m[1]) : null;
+}
+
 /** Similitud 0..1 entre dos títulos: exacto > prefijo > substring > solapamiento de palabras. */
 function similarity(a: string, b: string): number {
   const ca = canonicalTitle(a);
   const cb = canonicalTitle(b);
   if (!ca || !cb) return 0;
   if (ca === cb) return 1;
+
+  // Números de secuela DISCORDANTES: no es el mismo título, aunque uno contenga al otro.
+  // "Die Hart 2: Die Harter" no es "Die Hart", ni "Solo en casa 4" es "Solo en casa": la
+  // coincidencia de prefijo puntúa 0.85 y, si además cuadra el año, se daba por respaldada y
+  // la ficha se quedaba con la carátula de la otra entrega.
+  const sa = sequelNumber(a);
+  const sb = sequelNumber(b);
+  if ((sa ?? 1) !== (sb ?? 1)) return 0;
+
   if (ca.startsWith(cb) || cb.startsWith(ca)) return 0.85;
   if (ca.includes(cb) || cb.includes(ca)) return 0.7;
 
@@ -651,12 +674,21 @@ export class TmdbService {
         const alt = await this.scoreAgainstKnownTitles(cand.id, cand.endpoint, cleanTitle);
         if (alt.score < ALT_TITLE_ACCEPT) continue;
 
-        // El año encaja ⇒ la ficha queda confirmada; se desvía ⇒ es la homónima y se descarta.
-        // Sin año por ninguna de las dos partes, el candidato sigue en juego pero sin respaldo.
+        // El año encaja ⇒ la ficha queda confirmada; se desvía mucho ⇒ es la homónima y se
+        // descarta. Sin año por ninguna de las dos partes, el candidato sigue en juego pero sin
+        // respaldo.
+        //
+        // Confirmar exige el MISMO ±1 que en el resto del matcher, no la ventana de 5 años que se
+        // usa para descartar: son dos preguntas distintas. Con 5 años bastaba para dar por
+        // respaldada una ficha que solo comparte nombre, y de ahí salían adopciones malas — TMDB
+        // registra "Die Hart 2: Die Harter" (película de 2024) como título alternativo de la SERIE
+        // "Die Hart" (2020), así que el nombre calcaba, el hueco de 4 años entraba, y una ficha de
+        // película se quedaba con el póster y la sinopsis de una serie.
         let verified = cand.verified;
         if (year && alt.year) {
-          if (Math.abs(Number(alt.year) - Number(year)) > 5) continue;
-          verified = true;
+          const diff = Math.abs(Number(alt.year) - Number(year));
+          if (diff > 5) continue;
+          if (diff <= 1) verified = true;
         }
 
         // Mismo orden de preferencias que `beatsCandidate` (tipo pedido → respaldo → público),
