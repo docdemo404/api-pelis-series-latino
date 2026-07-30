@@ -216,6 +216,12 @@ Dos hosts se quedan **a propósito** en embed, y no por falta de intentarlo:
   reproduce. Falsificar prueba de interacción humana y engañar a un antifraude queda fuera.
 - **filemoon.to** (77 servidores). SPA que además exige una prueba de trabajo (`pow.js`) antes de
   entregar el vídeo.
+- **krakenfiles.com** (43 servidores). reCAPTCHA de Google + FingerprintJS + su propio detector de
+  bloqueadores. Resolver un CAPTCHA por programa queda fuera, y punto.
+
+Y uno que se queda por tamaño, no por muro: **vidsonic.net** (38 servidores, 0,4% de los que no
+tienen vídeo directo) monta un video.js que pide su fuente aparte. Se puede, simplemente no ha
+tocado todavía — si algún día crece, ahí está.
 
 Publicar un `direct_stream` muerto es **peor** que no publicar ninguno: el cliente pierde el tiempo
 antes de caer al embed. Cuando no se puede extraer, se deja el embed y ya está.
