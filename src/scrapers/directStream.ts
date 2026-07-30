@@ -39,7 +39,30 @@ export interface DirectStream {
 }
 
 /** Hosts que atan el vídeo a la IP que lo pidió aunque la URL parezca limpia. */
-const IP_BOUND_HOSTS = ['waaw.to', 'netu.tv', 'hqq.', 'okcdn.ru', 'ok.ru'];
+const IP_BOUND_HOSTS = ['waaw.to', 'netu.tv', 'hqq.', 'okcdn.ru', 'ok.ru', 'drive.google', 'googleusercontent'];
+
+/**
+ * Hosts cuya URL ES YA el fichero, aunque no acabe en `.mp4`.
+ *
+ * `extractFromUrlParam` exigía una extensión conocida, y con eso se le escapaba el caso más
+ * numeroso del catálogo: 940 embeds de FuegoCine llevan en su `link=` una dirección de
+ * `pixeldrain.com/api/file/<id>`, que sirve el fichero tal cual —con `Access-Control-Allow-Origin:
+ * *` incluido— pero termina en un id, no en una extensión. Se rechazaban por la forma de la URL
+ * teniendo el vídeo delante.
+ */
+const HOSTS_DE_FICHERO_DIRECTO = [
+  /pixeldrain\.com\/api\/file\//i,
+  /drive\.google\.com\/uc\?/i,
+  /\/videoplayback\?/i,
+  // `remux` es el reensamblador propio de unlimplay: responde `Content-Type: video/mp4` y CORS
+  // abierto. Ver `extraerUnlimplay`.
+  /remux\.unlimplay\.com\/remux\?/i,
+];
+
+/** ¿Esta URL apunta al fichero de vídeo, por extensión o por ser un host de fichero directo? */
+function esFicheroDirecto(url: string): boolean {
+  return /\.(m3u8|mp4|txt|mkv|webm)(\?|$)/i.test(url) || HOSTS_DE_FICHERO_DIRECTO.some(re => re.test(url));
+}
 
 /**
  * Hosts cuyo HTML contiene URLs SEÑUELO que el extractor genérico se tragaría.
@@ -143,6 +166,16 @@ function kindOf(url: string): DirectKind {
  */
 export function unwrapRedirector(url: string): string {
   if (!url) return url;
+
+  // unlimplay cambió de rutas y su fuente sigue publicando las viejas: `/play.php/embed/…`
+  // devuelve HTTP 200 con su PÁGINA DE BIENVENIDA, no con el reproductor. Un 200 con 116 KB de
+  // HTML no lo detecta ningún control de salud —parece una página perfectamente viva—, así que
+  // 461 servidores quedaron marcados como "hace falta un extractor" cuando lo que hacía falta
+  // era una ruta que existiera. Se corrige aquí y no en el scraper porque el molde viejo lo
+  // emite la fuente: si solo se arreglara al scrapear, cada crawl volvería a meterlo.
+  const modernizado = url.replace('/play.php/embed/', '/play/embed/');
+  if (modernizado !== url) return modernizado;
+
   const match = url.match(/[?&]r=([A-Za-z0-9+/=_-]{8,})/);
   if (!match) return url;
   try {
@@ -165,6 +198,26 @@ export function unwrapRedirector(url: string): string {
  * iframe, así que sigue valiendo de último recurso.
  */
 function extractFromUrlParam(embedUrl: string): DirectStream | null {
+  const dentro = urlEnvueltaEnParametro(embedUrl);
+  if (!dentro || !esFicheroDirecto(dentro.url)) return null;
+
+  // `format=video/mp4` es la pista que da el propio reproductor; el `.txt` de algunos CDN
+  // es un manifiesto HLS con la extensión cambiada para esquivar filtros.
+  const kind: DirectKind =
+    /mpegurl|m3u8/i.test(dentro.formatoDeclarado) || /\.(m3u8|txt)(\?|$)/i.test(dentro.url) ? 'hls' : 'mp4';
+  return { url: dentro.url, kind };
+}
+
+/**
+ * La URL que un reproductor-envoltorio lleva en un parámetro, sea el fichero o OTRO embed.
+ *
+ * Se separó de `extractFromUrlParam` porque son dos preguntas distintas y confundirlas costaba
+ * servidores: 35 embeds de FuegoCine llevan en su `link=` no un fichero sino otro host de embed
+ * (`firestream.to`, `turbovidhls.com`, `//gscdn.cam/…`), y varios de esos hosts SÍ los sabemos
+ * extraer. Al exigir que el parámetro fuera un fichero, se tiraba la pista y el servidor se
+ * quedaba en embed teniendo un extractor bueno a un salto de distancia.
+ */
+function urlEnvueltaEnParametro(embedUrl: string): { url: string; formatoDeclarado: string } | null {
   let params: URLSearchParams;
   try {
     params = new URL(embedUrl).searchParams;
@@ -174,14 +227,11 @@ function extractFromUrlParam(embedUrl: string): DirectStream | null {
 
   for (const key of ['link', 'url', 'file', 'source', 'src']) {
     const value = params.get(key);
-    if (!value || !/^https?:\/\//i.test(value)) continue;
-    if (!/\.(m3u8|mp4|txt)(\?|$)/i.test(value)) continue;
-    const url = normalizeUrl(value);
-    // `format=video/mp4` es la pista que da el propio reproductor; el `.txt` de algunos CDN
-    // es un manifiesto HLS con la extensión cambiada para esquivar filtros.
-    const declared = params.get('format') || '';
-    const kind: DirectKind = /mpegurl|m3u8/i.test(declared) || /\.(m3u8|txt)(\?|$)/i.test(value) ? 'hls' : 'mp4';
-    return { url, kind };
+    // `//host/…` sin esquema es una URL válida para un navegador y hay que normalizarla ANTES de
+    // juzgarla: 5 embeds la usan (`//gscdn.cam/video/embed/…`) y se descartaban por no empezar
+    // por `http`, aunque gscdn es uno de los hosts que mejor se extraen.
+    if (!value || !/^(https?:)?\/\//i.test(value)) continue;
+    return { url: normalizeUrl(value), formatoDeclarado: params.get('format') || '' };
   }
   return null;
 }
@@ -364,6 +414,147 @@ async function extractUpns(embedUrl: string): Promise<DirectStream | null> {
   }
 }
 
+/**
+ * unlimplay NO es un host de vídeo: es un agregador, como esta propia API.
+ *
+ * Su página `/play/embed/<tipo>/<id>` trae, escrito por su PHP y sin ninguna llamada extra, un
+ * objeto con los hosts reales donde está el vídeo:
+ *
+ *   const EMBEDS = {"latino":{"remux":"https://remux.unlimplay.com/remux?id=972232",
+ *                            "streamwish":"https://streamwish.to/e/…", "vidhide":"…", …}}
+ *
+ * De todos ellos `remux` es el suyo propio y el mejor con diferencia: responde
+ * `Content-Type: video/mp4` con `Access-Control-Allow-Origin: *`, sin firma ni caducidad en la
+ * URL. Los demás son hosts que ya cubren otros extractores, así que se devuelven como candidatos
+ * para el salto anidado.
+ *
+ * Por qué importa: 590 servidores estaban clasificados como "hace falta un extractor" cuando lo
+ * único que hacía falta era leer un objeto que venía en el HTML. Y el diagnóstico previo apuntaba
+ * al sitio equivocado —la primera muestra cayó en su página de bienvenida— porque en la base de
+ * datos convivían dos moldes de URL: el bueno `/play/embed/…` y un `/play.php/embed/…` heredado
+ * que su servidor ya no reconoce y contesta con la portada.
+ */
+function extraerUnlimplay(html: string): { directo: DirectStream | null; candidatos: string[] } {
+  const match = html.match(/const\s+EMBEDS\s*=\s*(\{[\s\S]*?\})\s*;/);
+  if (!match) return { directo: null, candidatos: [] };
+
+  let porIdioma: Record<string, Record<string, string>>;
+  try {
+    porIdioma = JSON.parse(match[1]);
+  } catch {
+    return { directo: null, candidatos: [] };
+  }
+
+  const candidatos: string[] = [];
+  let remux = '';
+  for (const servidores of Object.values(porIdioma || {})) {
+    for (const [nombre, url] of Object.entries(servidores || {})) {
+      if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) continue;
+      if (nombre === 'remux' || /remux\.unlimplay\.com/i.test(url)) {
+        if (!remux) remux = url;
+      } else {
+        candidatos.push(url);
+      }
+    }
+  }
+
+  return { directo: remux ? { url: normalizeUrl(remux), kind: 'mp4' } : null, candidatos };
+}
+
+/** Calidades de Google Drive, de mejor a peor. El itag lo dice todo: no hay que adivinar nada. */
+const ITAG_DRIVE: Array<{ itag: string; quality: ServerOption['quality'] }> = [
+  { itag: '37', quality: '1080p' },
+  { itag: '22', quality: '720p' },
+  { itag: '59', quality: '480p' },
+  { itag: '78', quality: '480p' },
+  // itag 18 son 360p de verdad, pero el catálogo solo tiene etiquetas hasta 480p: se declara la
+  // más baja que existe en vez de inventar una nueva, que obligaría a tocar el tipo y el orden.
+  { itag: '18', quality: '480p' },
+];
+
+/**
+ * Google Drive (`/file/d/<id>/preview`): el vídeo se pide a `get_video_info`, no está en el HTML.
+ *
+ * Devuelve un cuerpo tipo formulario donde `fmt_stream_map` es `itag|url,itag|url,…`. Se coge la
+ * mejor calidad disponible según `ITAG_DRIVE`.
+ *
+ * Su URL va ATADA A LA IP —la lleva escrita dentro, `…&ip=2803:c600:…`— y caduca en un par de
+ * horas (`expire=`), así que solo puede servirse reenviando bytes. Por eso `drive.google` está en
+ * `IP_BOUND_HOSTS` y tiene su entrada en hostPolicy: entregarle al cliente un 302 con esa URL
+ * daría 403 en cuanto la pidiera desde su propia red.
+ */
+async function extraerDrive(embedUrl: string): Promise<DirectStream | null> {
+  const id = embedUrl.match(/\/file\/d\/([\w-]+)/)?.[1] || new URL(embedUrl).searchParams.get('id');
+  if (!id) return null;
+
+  const res = await httpClient.get(`https://drive.google.com/get_video_info?docid=${encodeURIComponent(id)}`, {
+    headers: { Referer: `https://drive.google.com/file/d/${id}/preview` },
+    timeout: 10000,
+    responseType: 'text',
+    transformResponse: [(d: unknown) => d],
+    validateStatus: () => true,
+  });
+  if (res.status !== 200) return null;
+
+  const campos = new URLSearchParams(String(res.data || ''));
+  // `status=fail` acompaña a los ficheros borrados o sin permiso de lectura.
+  if (campos.get('status') !== 'ok') return null;
+  const mapa = campos.get('fmt_stream_map');
+  if (!mapa) return null;
+
+  const porItag = new Map<string, string>();
+  for (const par of mapa.split(',')) {
+    const [itag, url] = par.split('|');
+    if (itag && url) porItag.set(itag.trim(), url);
+  }
+
+  for (const { itag, quality } of ITAG_DRIVE) {
+    const url = porItag.get(itag);
+    if (url) return { url: normalizeUrl(url), kind: 'mp4', quality };
+  }
+  // Un itag que no conocemos sigue siendo vídeo: mejor servirlo que descartarlo por no estar en
+  // la tabla. Lo único que se pierde es saber su calidad.
+  const primera = porItag.values().next();
+  return primera.done ? null : { url: normalizeUrl(primera.value), kind: 'mp4' };
+}
+
+/**
+ * Página que solo redirige por JavaScript, con el destino ya escrito dentro.
+ *
+ * Dos formas, las dos vistas en el catálogo:
+ *   - `window.location.replace('…?ch=1&js=<jwt>&sid=…')` — listeamed.net, que nos ENTREGA su
+ *     propio token en la página anterior;
+ *   - `<noscript><meta http-equiv="refresh" content="0; URL=…&fp=-5">` — vudeo.co, que ofrece esa
+ *     salida a propósito para clientes sin JavaScript.
+ *
+ * Seguirla no es saltarse nada: es hacer lo mismo que haría el navegador con lo que el propio
+ * sitio pone a la vista. Y hace falta para poder siquiera JUZGAR el embed — sin el salto, ambos
+ * hosts se quedaban en "no sabemos qué hay detrás", que es como los tenía clasificados el
+ * diagnóstico. Con el salto resulta que detrás hay un 410 y un dominio aparcado.
+ */
+export function destinoDeRedireccionJs(html: string, base: string): string | null {
+  if (!html) return null;
+  const patrones = [
+    /(?:window|self|document)\.location\.(?:replace\(|href\s*=\s*)['"]([^'"]+)['"]/i,
+    /<noscript>[\s\S]{0,300}?url=([^"'>\s]+)/i,
+    // vudeo entrega la base y el sufijo por separado; `fp` es su huella y `-5` es el valor que
+    // su propio `<noscript>` usa cuando no hay JavaScript que la calcule.
+    /var\s+redirect_link\s*=\s*['"]([^'"]+)['"]/i,
+  ];
+  for (const re of patrones) {
+    const m = html.match(re);
+    if (!m) continue;
+    let destino = m[1].replace(/&amp;/g, '&');
+    if (re.source.includes('redirect_link')) destino += 'fp=-5';
+    try {
+      return new URL(destino, base).toString();
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
 export interface FastExtraction {
   /** El vídeo, si se pudo resolver sin descargar el embed. */
   direct: DirectStream | null;
@@ -398,12 +589,15 @@ export async function extractDirectFast(
     const fromParam = extractFromUrlParam(embedUrl);
     if (fromParam) return { direct: fromParam, conclusive: true };
 
-    // upns.pro no deja nada en el HTML: hay que preguntarle a su API. Solo se hace al
-    // REPRODUCIR (`allowNetwork`), nunca al scrapear: su API responde 429 en cuanto se la
+    // upns.pro y Drive no dejan nada en el HTML: hay que preguntarle a su API. Solo se hace al
+    // REPRODUCIR (`allowNetwork`), nunca al scrapear: la de upns responde 429 en cuanto se la
     // llama en lote, y un 429 durante el crawl quedaría persistido como "este servidor no
     // tiene vídeo directo", que es mentira. Ver `deferredDirectFields`.
-    if (isDeferredDirectHost(embedUrl)) {
-      return { direct: opts.allowNetwork ? await extractUpns(embedUrl) : null, conclusive: true };
+    const diferido = hostDiferido(embedUrl);
+    if (diferido) {
+      if (!opts.allowNetwork) return { direct: null, conclusive: true };
+      const direct = diferido === 'drive' ? await extraerDrive(embedUrl) : await extractUpns(embedUrl);
+      return { direct, conclusive: true };
     }
 
     const host = new URL(embedUrl).hostname.toLowerCase();
@@ -430,17 +624,60 @@ export async function extractDirect(
   html: string,
   opts: { allowNetwork?: boolean } = {}
 ): Promise<DirectStream | null> {
+  return extraer(embedUrl, html, opts, 0);
+}
+
+/**
+ * Cuántos envoltorios se atraviesan como máximo.
+ *
+ * Uno basta para todo lo medido (FuegoCine → host real, unlimplay → host real) y es el tope que
+ * evita que una cadena de redirectores publicitarios convierta una reproducción en una ráfaga de
+ * peticiones. Si algún día hace falta más, se sube aquí y no en cinco sitios.
+ */
+const SALTOS_MAXIMOS = 1;
+
+async function extraer(
+  embedUrl: string,
+  html: string,
+  opts: { allowNetwork?: boolean },
+  profundidad: number
+): Promise<DirectStream | null> {
   if (!embedUrl) return null;
 
   try {
     const fast = await extractDirectFast(embedUrl, opts);
-    if (fast.direct || fast.conclusive) return fast.direct;
+    if (fast.direct) return fast.direct;
+
+    const host = new URL(embedUrl).hostname.toLowerCase();
+
+    // Los hosts que solo se resuelven por su API (upns, Drive) ya se han intentado en `fast`.
+    // Los señuelo también terminan ahí: su HTML solo contiene URLs muertas.
+    if (fast.conclusive) {
+      // Salvo que el envoltorio traiga OTRO embed dentro, que sí se puede seguir. Es el caso de
+      // FuegoCine: `link=` con un `firestream.to` o un `//gscdn.cam/…` en vez de un fichero.
+      const dentro = urlEnvueltaEnParametro(embedUrl);
+      if (dentro && !esFicheroDirecto(dentro.url)) {
+        return seguirAnidado(dentro.url, opts, profundidad);
+      }
+      return null;
+    }
 
     if (!html) return null;
 
-    const host = new URL(embedUrl).hostname.toLowerCase();
     if (host.includes('ok.ru') || host.includes('odnoklassniki')) {
       return extractOkru(html);
+    }
+
+    // unlimplay es un agregador: su HTML lista los hosts reales. Se mira ANTES del desempaquetado
+    // porque su página no lleva vídeo propio y el genérico no encontraría nada.
+    if (host.includes('unlimplay')) {
+      const { directo, candidatos } = extraerUnlimplay(html);
+      if (directo) return directo;
+      for (const candidato of candidatos) {
+        const anidado = await seguirAnidado(candidato, opts, profundidad);
+        if (anidado) return anidado;
+      }
+      return null;
     }
 
     // Familia Earnvids (vidhide/streamwish/filelions/lulustream) y dropload: todo va empaquetado.
@@ -451,7 +688,52 @@ export async function extractDirect(
     }
 
     // goodstream/gscdn y compañía dejan el `sources:[{file:…}]` a la vista en el HTML plano.
-    return extractFromText(html);
+    const enTexto = extractFromText(html);
+    if (enTexto) return enTexto;
+
+    // Un envoltorio con otro embed dentro (`link=`), o una página que solo redirige por JS.
+    const dentro = urlEnvueltaEnParametro(embedUrl);
+    if (dentro && !esFicheroDirecto(dentro.url)) {
+      const anidado = await seguirAnidado(dentro.url, opts, profundidad);
+      if (anidado) return anidado;
+    }
+    const redirigido = destinoDeRedireccionJs(html, embedUrl);
+    if (redirigido && redirigido !== embedUrl) {
+      return seguirAnidado(redirigido, opts, profundidad);
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Descarga un embed anidado y le aplica el mismo extractor, un nivel más abajo.
+ *
+ * Solo con `allowNetwork`, o sea al REPRODUCIR y nunca durante el crawl: son peticiones extra por
+ * servidor, y multiplicarlas por 30 000 servidores convertiría el refresco de catálogo en horas.
+ * Lo que sí se guarda durante el crawl es que este embed es candidato (`mereceSaltoAnidado`), para
+ * que la ficha se anuncie con vídeo directo y la URL se acuñe al pulsar Play.
+ */
+async function seguirAnidado(
+  url: string,
+  opts: { allowNetwork?: boolean },
+  profundidad: number
+): Promise<DirectStream | null> {
+  if (!opts.allowNetwork || profundidad >= SALTOS_MAXIMOS) return null;
+
+  const destino = unwrapRedirector(url);
+  try {
+    const res = await httpClient.get(destino, {
+      headers: { Referer: new URL(destino).origin + '/' },
+      timeout: 8000,
+      responseType: 'text',
+      transformResponse: [(d: unknown) => d],
+      validateStatus: () => true,
+    });
+    if (res.status !== 200) return null;
+    return extraer(destino, String(res.data || ''), opts, profundidad + 1);
   } catch {
     return null;
   }
@@ -488,14 +770,49 @@ export function canExtractWithoutFetch(embedUrl: string): boolean {
   return Boolean(extractFromUrlParam(embedUrl)) || isDeferredDirectHost(embedUrl);
 }
 
-/** ¿Este host solo se puede resolver llamando a su API, y por tanto al reproducir? */
-export function isDeferredDirectHost(embedUrl: string): boolean {
-  if (!embedUrl || !embedUrl.includes('#')) return false;
+/**
+ * ¿Merece la pena volver a pasar por esta ficha porque HOY sabemos extraer su host?
+ *
+ * Distinto de `canExtractWithoutFetch`, que responde si el vídeo sale sin pedir nada. Aquí la
+ * pregunta es la del mantenimiento: cada extractor nuevo deja atrás un montón de servidores
+ * guardados como "solo embed" que ya no lo son, y sin una lista así hay que adivinar cuáles
+ * repasar. Lo usa scripts/refreshCatalog.ts --direct-only.
+ *
+ * Hay que AÑADIR aquí cualquier host cuyo extractor se escriba en el futuro. Es la diferencia
+ * entre que el arreglo alcance a las 14 000 fichas viejas o solo a las nuevas.
+ */
+export function mereceRepasoDeExtraccion(embedUrl: string): boolean {
+  if (!embedUrl) return false;
+  if (canExtractWithoutFetch(embedUrl)) return true;
+
+  // Envoltorio con otro embed dentro: el salto anidado puede resolverlo.
+  const dentro = urlEnvueltaEnParametro(embedUrl);
+  if (dentro) return true;
+
   try {
     const host = new URL(embedUrl).hostname.toLowerCase();
-    return UPNS_HOSTS.some(h => host.includes(h));
+    return ['unlimplay', 'ahvsh', 'streamlare'].some(h => host.includes(h));
   } catch {
     return false;
+  }
+}
+
+/** ¿Este host solo se puede resolver llamando a su API, y por tanto al reproducir? */
+export function isDeferredDirectHost(embedUrl: string): boolean {
+  return hostDiferido(embedUrl) !== null;
+}
+
+/** Cuál de las familias que se resuelven por API es, si es alguna. */
+function hostDiferido(embedUrl: string): 'upns' | 'drive' | null {
+  if (!embedUrl) return null;
+  try {
+    const host = new URL(embedUrl).hostname.toLowerCase();
+    if (host.includes('drive.google') && /\/file\/d\/[\w-]+|[?&]id=/.test(embedUrl)) return 'drive';
+    // El id de la familia upns viaja en el hash; sin él no hay nada que pedirle a su API.
+    if (embedUrl.includes('#') && UPNS_HOSTS.some(h => host.includes(h))) return 'upns';
+    return null;
+  } catch {
+    return null;
   }
 }
 
@@ -510,15 +827,19 @@ export type DirectFields = Pick<ServerOption, 'direct_stream' | 'direct_kind' | 
  * probado para estos hosts; lo que no se puede es comprobarlo mil veces durante un crawl.
  */
 export function deferredDirectFields(embedUrl: string): DirectFields {
-  if (!isDeferredDirectHost(embedUrl)) return {};
+  const familia = hostDiferido(embedUrl);
+  if (!familia) return {};
   let host = '';
   try {
     host = new URL(embedUrl).hostname;
   } catch {}
+  // Drive sirve mp4 por itag; la familia upns, HLS. Anunciar el tipo equivocado no rompe la
+  // reproducción (el endpoint decide de nuevo al acuñar) pero sí engaña al ordenador de servidores.
+  const kind: DirectKind = familia === 'drive' ? 'mp4' : 'hls';
   return {
     direct_stream: directEndpointUrl(embedUrl),
-    direct_kind: 'hls',
-    direct_mode: bestMode(embedUrl, 'hls'),
+    direct_kind: kind,
+    direct_mode: bestMode(embedUrl, kind),
     direct_host: host || undefined,
     headers: requiredHeaders(embedUrl, USER_AGENT),
   };

@@ -126,6 +126,24 @@ const POLICIES: HostPolicy[] = [
     measuredAt: MEASURED_AT,
   },
 
+  {
+    // Google Drive lleva la IP de quien pidió la URL ESCRITA DENTRO (`…&ip=2803:c600:…`) además
+    // de un `expire=` de un par de horas. No hace falta medirlo para saber que no cruza redes:
+    // es una declaración explícita del CDN. Un 302 al cliente daría 403 desde su propia red.
+    match: ['drive.google', 'googleusercontent'],
+    ipBound: true,
+    refererRequired: false,
+    refererChecked: false,
+    cors: false,
+    browserUaRequired: false,
+    segmentRefererRequired: true,
+    segmentRefererChecked: true,
+    segmentCors: false,
+    tokenTtlSeconds: null,
+    measuredAt: '2026-07-30',
+    cdn: 'c.drive.google.com',
+  },
+
   // ── Familia upns (SPA con id en el hash). Firma de 4 h y rechaza referers ajenos ───
   {
     // EL CASO QUE OBLIGÓ A INVENTAR EL MODO `manifest`. Las playlists están en el host del embed

@@ -1,6 +1,8 @@
 import axios, { AxiosRequestConfig, AxiosInstance } from 'axios';
+import * as tls from 'tls';
 import { Agent as HttpAgent } from 'http';
 import { Agent as HttpsAgent } from 'https';
+import { ISRG_ROOT_YE_BY_X2 } from './extraRoots';
 
 /** User-Agent de navegador único para todo el proyecto (antes duplicado en 4 archivos). */
 export const USER_AGENT =
@@ -8,10 +10,20 @@ export const USER_AGENT =
 
 export const DEFAULT_TIMEOUT = 8000;
 
+/**
+ * Almacén de confianza de todas las peticiones salientes: las raíces de Node MÁS el eslabón
+ * cruzado de Let's Encrypt que a Node le falta. Ver src/utils/extraRoots.ts para el por qué.
+ *
+ * Se pasa a los agentes de HTTPS, así que lo hereda todo lo que salga por `httpClient` o
+ * `streamClient` sin tener que acordarse en cada llamada.
+ */
+export const CA_BUNDLE: string[] = [...tls.rootCertificates, ISRG_ROOT_YE_BY_X2];
+const CA = CA_BUNDLE;
+
 // Agentes con keep-alive para reutilizar conexiones TCP/TLS entre peticiones
 // (clave para reducir latencia en el scraping de una misma fuente).
 const keepAliveHttp = new HttpAgent({ keepAlive: true, maxSockets: 64 });
-const keepAliveHttps = new HttpsAgent({ keepAlive: true, maxSockets: 64 });
+const keepAliveHttps = new HttpsAgent({ keepAlive: true, maxSockets: 64, ca: CA });
 
 /**
  * Agentes SOLO para el vídeo, separados de los del scraping.
@@ -25,7 +37,7 @@ const keepAliveHttps = new HttpsAgent({ keepAlive: true, maxSockets: 64 });
  * había cerrado, así que cada segmento volvía a pagar el handshake TLS.
  */
 const streamHttp = new HttpAgent({ keepAlive: true, maxSockets: 128, maxFreeSockets: 32, keepAliveMsecs: 30000 });
-const streamHttps = new HttpsAgent({ keepAlive: true, maxSockets: 128, maxFreeSockets: 32, keepAliveMsecs: 30000 });
+const streamHttps = new HttpsAgent({ keepAlive: true, maxSockets: 128, maxFreeSockets: 32, keepAliveMsecs: 30000, ca: CA });
 
 /** Cliente axios compartido con User-Agent, timeout y keep-alive por defecto. */
 export const httpClient: AxiosInstance = axios.create({

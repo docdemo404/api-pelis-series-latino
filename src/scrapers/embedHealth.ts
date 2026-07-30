@@ -1,5 +1,5 @@
-import axios from 'axios';
-import { USER_AGENT } from '../utils/httpClient';
+import { httpClient, USER_AGENT } from '../utils/httpClient';
+import { unwrapRedirector } from './directStream';
 
 /**
  * Verificación de salud de reproductores embed (capa de aplicación).
@@ -52,6 +52,64 @@ const SOFT_ERROR_MARKERS = [
   /video_not_found/i,
 ];
 
+/**
+ * ¿El host acabó redirigiendo a un dominio APARCADO?
+ *
+ * `wwN.<dominio>` (ww1, ww38…) es la firma de los aparcadores: el dueño dejó de servir y lo que
+ * hay detrás es una página de anuncios que responde 200 tan feliz. Sin esta comprobación esos
+ * embeds se declaran vivos para siempre — es lo que pasaba con listeamed.net (674 servidores),
+ * que redirige a `ww1.listeamed.net`, y con vudeo.co, que acaba en `ww38.vudeo.co`.
+ *
+ * Un 200 de un aparcador es el peor caso posible: al espectador le sale un reproductor que nunca
+ * arranca, y a nosotros nada nos dice que ese servidor haya que retirarlo.
+ */
+function esDominioAparcado(url: string): boolean {
+  try {
+    return /^ww\d+\./i.test(new URL(url).hostname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Hosts que sirven el fichero tal cual y a los que se les puede PREGUNTAR si sigue ahí.
+ *
+ * Los reproductores-envoltorio (el fluidplayer de Blogger que usa FuegoCine) cargan igual de bien
+ * esté el vídeo o no: la página es suya, el fichero es de otro. 940 servidores del catálogo eran
+ * exactamente eso —un envoltorio impecable con un `pixeldrain.com/api/file/<id>` borrado dentro—
+ * y ningún control los tocaba porque todos miraban el envoltorio.
+ */
+const HOSTS_PREGUNTABLES = [/pixeldrain\.com\/api\/file\//i];
+
+/** ¿Sigue existiendo el fichero que el envoltorio lleva en su parámetro? */
+async function ficheroEnvueltoSigueVivo(embedUrl: string): Promise<boolean | null> {
+  let dentro: string | null = null;
+  try {
+    const params = new URL(embedUrl).searchParams;
+    for (const clave of ['link', 'url', 'file', 'source', 'src']) {
+      const v = params.get(clave);
+      if (v && HOSTS_PREGUNTABLES.some(re => re.test(v))) { dentro = v; break; }
+    }
+  } catch {
+    return null;
+  }
+  if (!dentro) return null;
+
+  try {
+    // Se piden DOS BYTES, no el fichero: basta para saber si existe y no cuesta ancho de banda.
+    const res = await httpClient.get(dentro, {
+      headers: { 'User-Agent': USER_AGENT, Range: 'bytes=0-1' },
+      timeout: 4000,
+      validateStatus: () => true,
+      responseType: 'arraybuffer',
+    });
+    return res.status === 200 || res.status === 206;
+  } catch {
+    // Un fallo de red no es una baja: no se condena a nadie por no haber podido preguntar.
+    return null;
+  }
+}
+
 /** Quita `<script>`, `<style>` y comentarios: deja lo que el visitante llegaría a leer. */
 function visibleText(html: string): string {
   return html
@@ -86,6 +144,16 @@ export interface EmbedInspection {
   status: 'online' | 'offline';
   /** Cuerpo del embed. Vacío cuando no se llegó a descargar (403 del WAF, error de red). */
   html: string;
+  /**
+   * QUÉ regla condenó a este embed. Solo viaja cuando el veredicto es `offline`.
+   *
+   * No es decoración: hay dieciocho salidas distintas por las que una página acaba declarada
+   * muerta, y sin saber cuál fue no se puede auditar una retirada masiva. Al probar la purga del
+   * catálogo, waaw.to salía con un 33% de bajas; las páginas respondían 200 con su reproductor
+   * intacto y ninguna de las reglas evidentes casaba. Sin este campo, la alternativa era
+   * adivinar — y la consecuencia de adivinar mal es borrar servidores que funcionan.
+   */
+  motivo?: string;
 }
 
 /**
@@ -111,6 +179,9 @@ export async function inspectEmbed(
   referer: string = 'https://tioplus.app'
 ): Promise<EmbedInspection> {
   if (!embedUrl) return { status: 'offline', html: '' };
+  // Se pide la URL NORMALIZADA, no la guardada: un redirector de Blogger o una ruta que el host
+  // ya retiró darían un veredicto sobre la página equivocada. Ver `unwrapRedirector`.
+  embedUrl = unwrapRedirector(embedUrl);
   // Se acumula aparte para poder devolverlo en CUALQUIER salida: aunque el embed se declare
   // caído, el cuerpo sigue sirviendo para diagnosticar por qué.
   let body = '';
@@ -122,21 +193,21 @@ export async function inspectEmbed(
       const hashId = hashMatch[2];
       const apiUrl = `https://${domain}/api/v1/info?id=${hashId}`;
       try {
-        const hashRes = await axios.get(apiUrl, {
+        const hashRes = await httpClient.get(apiUrl, {
           headers: { 'User-Agent': USER_AGENT, 'Referer': embedUrl },
           timeout: 4000,
           validateStatus: () => true
         });
         const dataStr = typeof hashRes.data === 'string' ? hashRes.data : JSON.stringify(hashRes.data || '');
         if (hashRes.status !== 200 || dataStr.length < 3600 || dataStr.includes('error') || dataStr.includes('not found')) {
-          return { status: 'offline', html: body };
+          return { status: 'offline', html: body, motivo: 'spa-hash-sin-datos' };
         }
       } catch {
-        return { status: 'offline', html: body };
+        return { status: 'offline', html: body, motivo: 'spa-hash-error' };
       }
     }
 
-    const res = await axios.get(embedUrl, {
+    const res = await httpClient.get(embedUrl, {
       headers: {
         'User-Agent': USER_AGENT,
         'Referer': referer,
@@ -150,13 +221,20 @@ export async function inspectEmbed(
       return { status: 'online', html: body };
     }
 
-    if (res.status >= 400) return { status: 'offline', html: body };
+    if (res.status >= 400) return { status: 'offline', html: body, motivo: `http-${res.status}` };
+
+    // El host dejó de servir y su dominio acabó en manos de un aparcador, que responde 200.
+    if (esDominioAparcado(res.request?.res?.responseUrl || '')) return { status: 'offline', html: body, motivo: 'dominio-aparcado' };
 
     const html = typeof res.data === 'string' ? res.data : JSON.stringify(res.data || '');
     body = html;
 
     // Detectar mensajes de error en capa de aplicación (Soft Errors)
-    if (hasSoftError(html)) return { status: 'offline', html: body };
+    if (hasSoftError(html)) return { status: 'offline', html: body, motivo: 'pagina-dice-borrado' };
+
+    // El envoltorio carga bien pero el fichero que lleva dentro puede estar borrado. Solo se
+    // pregunta cuando hay un fichero al que preguntar, así que no cuesta nada en el caso general.
+    if ((await ficheroEnvueltoSigueVivo(embedUrl)) === false) return { status: 'offline', html: body, motivo: 'fichero-envuelto-borrado' };
 
     // Detectar redirecciones JS de window.location / document.location (ej. listeamed.net).
     //
@@ -173,20 +251,26 @@ export async function inspectEmbed(
       const redirectPath = jsLocationMatch[1];
       const targetUrl = redirectPath.startsWith('http') ? redirectPath : `${new URL(embedUrl).origin}${redirectPath}`;
       try {
-        const jsRes = await axios.get(targetUrl, {
+        const jsRes = await httpClient.get(targetUrl, {
           headers: { 'User-Agent': USER_AGENT, 'Referer': embedUrl },
           timeout: 4000,
           validateStatus: () => true
         });
 
         if (jsRes.status >= 400 || jsRes.status === 429 || jsRes.status === 410) {
-          return { status: 'offline', html: body };
+          return { status: 'offline', html: body, motivo: `salto-js-http-${jsRes.status}` };
+        }
+        // listeamed.net entrega su token en esta misma página y el salto acaba en `ww1.listeamed
+        // .net`, un aparcador que responde 200: sin mirar el destino final, sus 674 servidores se
+        // declaraban vivos.
+        if (esDominioAparcado(jsRes.request?.res?.responseUrl || targetUrl)) {
+          return { status: 'offline', html: body, motivo: 'salto-js-aparcado' };
         }
 
         const jsHtml = typeof jsRes.data === 'string' ? jsRes.data : '';
-        if (hasSoftError(jsHtml)) return { status: 'offline', html: body };
+        if (hasSoftError(jsHtml)) return { status: 'offline', html: body, motivo: 'salto-js-dice-borrado' };
       } catch {
-        return { status: 'offline', html: body };
+        return { status: 'offline', html: body, motivo: 'salto-js-error' };
       }
     }
 
@@ -195,20 +279,23 @@ export async function inspectEmbed(
     if (vudeoMatch) {
       const targetUrl = vudeoMatch[1] + 'fp=-7';
       try {
-        const vudeoRes = await axios.get(targetUrl, {
+        const vudeoRes = await httpClient.get(targetUrl, {
           headers: { 'User-Agent': USER_AGENT, 'Referer': embedUrl },
           timeout: 4000,
           validateStatus: () => true
         });
 
         if (vudeoRes.status >= 400 || vudeoRes.status === 410) {
-          return { status: 'offline', html: body };
+          return { status: 'offline', html: body, motivo: `vudeo-http-${vudeoRes.status}` };
+        }
+        if (esDominioAparcado(vudeoRes.request?.res?.responseUrl || targetUrl)) {
+          return { status: 'offline', html: body, motivo: 'vudeo-aparcado' };
         }
 
         const vudeoHtml = typeof vudeoRes.data === 'string' ? vudeoRes.data : '';
-        if (hasSoftError(vudeoHtml)) return { status: 'offline', html: body };
+        if (hasSoftError(vudeoHtml)) return { status: 'offline', html: body, motivo: 'vudeo-dice-borrado' };
       } catch {
-        return { status: 'offline', html: body };
+        return { status: 'offline', html: body, motivo: 'vudeo-error' };
       }
     }
 
@@ -218,24 +305,24 @@ export async function inspectEmbed(
       const innerPath = innerIframeMatch[1];
       const innerUrl = innerPath.startsWith('http') ? innerPath : `${new URL(embedUrl).origin}${innerPath}`;
       try {
-        const innerRes = await axios.get(innerUrl, {
+        const innerRes = await httpClient.get(innerUrl, {
           headers: { 'User-Agent': USER_AGENT, 'Referer': embedUrl },
           timeout: 3000,
           validateStatus: () => true
         });
 
         if (innerRes.status >= 400 || innerRes.status === 410) {
-          return { status: 'offline', html: body };
+          return { status: 'offline', html: body, motivo: `iframe-interno-http-${innerRes.status}` };
         }
 
         const innerHtml = typeof innerRes.data === 'string' ? innerRes.data : '';
-        if (hasSoftError(innerHtml)) return { status: 'offline', html: body };
+        if (hasSoftError(innerHtml)) return { status: 'offline', html: body, motivo: 'iframe-interno-dice-borrado' };
       } catch {}
     }
 
     // HTML extremadamente corto sin reproductores
     if (html.length < 250 && !html.includes('jwplayer') && !html.includes('video') && !html.includes('iframe') && !html.includes('source') && !html.includes('script')) {
-      return { status: 'offline', html: body };
+      return { status: 'offline', html: body, motivo: 'cuerpo-vacio' };
     }
 
     return { status: 'online', html: body };
@@ -243,7 +330,7 @@ export async function inspectEmbed(
     if (embedUrl.includes('vidhide') || embedUrl.includes('streamwish') || embedUrl.includes('upns') || embedUrl.includes('waaw')) {
       return { status: 'online', html: body };
     }
-    return { status: 'offline', html: body };
+    return { status: 'offline', html: body, motivo: 'excepcion' };
   }
 }
 

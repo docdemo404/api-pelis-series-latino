@@ -96,6 +96,26 @@ jobs:
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
         run: npx ts-node scripts/repairCatalog.ts --verify --apply --rotar --limit=700
 
+      # Los ficheros de estos hosts se borran solos: caducan, los quita el que los subió, o cae una
+      # reclamación de copyright. Sin esta pasada el catálogo acumula servidores que ya no existen y
+      # el espectador se los encuentra uno por uno. La comprobación en vivo del reproductor no basta:
+      # tiene 3 s de presupuesto y mira 6 servidores como mucho, así que un vídeo borrado en el
+      # séptimo se sigue ofreciendo para siempre.
+      #
+      # --limit acota la corrida para que quepa en el runner; con ~19.000 embeds distintos y esta
+      # tanda, el catálogo entero se repasa en unos días y vuelve a empezar. Solo retira lo que el
+      # host DECLARA ausente (404/410/451, aviso de borrado, dominio aparcado, fichero envuelto que
+      # ya no está): un timeout o un 429 nuestro no borran nada. Ver `motivoAutorizaBorrar`.
+      - name: Retirar servidores cuyo vídeo ya no existe
+        if: always()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+        run: npx ts-node scripts/repairCatalog.ts --servidores-muertos --apply --limit=6000
+
       - name: Comprobar que cada ficha sirve su propio contenido
         if: always()
         env:

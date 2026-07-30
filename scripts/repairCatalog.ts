@@ -71,6 +71,7 @@ import { canonicalTitle, normalizeTitle, searchIndexKey, dedupeTitles, sourceTit
 // decidir lo MISMO sobre qué página pertenece a qué ficha.
 import { CatalogService, esPaginaPropia, candidateIdsForUrl, tipoDeLaRuta } from '../src/services/catalogService';
 import { CacheStore } from '../src/cache/store';
+import { inspectEmbed } from '../src/scrapers/embedHealth';
 import { MediaItem, ContentType } from '../src/types';
 
 const db = getSupabaseAdmin();
@@ -1769,6 +1770,186 @@ async function repairCrossedImages(apply: boolean, limitArg?: number): Promise<v
   if (!apply && (fromTmdb > 0 || cleared > 0)) console.log('   Ejecuta de nuevo con --apply para escribir los cambios.');
 }
 
+/**
+ * RETIRADA DE SERVIDORES MUERTOS (`--servidores-muertos`).
+ *
+ * "Que no ofrezca servidores que no funcionan" tenía hasta ahora una sola defensa: comprobarlos al
+ * responder. Eso funciona, pero llega tarde y llega poco — la comprobación en vivo tiene 3 s de
+ * presupuesto y mira 6 servidores como mucho, así que un vídeo borrado en el séptimo se sigue
+ * ofreciendo indefinidamente. Y sobre todo: se vuelve a pagar la comprobación en cada visita.
+ *
+ * Esto lo mira UNA vez, sin prisa, sobre el catálogo entero, y borra lo que está muerto de verdad.
+ * Lo que se retira no es "lo que no supimos extraer" sino lo que el propio host declara ausente:
+ *
+ *   - la página dice que el fichero se borró o caducó  (vidhideplus, luluvdo)
+ *   - responde 404 / 410 / 451                          (streamtape, voe.sx, vudeo.co)
+ *   - el dominio acabó aparcado en `wwN.`               (listeamed.net)
+ *   - el fichero envuelto ya no existe                  (los pixeldrain de FuegoCine)
+ *
+ * El juicio lo emite `inspectEmbed`, EL MISMO que decide en producción. Eso es deliberado: si
+ * aquí se usara un criterio propio, el catálogo y el reproductor podrían discrepar y nadie se
+ * enteraría. Y `inspectEmbed` es conservador donde debe: un 403 de WAF cuenta como VIVO, porque
+ * VidHide y StreamWish rechazan a los scrapers y reproducen perfectamente en un navegador.
+ *
+ *   npm run repair:catalog -- --servidores-muertos                     # solo mide
+ *   npm run repair:catalog -- --servidores-muertos --apply             # y los retira
+ *   npm run repair:catalog -- --servidores-muertos --apply --limit=500 # por tandas
+ */
+/**
+ * QUÉ MOTIVOS AUTORIZAN A BORRAR. Es más estricto que el que usa el reproductor, a propósito.
+ *
+ * `inspectEmbed` decide si un servidor se ORDENA detrás; esto decide si DESAPARECE. Lo segundo no
+ * tiene vuelta atrás hasta el siguiente crawl, así que solo cuentan los motivos que significan
+ * "el host afirma que el fichero no está":
+ *
+ *   - un 404 / 410 / 451 — el host lo dice con un código, sin ambigüedad;
+ *   - la página o el iframe interno muestran el aviso de borrado;
+ *   - el dominio acabó aparcado;
+ *   - el fichero envuelto ya no existe.
+ *
+ * Y quedan FUERA, aunque marquen `offline` en producción:
+ *
+ *   - `excepcion` y `cuerpo-vacio` — un fallo de red nuestro no es una baja suya. Un timeout en
+ *     una tanda de 16 peticiones en paralelo diría "muerto" de algo perfectamente vivo.
+ *   - `spa-hash-*` — se apoya en que la respuesta de su API mida menos de 3600 bytes, que es una
+ *     corazonada, no una afirmación del host. Con ~1.000 servidores de la familia upns detrás, no
+ *     es un número que merezca confiarse a un umbral inventado.
+ *   - los 5xx — el host está caído HOY, que no es lo mismo que haber borrado el fichero.
+ */
+function motivoAutorizaBorrar(motivo?: string): boolean {
+  if (!motivo) return false;
+  if (/^(salto-js-|vudeo-|iframe-interno-)?http-(\d+)$/.test(motivo)) {
+    const codigo = Number(motivo.match(/(\d+)$/)?.[1]);
+    return codigo === 404 || codigo === 410 || codigo === 451;
+  }
+  return ['dominio-aparcado', 'salto-js-aparcado', 'vudeo-aparcado',
+          'pagina-dice-borrado', 'salto-js-dice-borrado', 'vudeo-dice-borrado',
+          'iframe-interno-dice-borrado', 'fichero-envuelto-borrado'].includes(motivo);
+}
+
+async function purgeDeadServers(apply: boolean, limitArg?: number, soloHost?: string): Promise<void> {
+  console.log(`💀 Buscando servidores muertos${apply ? '' : ' (dry-run: no se escribe nada)'}...`);
+  const rows = (await fetchAllRows(['servers', 'has_streams'])).filter(r => (r.servers || []).length > 0);
+  console.log(`   ${rows.length} fichas con servidores guardados`);
+
+  const hostDe = (url: string) => {
+    try {
+      return new URL(url).hostname.replace(/^www\./, '');
+    } catch {
+      return '(ilegible)';
+    }
+  };
+
+  // Un embed repetido en veinte fichas se comprueba UNA vez. En un catálogo donde las fuentes
+  // reutilizan los mismos enlaces esto no es un detalle: reduce el trabajo a la mitad larga.
+  const veredictos = new Map<string, boolean>();
+  const pendientes = new Set<string>();
+  for (const row of rows) {
+    for (const s of row.servers || []) {
+      if (!s?.embed_url) continue;
+      if (soloHost && !hostDe(s.embed_url).includes(soloHost)) continue;
+      pendientes.add(s.embed_url);
+    }
+  }
+
+  /**
+   * VENTANA ROTATORIA, por el mismo motivo que en `--verify`: un `--limit` a secas cogería
+   * SIEMPRE los mismos primeros N y el resto del catálogo no se comprobaría nunca. La tanda se
+   * deriva del día sobre la lista ordenada, así que la vuelta completa llega sola y se repite —
+   * que es justo lo que hace falta con algo que no termina nunca, porque los hosts siguen
+   * borrando ficheros.
+   */
+  const todos = Array.from(pendientes).sort();
+  const lote = Number.isFinite(limitArg as number) ? (limitArg as number) : 0;
+  let lista = todos;
+  if (lote > 0 && lote < todos.length) {
+    const vueltas = Math.max(1, Math.ceil(todos.length / lote));
+    const desde = (Math.floor(Date.now() / 86400000) % vueltas) * lote;
+    lista = todos.slice(desde, desde + lote);
+    console.log(`   ventana rotatoria: embeds ${desde}–${desde + lista.length} de ${todos.length} (vuelta completa cada ${vueltas} días)`);
+  }
+  console.log(`   ${lista.length} embeds distintos por comprobar\n`);
+
+  /**
+   * Diez a la vez, no dieciséis. Con dieciséis aparecieron 19 `http-429` en 600 embeds: el límite
+   * de peticiones de los propios hosts, provocado por nosotros. No llega a borrar nada de más
+   * —un 429 no autoriza a retirar— pero deja sin juzgar a esos servidores, que es peor que ir
+   * despacio: la pasada termina y siguen ahí, muertos y ofrecidos.
+   */
+  const CONCURRENCIA = 10;
+  const porMotivo = new Map<string, number>();
+  let hechos = 0;
+  for (let i = 0; i < lista.length; i += CONCURRENCIA) {
+    await Promise.all(
+      lista.slice(i, i + CONCURRENCIA).map(async url => {
+        try {
+          const r = await inspectEmbed(url);
+          if (r.status === 'offline') porMotivo.set(r.motivo || '?', (porMotivo.get(r.motivo || '?') || 0) + 1);
+          veredictos.set(url, r.status === 'offline' && motivoAutorizaBorrar(r.motivo));
+        } catch {
+          // No poder mirar no condena: se deja vivo.
+          veredictos.set(url, false);
+        }
+      })
+    );
+    hechos += Math.min(CONCURRENCIA, lista.length - i);
+    if (hechos % 800 < CONCURRENCIA) {
+      const muertos = Array.from(veredictos.values()).filter(Boolean).length;
+      console.log(`   ${hechos}/${lista.length} comprobados · ${muertos} para retirar`);
+    }
+  }
+
+  const porHost = new Map<string, { muertos: number; total: number }>();
+  for (const [url, muerto] of veredictos) {
+    const h = hostDe(url);
+    const acc = porHost.get(h) || { muertos: 0, total: 0 };
+    acc.total++;
+    if (muerto) acc.muertos++;
+    porHost.set(h, acc);
+  }
+
+  console.log('\n🔍 Motivos por los que un embed salió caído (no todos autorizan a borrarlo):');
+  for (const [motivo, n] of Array.from(porMotivo).sort((a, b) => b[1] - a[1])) {
+    console.log(`   ${String(n).padStart(5)}  ${motivo.padEnd(30)} ${motivoAutorizaBorrar(motivo) ? '→ se retira' : '→ se DEJA (no es prueba de borrado)'}`);
+  }
+
+  let fichasTocadas = 0;
+  let servidoresRetirados = 0;
+  let fichasQueSeQuedanSinNada = 0;
+
+  for (const row of rows) {
+    const antes: any[] = row.servers || [];
+    const despues = antes.filter(s => !(s?.embed_url && veredictos.get(s.embed_url) === true));
+    if (despues.length === antes.length) continue;
+
+    fichasTocadas++;
+    servidoresRetirados += antes.length - despues.length;
+    if (despues.length === 0) fichasQueSeQuedanSinNada++;
+
+    if (!apply) continue;
+    marcarTocada(row);
+    const { error } = await supabase
+      .from('media_items')
+      .update({ servers: despues, has_streams: despues.length > 0 })
+      .eq('id', row.id);
+    if (error) console.warn(`   ⚠ ${row.id}: ${error.message}`);
+  }
+
+  console.log(`\n📊 Por host (muertos / comprobados):`);
+  for (const [h, a] of Array.from(porHost).sort((x, y) => y[1].muertos - x[1].muertos).slice(0, 15)) {
+    if (a.muertos === 0) continue;
+    console.log(`   ${h.padEnd(32)} ${String(a.muertos).padStart(5)} / ${String(a.total).padStart(5)}  (${((a.muertos / a.total) * 100).toFixed(0)}%)`);
+  }
+
+  console.log(`\n💀 ${servidoresRetirados} servidores muertos en ${fichasTocadas} fichas`);
+  if (fichasQueSeQuedanSinNada > 0) {
+    console.log(`   ⚠ ${fichasQueSeQuedanSinNada} fichas se quedan SIN ningún servidor (no tenían más que muertos)`);
+  }
+  console.log(apply ? '   ✅ retirados' : '   (dry-run: repite con --apply para retirarlos)');
+
+  await purgarCacheDeTocadas(apply);
+}
+
 async function main() {
   const apply = process.argv.includes('--apply');
   // Elimina las filas duplicadas cuya versión correcta ya existe en el catálogo.
@@ -1833,6 +2014,15 @@ async function main() {
 
   if (process.argv.includes('--fuentes')) {
     await purgeIntruderSources(apply, Number.isFinite(limitArg) ? limitArg : undefined);
+    return;
+  }
+
+  if (process.argv.includes('--servidores-muertos')) {
+    await purgeDeadServers(
+      apply,
+      Number.isFinite(limitArg) ? limitArg : undefined,
+      (process.argv.find(a => a.startsWith('--host=')) || '').split('=')[1]
+    );
     return;
   }
 

@@ -1,6 +1,6 @@
 import { CacheStore } from '../cache/store';
 import { inspectEmbed } from '../scrapers/embedHealth';
-import { extractDirect, extractDirectFast, tokenExpirySeconds, DirectStream } from '../scrapers/directStream';
+import { extractDirect, extractDirectFast, tokenExpirySeconds, unwrapRedirector, DirectStream } from '../scrapers/directStream';
 
 /**
  * Acuñado del vídeo directo en el momento de reproducir.
@@ -67,6 +67,10 @@ function refererFor(embedUrl: string): { referer: string; origin: string } {
  */
 export async function mintDirect(embedUrl: string, opts: { fresh?: boolean } = {}): Promise<MintedStream | null> {
   if (!embedUrl) return null;
+  // La URL guardada no siempre es la que hay que pedir: puede ser un redirector de Blogger con el
+  // destino en base64, o una ruta que el host ya retiró (`/play.php/` de unlimplay). El caché se
+  // indexa por la URL YA NORMALIZADA para que dos moldes del mismo vídeo compartan entrada.
+  embedUrl = unwrapRedirector(embedUrl);
   const cacheKey = `mint:${embedUrl}`;
 
   if (!opts.fresh) {

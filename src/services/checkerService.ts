@@ -1,4 +1,4 @@
-import axios from 'axios';
+import { httpClient } from '../utils/httpClient';
 import { CatalogService } from './catalogService';
 import { ServerOption } from '../types';
 
@@ -8,7 +8,7 @@ export class CheckerService {
    */
   static async checkLinkHealth(server: ServerOption): Promise<'online' | 'offline'> {
     try {
-      const response = await axios.get(server.embed_url, {
+      const response = await httpClient.get(server.embed_url, {
         timeout: 5000,
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'

@@ -21,7 +21,7 @@ import { CatalogService } from '../src/services/catalogService';
 import { TmdbService } from '../src/services/tmdbService';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
 import { canonicalTitle, searchIndexKey, yearFromSlug } from '../src/utils/text';
-import { canExtractWithoutFetch } from '../src/scrapers/directStream';
+import { mereceRepasoDeExtraccion } from '../src/scrapers/directStream';
 import { MediaItem } from '../src/types';
 
 // Con RLS activado en media_items, escribir requiere la SUPABASE_SERVICE_ROLE_KEY
@@ -328,7 +328,7 @@ async function fillDirectStreams(max: number): Promise<void> {
     if (!Array.isArray(row.servers) || row.servers.length === 0) return false;
     const servers = row.servers as any[];
     if (!servers.some(s => s?.direct_stream)) return true;
-    return servers.some(s => s?.embed_url && !s.direct_stream && canExtractWithoutFetch(s.embed_url));
+    return servers.some(s => s?.embed_url && !s.direct_stream && mereceRepasoDeExtraccion(s.embed_url));
   });
 
   if (pending.length === 0) {

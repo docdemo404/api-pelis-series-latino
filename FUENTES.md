@@ -143,7 +143,86 @@ Están todas comentadas en el código, pero conviene conocerlas antes de escribi
 
 ---
 
-## 5. Después de enchufar la fuente: comprobarlo
+## 5. Los SERVIDORES de tu fuente: extraer el vídeo y no ofrecer lo que está muerto
+
+Todo lo anterior va de que la ficha sea la correcta. Esto va de que lo que hay dentro **reproduzca**.
+
+### 5.1 "No se puede extraer" son cuatro cosas distintas
+
+Mezclarlas hace perder semanas trabajando donde no hay nada que ganar. Cada embed sin vídeo directo
+cae en una de estas casillas, y solo una pide escribir código:
+
+| Casilla | Qué significa | Qué hacer |
+|---|---|---|
+| **Muerto** | El host declara que el fichero no está: 404/410, "file is no longer available", dominio aparcado en `wwN.` | **Retirarlo.** No hay nada que extraer. |
+| **Ya extrae** | El extractor funciona; la ficha se guardó antes de que existiera | Repasar la ficha (`--direct-only`) |
+| **Falta extractor** | La página vive y tiene reproductor, pero no encontramos la URL | Escribir el extractor |
+| **No se alcanza** | Ni llegamos a mirar (TLS, DNS, timeout) | Casi siempre es problema **nuestro** |
+
+`scripts/dev/probe_extraccion.ts` clasifica el catálogo entero en estas cuatro casillas, por host y
+por número de servidores en juego. **Córrelo antes de escribir una sola línea de extractor.** La
+primera vez que se corrió, de los 8.075 servidores sin vídeo directo casi la mitad estaban en la
+casilla equivocada: se creía que faltaban extractores y lo que había eran ficheros borrados.
+
+### 5.2 Trampas de servidores que ya nos han costado un arreglo
+
+| Trampa | Qué pasó |
+|---|---|
+| **La URL guardada no es la que hay que pedir** | unlimplay cambió sus rutas y la fuente siguió publicando las viejas. `/play.php/embed/…` responde **200 con su página de bienvenida**: 116 KB de HTML sanísimo que ningún control de salud puede distinguir de un reproductor. 461 servidores dados por perdidos porque nadie sospechó de la propia URL. Normaliza en `unwrapRedirector`, no en el scraper: el molde viejo lo emite la fuente y volvería en cada crawl. |
+| **El envoltorio está vivo y el fichero de dentro, borrado** | 940 embeds de FuegoCine son un fluidplayer de Blogger con `link=https://pixeldrain.com/api/file/<id>`. La página carga perfecta **esté el vídeo o no**, porque la página es suya y el fichero es de otro. Todos los controles miraban el envoltorio. Si tu fuente envuelve ficheros ajenos, **pregunta por el fichero** (`Range: bytes=0-1` basta). |
+| **Exigir una extensión para reconocer un vídeo** | Ese mismo `pixeldrain.com/api/file/<id>` es el fichero, pero no acaba en `.mp4`. Se rechazaban 940 servidores por la FORMA de la URL teniendo el vídeo delante. |
+| **La fuente es un agregador, no un host** | unlimplay no aloja nada: su HTML trae `const EMBEDS = {…}` con los hosts reales y con `remux`, su propio reensamblador, que devuelve `video/mp4` con CORS abierto. No hacía falta ningún extractor nuevo: hacía falta **leer un objeto que ya venía en el HTML**. |
+| **Un mensaje de error en la plantilla no es un error mostrado** | Todas las páginas de waaw.to llevan escrito "We can't find the file you are looking for…" dentro de un `<div>` que solo se enseña si el fichero falta. Ya había pasado igual con emturbovid (`throw new Error("Subtitle file not found")` en su JS) y sus 6.265 servidores. **Comprueba siempre si la frase está en todas las páginas del host o solo en las caídas.** |
+| **Un 200 no es señal de vida** | La página `/f/` de waaw responde 200 con título "Video player" aunque el vídeo esté borrado; solo su iframe interno `/e/` enseña el aviso. Y un dominio aparcado (`ww1.listeamed.net`, `ww38.vudeo.co`) responde 200 encantado. Baja hasta donde de verdad está el vídeo. |
+| **Nuestro propio almacén de certificados** | `ahvsh.com` y `streamlare.com` (199 servidores) llevaban meses sin poder ni mirarse: `UNABLE_TO_GET_ISSUER_CERT_LOCALLY`. Su certificado cuelga de `ISRG Root YE`, una raíz de Let's Encrypt de 2025 que Node aún no trae. Antes de culpar al host, **comprueba si el fallo es tuyo**. Ver `src/utils/extraRoots.ts`. |
+| **Nuestra propia ráfaga de peticiones** | Con 16 comprobaciones en paralelo aparecieron 19 `http-429` en 600 embeds. Un 429 provocado por nosotros no dice nada del servidor. |
+
+### 5.3 Para BORRAR hay que ser más estricto que para ordenar
+
+`inspectEmbed` decide si un servidor se ordena detrás; `--servidores-muertos` decide si desaparece.
+Solo autorizan a borrar los motivos que significan *"el host afirma que el fichero no está"*:
+404/410/451, el aviso de borrado en la página o en su iframe, el dominio aparcado, el fichero
+envuelto ausente. **Nunca** un `excepcion`, un `cuerpo-vacio`, un 5xx ni una heurística de tamaño.
+La lista vive en `motivoAutorizaBorrar` y el motivo de cada veredicto viaja en `EmbedInspection.motivo`
+justamente para poder auditarlo:
+
+```bash
+npx ts-node --transpile-only scripts/dev/probe_extraccion.ts   # ¿dónde hay trabajo?
+npx ts-node --transpile-only scripts/dev/probe_muertos.ts      # ¿por qué se condena cada uno?
+npm run repair:catalog -- --servidores-muertos                 # mide
+npm run repair:catalog -- --servidores-muertos --apply         # y retira
+```
+
+### 5.4 Si escribes un extractor nuevo
+
+1. Vive en `src/scrapers/directStream.ts`, **aislado**: si el sitio cambia, ese host se queda con su
+   embed y ningún otro se entera.
+2. Si necesita red, va en la rama diferida (`hostDiferido`) y se resuelve **al reproducir**, no al
+   crawlear: llamar a la API de un host 30.000 veces seguidas devuelve 429, y ese 429 se persistiría
+   como "este servidor no tiene vídeo", que es mentira.
+3. **Añade el host a `mereceRepasoDeExtraccion`.** Es la diferencia entre que el arreglo alcance a
+   las 14.000 fichas ya guardadas o solo a las nuevas.
+4. Si la URL lleva `ip=` o `expire=` dentro, es atada y caduca: dale su entrada en `hostPolicy.ts`
+   con `ipBound: true` o entregarás un 302 que da 403 en cuanto el cliente lo pida desde su red.
+
+### 5.5 Dónde está el límite, y por qué no se cruza
+
+Dos hosts se quedan **a propósito** en embed, y no por falta de intentarlo:
+
+- **waaw.to** (2.492 servidores). Su vídeo se pide con un POST a `/player/get_md5.php` que exige el
+  resultado de su detección de bloqueadores, la firma de un servicio antifraude publicitario, y un
+  hash de clic con sus coordenadas. Sin esas señales contesta `{"try_again":"1"}` — medido. Lo que
+  hay en su HTML es un **señuelo** con marca de tiempo de 2020 que se extrae sin problema y no
+  reproduce. Falsificar prueba de interacción humana y engañar a un antifraude queda fuera.
+- **filemoon.to** (77 servidores). SPA que además exige una prueba de trabajo (`pow.js`) antes de
+  entregar el vídeo.
+
+Publicar un `direct_stream` muerto es **peor** que no publicar ninguno: el cliente pierde el tiempo
+antes de caer al embed. Cuando no se puede extraer, se deja el embed y ya está.
+
+---
+
+## 6. Después de enchufar la fuente: comprobarlo
 
 ```bash
 npm run check:catalog
@@ -176,7 +255,7 @@ cada ~21 días y vuelve a empezar) → auditoría que falla en rojo si algo se c
 
 ---
 
-## 6. Resumen para pegar en la pared
+## 7. Resumen para pegar en la pared
 
 1. El título no identifica nada. El año, la imagen de TMDB, el título original y el dueño de la
    página sí.
@@ -187,3 +266,7 @@ cada ~21 días y vuelve a empezar) → auditoría que falla en rojo si algo se c
 6. Lee la página en UNA función y úsala en todos los caminos que la necesiten.
 7. Después de reparar, purga el caché: si no, el arreglo no se ve y parece que no funcionó.
 8. Corre `check:catalog` y no te vayas hasta que los PASOS 3 y 4 estén en verde.
+9. **Antes de escribir un extractor, clasifica**: muerto ≠ ya extrae ≠ falta extractor ≠ no se
+   alcanza. La mitad de lo que parece faltar por extraer son ficheros borrados.
+10. **Un 200 no es señal de vida**, y un mensaje de error en la plantilla no es un error mostrado.
+11. **Para borrar, exige que el host lo declare.** Un timeout nuestro no es una baja suya.
