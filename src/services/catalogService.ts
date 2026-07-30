@@ -558,6 +558,32 @@ export class CatalogService {
   }
 
   /**
+   * LAS COLUMNAS QUE NECESITA UNA TARJETA, y ni una más.
+   *
+   * Los listados pedían `select('*')`, y eso arrastra `servers` y `seasons` —el JSON más pesado
+   * de la tabla, con decenas de servidores y todos los capítulos de cada serie— para pintar una
+   * carátula y un título. Con 800 filas eso son megabytes que viajan de Supabase a la función,
+   * se parsean, y se tiran.
+   *
+   * Medido antes de tocarlo: el home en FRÍO tardaba 12,8 segundos. No era el scraping —que ni
+   * se ejecuta— ni TMDB: era esta consulta.
+   *
+   * El mapeador tolera columnas ausentes (todas llevan su valor por defecto), así que una ficha
+   * de listado sale igual; lo único que no trae son los datos que un listado no enseña. El
+   * detalle sigue pidiendo la fila entera, que es donde sí hacen falta.
+   *
+   * OJO AL NOMBRAR: la primera versión incluía `slug`, que NO es una columna de la tabla —el
+   * mapeador la lee pero cae a `title` cuando falta—. PostgREST rechaza la consulta ENTERA por
+   * una columna inexistente, así que devolvía cero filas y el home se iba silenciosamente al
+   * respaldo con `select('*')`: el mismo 23 MB de antes, pero ahora además con una consulta
+   * fallida por delante. Un error de una palabra que anulaba la optimización sin dar la cara.
+   */
+  private static readonly COLUMNAS_DE_TARJETA =
+    'id,tmdb_id,type,title,original_title,overview,rating,release_date,genres,' +
+    'subcategories,poster,backdrop,logo,trailer,runtime,total_seasons,total_episodes,' +
+    'has_streams,content_rating,metadata_source,updated_at';
+
+  /**
    * Pool de títulos para construir el home. Una sola query a Postgres (sin scraping),
    * cacheada, lo bastante ancha para alimentar ~15 carruseles temáticos. Cae a getAll()
    * (que sí sabe scrapear en vivo) cuando la DB todavía no está poblada.
@@ -574,7 +600,7 @@ export class CatalogService {
     try {
       let query = supabase
         .from('media_items')
-        .select('*')
+        .select(this.COLUMNAS_DE_TARJETA)
         .not('poster', 'is', null)
         .not('genres', 'eq', '{}')
         .order('updated_at', { ascending: false })
@@ -596,7 +622,7 @@ export class CatalogService {
     try {
       const { data } = await supabase
         .from('media_items')
-        .select('*')
+        .select(this.COLUMNAS_DE_TARJETA)
         .order('updated_at', { ascending: false })
         .limit(limit);
 
@@ -637,9 +663,19 @@ export class CatalogService {
     const limit = Math.max(1, Math.min(spec.limit || 60, 200));
 
     try {
+      /**
+       * AQUÍ ESTABA EL HOME LENTO, y no donde parecía.
+       *
+       * Cada carrusel llama a esta función, y el home construye diecinueve más la fila de
+       * recientes: unas 1.720 filas pedidas con `select('*')`, o sea con `servers` y `seasons`
+       * enteros dentro. Medido: 800 filas así pesan 23,7 MB y tardan 5,7 s; las mismas 800 con
+       * las columnas de una tarjeta pesan 823 KB y tardan 0,87 s. Multiplicado por veinte
+       * consultas en paralelo, eso es el home en frío tardando doce segundos para pintar
+       * carátulas y títulos.
+       */
       let query = supabase
         .from('media_items')
-        .select('*')
+        .select(this.COLUMNAS_DE_TARJETA)
         .not('poster', 'is', null)
         .not('genres', 'eq', '{}');
 
@@ -721,14 +757,15 @@ export class CatalogService {
     try {
       const { data } = await supabase
         .from('media_items')
-        .select('*')
+        .select(this.COLUMNAS_DE_TARJETA)
         .order('updated_at', { ascending: false })
         .limit(200);
-      if (data && data.length >= 30) {
-        const newest = Date.parse(data[0].updated_at || '') || 0;
+      const filas = (data || []) as any[];
+      if (filas.length >= 30) {
+        const newest = Date.parse(filas[0].updated_at || '') || 0;
         const isFresh = Date.now() - newest < 24 * 60 * 60 * 1000;
         if (isFresh) {
-          const dbItems = data.map(this.mapDbItemToMediaItem);
+          const dbItems = filas.map(this.mapDbItemToMediaItem);
           await CacheStore.set(cacheKey, dbItems, CACHE_TTL_SECONDS);
           return dbItems;
         }

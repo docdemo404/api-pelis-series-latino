@@ -11,6 +11,16 @@ import { CacheStore } from '../cache/store';
  */
 const HOME_TTL_SECONDS = 2 * 60 * 60;
 
+/**
+ * Cuánto SOBREVIVE el feed en el caché, que no es lo mismo que cuánto se considera fresco.
+ *
+ * La diferencia entre las dos es la ventana en la que se puede servir algo caducado mientras se
+ * reconstruye por detrás. Doce horas de margen sobre dos de frescura: de sobra para que ninguna
+ * reconstrucción coincida con un usuario esperando, y poco para que un catálogo abandonado no
+ * sirva un home de ayer indefinidamente.
+ */
+const HOME_VIDA_SECONDS = 12 * 60 * 60;
+
 /** Ítems mínimos para que una fila se muestre: por debajo, el carrusel se ve incompleto. */
 const MIN_ROW_ITEMS = 8;
 
@@ -234,6 +244,16 @@ const ROW_DEFINITIONS: RowDefinition[] = [
 
 export class FeedService {
   /**
+   * Reconstrucciones de home en marcha, para no lanzar veinte a la vez.
+   *
+   * Sin esto, cuando el feed caduca, CADA petición que llega mientras se reconstruye dispara su
+   * propia reconstrucción: justo en el momento de más tráfico se multiplican por veinte las
+   * consultas a Postgres. Es la estampida clásica de un caché que expira, y cuesta un Set
+   * evitarla.
+   */
+  private static readonly reconstruyendoHome = new Set<string>();
+
+  /**
    * Feed de inicio estilo Netflix/Prime: hero rotatorio con ficha completa + ~15 carruseles
    * temáticos construidos sobre un pool ancho del catálogo.
    *
@@ -250,11 +270,42 @@ export class FeedService {
     const perRow = Math.max(5, Math.min(opts.limit || 20, 40));
 
     const cacheKey = `home:${cc}:${detail}:${perRow}`;
-    let feed = await CacheStore.get<HomeFeedResponse>(cacheKey);
 
-    if (!feed) {
+    /**
+     * NADIE ESPERA A QUE SE RECONSTRUYA EL HOME.
+     *
+     * Construirlo cuesta veinte consultas a Postgres. Con el TTL a secas, cada dos horas al
+     * primero que entraba le tocaba pagarlas enteras: medido, doce segundos antes de afinar las
+     * consultas y casi cinco después. Que sean cinco y no doce no arregla lo importante — sigue
+     * siendo un usuario mirando una pantalla en blanco por un trabajo que no le corresponde.
+     *
+     * Así que el feed se guarda con MUCHA más vida de la que se considera fresco, y la frescura
+     * se decide aparte, por su marca de tiempo:
+     *
+     *   fresco     → se entrega y ya está;
+     *   caducado   → se entrega IGUAL, al instante, y se reconstruye por detrás;
+     *   no existe  → solo entonces se espera (la primera vez, o tras purgar).
+     *
+     * Servir algo de dos horas y diez minutos en vez de hacer esperar cinco segundos no es una
+     * concesión: un carrusel de novedades no cambia en diez minutos, y el que llega después ya
+     * se encuentra lo nuevo.
+     */
+    const guardado = await CacheStore.get<{ feed: HomeFeedResponse; generadoEn: number }>(cacheKey);
+    let feed = guardado?.feed;
+
+    if (feed) {
+      const caducado = Date.now() - (guardado?.generadoEn || 0) > HOME_TTL_SECONDS * 1000;
+      if (caducado && !this.reconstruyendoHome.has(cacheKey)) {
+        this.reconstruyendoHome.add(cacheKey);
+        // Sin `await`: la respuesta ya va de camino al cliente.
+        void this.buildHomeFeed(cc, detail, perRow)
+          .then(nuevo => CacheStore.set(cacheKey, { feed: nuevo, generadoEn: Date.now() }, HOME_VIDA_SECONDS))
+          .catch(() => { /* si falla, se sigue sirviendo lo viejo hasta el siguiente intento */ })
+          .finally(() => this.reconstruyendoHome.delete(cacheKey));
+      }
+    } else {
       feed = await this.buildHomeFeed(cc, detail, perRow);
-      await CacheStore.set(cacheKey, feed, HOME_TTL_SECONDS);
+      await CacheStore.set(cacheKey, { feed, generadoEn: Date.now() }, HOME_VIDA_SECONDS);
     }
 
     // El filtro por filas se aplica sobre el feed cacheado: pedir un subconjunto no

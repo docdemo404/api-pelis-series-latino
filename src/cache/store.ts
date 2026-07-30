@@ -47,6 +47,45 @@ async function kvCommand<T>(command: unknown[]): Promise<T | null> {
   }
 }
 
+/**
+ * SEGUNDO NIVEL, EN MEMORIA, PARA EL CAMINO DEL VÍDEO.
+ *
+ * Redis es compartido —esa es su gracia— pero se habla con él por HTTP, y una reproducción
+ * encadena tres lecturas antes del primer fotograma: el acuñado, el veredicto de destino y el
+ * manifiesto. Medido en producción, arrancar un vídeo costaba ~0,95 s y cada salto en la barra
+ * ~0,4 s, y ahí dentro no había ni scraping ni CDN: eran esos viajes, uno detrás de otro.
+ *
+ * Una misma instancia atiende muchas peticiones del mismo vídeo (segmentos, cambios de calidad,
+ * saltos), así que recordar la respuesta unos segundos EN EL PROCESO convierte esas lecturas en
+ * cero. Redis sigue siendo la fuente compartida; esto solo evita repetirle la misma pregunta
+ * varias veces por segundo.
+ *
+ * SOLO PARA ESTOS PREFIJOS, y la lista es corta a propósito: son datos de reproducción, que se
+ * regeneran solos y cuyo peor caso es un acuñado de más. El catálogo NO entra —sus claves se
+ * purgan a mano cuando se repara una ficha, y un recuerdo en memoria haría que la reparación
+ * tardara en verse justo en la instancia que la sirve, que es el fallo que se acaba de arreglar
+ * con las claves de episodio.
+ */
+const PREFIJOS_MEMORIZABLES = ['mint:', 'verdict:', 'm3u8:', 'salud:'];
+
+/** Cuánto se recuerda en el proceso. Corto: es un atajo, no una segunda verdad. */
+const MEMORIA_MS = 20_000;
+
+const memoriaCorta = new Map<string, { value: unknown; expira: number }>();
+
+function memorizable(key: string): boolean {
+  return PREFIJOS_MEMORIZABLES.some(p => key.startsWith(p));
+}
+
+function recordar(clave: string, valor: unknown): void {
+  memoriaCorta.set(clave, { value: valor, expira: Date.now() + MEMORIA_MS });
+  // Tope duro: una instancia de Vercel es efímera, pero un vídeo largo son cientos de claves.
+  if (memoriaCorta.size > 500) {
+    const primera = memoriaCorta.keys().next();
+    if (!primera.done) memoriaCorta.delete(primera.value);
+  }
+}
+
 export class CacheStore {
   static isShared(): boolean {
     return Boolean(KV_URL() && KV_TOKEN());
@@ -56,10 +95,15 @@ export class CacheStore {
     const k = NAMESPACE + key;
     if (!this.isShared()) return memoryGet<T>(k);
 
+    const corto = memorizable(key) ? memoriaCorta.get(k) : undefined;
+    if (corto && Date.now() < corto.expira) return corto.value as T;
+
     const raw = await kvCommand<string>(['GET', k]);
     if (raw === null || raw === undefined) return null;
     try {
-      return JSON.parse(raw) as T;
+      const valor = JSON.parse(raw) as T;
+      if (memorizable(key)) recordar(k, valor);
+      return valor;
     } catch {
       return null;
     }
@@ -69,6 +113,8 @@ export class CacheStore {
   static async set(key: string, value: unknown, ttlSeconds: number): Promise<void> {
     const k = NAMESPACE + key;
     memorySet(k, value, ttlSeconds); // siempre poblar la copia local (lecturas calientes gratis)
+    // Lo que se acaba de escribir también vale para las lecturas inmediatas de esta instancia.
+    if (memorizable(key)) recordar(k, value);
     if (!this.isShared()) return;
     try {
       await kvCommand(['SET', k, JSON.stringify(value), 'EX', String(ttlSeconds)]);
@@ -109,7 +155,9 @@ export class CacheStore {
     const full = keys.filter(Boolean).map(k => NAMESPACE + k);
     if (full.length === 0) return;
 
-    for (const k of full) memoryCache.delete(k);
+    // También el recuerdo corto del camino de vídeo: si no, borrar un veredicto no serviría de
+    // nada en la instancia que acaba de leerlo.
+    for (const k of full) { memoryCache.delete(k); memoriaCorta.delete(k); }
     if (!this.isShared()) return;
     try {
       await kvCommand(['DEL', ...full]);
