@@ -116,6 +116,22 @@ jobs:
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
         run: npx ts-node scripts/repairCatalog.ts --servidores-muertos --apply --limit=6000
 
+      # Una ficha puede haber adoptado su película de TMDB —póster, título, tmdb_id— y quedarse
+      # con la frase de relleno de la fuente por sinopsis, porque TMDB la tiene vacía en español
+      # y escrita en inglés. Parece completa y no lo está: son 174 fichas descubiertas de golpe a
+      # partir de UN caso reportado. Esto va después del repaso porque ese repaso puede cambiarle
+      # el tmdb_id a una ficha, y entonces su sinopsis hay que volver a traerla.
+      - name: Rellenar sinopsis que TMDB sí tiene
+        if: always()
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+        run: npx ts-node scripts/repairCatalog.ts --sinopsis --apply
+
       - name: Comprobar que cada ficha sirve su propio contenido
         if: always()
         env:

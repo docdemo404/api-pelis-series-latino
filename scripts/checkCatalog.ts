@@ -156,6 +156,78 @@ async function sampleMetadataMismatch(n: number): Promise<{ revisadas: number; m
   return { revisadas, malas, ejemplos };
 }
 
+/** Frase de relleno de la fuente: "Ver <título> online gratis en HD con audio Latino". */
+const SINOPSIS_DE_RELLENO = /^Ver .* online (gratis )?(en |con )/i;
+
+/**
+ * PASO 5 · Una ficha que adoptó TMDB no puede quedarse SIN lo que TMDB tiene.
+ *
+ * Nació de "Max Is Missing": tenía póster, título y tmdb_id de TMDB, y de sinopsis el relleno de
+ * la fuente —"Ver Max ha desaparecido online gratis en HD con audio Latino"—, que no cuenta nada
+ * de la película. TMDB la tenía vacía en español y escrita en inglés, y el código se rendía antes
+ * de mirar sus traducciones. Eran 174 fichas y nadie lo habría visto: la ficha parecía completa.
+ *
+ * NO USA UMBRALES, y es lo que la hace utilizable a diario. Encuentra las fichas a las que les
+ * falta algo, le PREGUNTA a TMDB si él lo tiene, y solo cuenta las que sí. Así una película cuya
+ * sinopsis TMDB tampoco conoce no deja la corrida en rojo para siempre —no hay nada que
+ * arreglar— y cualquier hueco que sí se pueda rellenar sale como error desde la primera vez.
+ *
+ * Es barata porque el conjunto es pequeño por construcción: si crece, es justo la señal que
+ * interesa. Se acota de todas formas, para que un fallo masivo no dispare miles de peticiones.
+ */
+async function auditMissingMetadata(): Promise<{ reparables: number; sinRemedio: number; ejemplos: string[] }> {
+  const filas: any[] = [];
+  for (let from = 0; ; from += 1000) {
+    const { data } = await db
+      .from('media_items')
+      .select('id,title,type,tmdb_id,overview,poster,release_date')
+      .gt('tmdb_id', 0)
+      .range(from, from + 999);
+    if (!data?.length) break;
+    filas.push(...data);
+    if (data.length < 1000) break;
+  }
+
+  const huecos = filas
+    .map(f => ({
+      f,
+      falta: [
+        SINOPSIS_DE_RELLENO.test(String(f.overview || '')) || !String(f.overview || '').trim() ? 'sinopsis' : '',
+        !String(f.release_date || '').trim() ? 'fecha' : '',
+        f.poster && !/image\.tmdb\.org|themoviedb\.org/i.test(String(f.poster)) ? 'póster' : '',
+      ].filter(Boolean),
+    }))
+    .filter(x => x.falta.length > 0)
+    .slice(0, 300);
+
+  let reparables = 0;
+  let sinRemedio = 0;
+  const ejemplos: string[] = [];
+
+  const CONC = 5;
+  for (let i = 0; i < huecos.length; i += CONC) {
+    await Promise.all(huecos.slice(i, i + CONC).map(async ({ f, falta }) => {
+      const type: ContentType = f.type === 'tvseries' ? 'tvseries' : 'movie';
+      const d = await TmdbService.getTmdbDetails(f.tmdb_id, type).catch(() => null);
+      if (!d) { sinRemedio++; return; }
+
+      const tmdbLoTiene = falta.filter(q =>
+        (q === 'sinopsis' && String(d.overview || '').trim() && !SINOPSIS_DE_RELLENO.test(String(d.overview))) ||
+        (q === 'fecha' && String(d.release_date || d.first_air_date || '').trim()) ||
+        (q === 'póster' && d.poster_path)
+      );
+
+      if (tmdbLoTiene.length === 0) { sinRemedio++; return; }
+      reparables++;
+      if (ejemplos.length < 6) {
+        ejemplos.push(`${f.id} — "${String(f.title).slice(0, 34)}" (tmdb ${f.tmdb_id}): le falta ${tmdbLoTiene.join(', ')} y TMDB sí la tiene`);
+      }
+    }));
+  }
+
+  return { reparables, sinRemedio, ejemplos };
+}
+
 function bar(done: number, total: number): string {
   if (total <= 0) return '';
   const pct = Math.round((done / total) * 100);
@@ -234,10 +306,25 @@ async function main() {
     }
   }
 
+  // ── Paso 5: nada que TMDB tenga puede faltar en una ficha que lo adoptó ─────
+  console.log('\nPASO 5 · Ninguna ficha adoptada se queda sin lo que TMDB sí tiene');
+  const huecos = await auditMissingMetadata();
+  if (huecos.reparables === 0) {
+    console.log(`   ✅ Sin huecos rellenables${huecos.sinRemedio ? ` (${huecos.sinRemedio} que TMDB tampoco tiene)` : ''}.`);
+  } else {
+    console.log(`   ⚠ ${huecos.reparables} fichas a las que les falta algo que TMDB SÍ publica:`);
+    for (const e of huecos.ejemplos) console.log(`      · ${e}`);
+    console.log('\n      Rellénalo con:  npm run repair:catalog -- --sinopsis --apply');
+  }
+
   // Con --fallar-si-hay-cruces el script sale con código 1: es lo que pone en rojo la corrida
-  // diaria del workflow si alguna vía de fusión vuelve a mezclar películas.
-  if (cruce.cruzadas > 0 && process.argv.includes('--fallar-si-hay-cruces')) {
-    console.log('\n❌ La invariante está rota: hay fichas sirviendo contenido de otras.\n');
+  // diaria del workflow si alguna vía de fusión vuelve a mezclar películas, o si una ficha se
+  // queda sin metadata que estaba a una petición de distancia.
+  const roto = cruce.cruzadas > 0 || huecos.reparables > 0;
+  if (roto && process.argv.includes('--fallar-si-hay-cruces')) {
+    if (cruce.cruzadas > 0) console.log('\n❌ La invariante está rota: hay fichas sirviendo contenido de otras.');
+    if (huecos.reparables > 0) console.log('❌ Hay fichas sin metadata que TMDB publica y nadie fue a buscar.');
+    console.log('');
     process.exit(1);
   }
 

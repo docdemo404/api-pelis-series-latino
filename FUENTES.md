@@ -143,6 +143,47 @@ Están todas comentadas en el código, pero conviene conocerlas antes de escribi
 
 ---
 
+## 4 bis. Los CUATRO caminos por los que una ficha acaba con metadata ajena
+
+Durante mucho tiempo aquí solo estaba tapado UNO: fusionar dos fichas porque sus títulos
+coinciden. Esa puerta sigue cerrada y la auditoría la vigila. Pero el usuario no compra "no
+fusionar", compra que la ficha sea la correcta — y a eso se llega por más caminos. Estos cuatro
+salieron de casos reportados, uno a uno, después de haber dado el problema por resuelto:
+
+| Camino | Qué pasó | Qué lo tapa ahora |
+|---|---|---|
+| **El año tapa un desmentido** | La página decía `data-original-title="Bunker"` y `data-year="2025"`. El candidato de TMDB se llamaba "Sin salida" y era de 2024. Un año de diferencia bastaba para marcar `verified`, y con eso se adoptó el póster, la sinopsis y el título de **otra película**. El vídeo era el correcto: lo que estaba mal era la ficha entera. | El año ya **no puede** respaldar cuando la fuente publica un original que no se parece a ninguno de los nombres del candidato (`originalContradice`). |
+| **El hash se tira por el nombre del host** | `tmdbImagePath` solo reconocía `image.tmdb.org`, y FuegoCine enlaza desde `www.themoviedb.org` — misma ruta `/t/p/<tamaño>/<hash>`, otro servidor. La prueba de identidad más fuerte que existe se descartaba por eso. | Se aceptan los dos hosts. |
+| **La imagen se busca en un solo sitio** | Se leía solo de `ul.post-details[data-backdrop]`. Las páginas de EPISODIO no tienen esa lista: su imagen vive en `link[rel=image_src]` y en un `div[data-backdrop]` suelto. Y como esas páginas son el origen de las series agrupadas, "Invencible" se quedó sin año, sin sinopsis y con un tmdb_id sintético. | Se busca en cuatro sitios, y si el hash es el **fotograma del episodio** (`4x8`) también confirma: una petición, solo cuando no hay nada más. |
+| **TMDB sin texto en español** | "Max Is Missing" tenía póster, título y tmdb_id de TMDB y de sinopsis "Ver Max ha desaparecido online gratis en HD con audio Latino". TMDB la tiene vacía en es-MX y es-ES, y ahí se rendía el código. La ficha **parecía completa**. Eran 174. | Se buscan las traducciones (español primero, luego inglés) sin peticiones extra, y `--sinopsis` recupera las viejas. |
+
+**La lección que hay detrás de las cuatro**: cada una era un dato que estaba EN LA PÁGINA o EN
+TMDB y que no se llegaba a mirar. Ninguna fue un fallo de lógica de emparejamiento — fue no ir a
+buscar lo que ya estaba ahí. Cuando dudes entre "el matcher se equivocó" y "no le dimos lo que
+necesitaba", mira primero lo segundo.
+
+Cómo se vigilan a futuro:
+
+```bash
+npm run check:catalog -- --fallar-si-hay-cruces   # PASO 3, 4 y 5; sale en rojo si algo se cuela
+npx ts-node --transpile-only scripts/dev/probe_original_contradice.ts   # ¿alguien contradice a su fuente?
+npm run repair:catalog -- --verify --apply        # re-lee la página de cada ficha y re-resuelve
+npm run repair:catalog -- --sinopsis --apply      # rellena lo que TMDB sí tiene
+```
+
+> **PASO 5 no usa umbrales, y es lo que lo hace utilizable a diario.** Busca fichas a las que les
+> falta algo, le PREGUNTA a TMDB si él lo tiene, y solo cuenta las que sí. Una película cuya
+> sinopsis TMDB tampoco conoce no deja la corrida en rojo para siempre; un hueco que sí se puede
+> rellenar sale como error desde el primer día.
+
+> Y un aviso sobre los detectores: **el primero que escribí se inventó nueve de cada diez avisos.**
+> Leía `data-original-title` con una expresión regular sobre el HTML crudo, así que
+> `"Pete's Dragon"` se cortaba en el apóstrofo y daba `"Pete"`, y `Marley &amp; Me` llegaba sin
+> decodificar. Lee las páginas con cheerio, igual que el scraper de verdad, o acabarás persiguiendo
+> fantasmas.
+
+---
+
 ## 5. Los SERVIDORES de tu fuente: extraer el vídeo y no ofrecer lo que está muerto
 
 Todo lo anterior va de que la ficha sea la correcta. Esto va de que lo que hay dentro **reproduzca**.
@@ -276,3 +317,9 @@ cada ~21 días y vuelve a empezar) → auditoría que falla en rojo si algo se c
    alcanza. La mitad de lo que parece faltar por extraer son ficheros borrados.
 10. **Un 200 no es señal de vida**, y un mensaje de error en la plantilla no es un error mostrado.
 11. **Para borrar, exige que el host lo declare.** Un timeout nuestro no es una baja suya.
+12. **Una señal que confirma cuando coincide tiene que restar cuando contradice.** Si solo suma,
+    no es una prueba: es un atajo.
+13. **Antes de culpar al matcher, comprueba que le diste todo lo que la página publica.** Los
+    cuatro cruces de metadata que han aparecido eran datos que estaban ahí y no se miraban.
+14. **Un detector mal escrito es peor que ninguno**: te hace perseguir fantasmas y desconfiar de
+    los avisos buenos. Lee las páginas como las lee el scraper.
