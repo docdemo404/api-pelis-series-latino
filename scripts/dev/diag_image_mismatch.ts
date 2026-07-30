@@ -60,8 +60,8 @@ function imgHash(u?: string | null): string | null {
     if (!ndImgs.includes(ogh)) { skip++; continue; } // no confirmado por imagen → no tocar
 
     const ndTitle = nd?.title || nd?.name || String(m.id);
-    const { data: clash } = await db.from('media_items').select('id,title,source_url,source_urls').eq('tmdb_id', m.id).neq('id', r.id);
-    const twin = clash && clash[0];
+    const { data: clash } = await db.from('media_items').select('id,title,release_date,source_url,source_urls').eq('tmdb_id', m.id).neq('id', r.id);
+    const twin: any = clash && clash[0];
 
     if (!twin) {
       relabel++;
@@ -81,6 +81,15 @@ function imgHash(u?: string | null): string | null {
       }
     } else {
       collision++;
+      // Volcar las fuentes de una fila en otra es lo que hace que una película sirva el vídeo de
+      // otra, así que ni siquiera con la imagen confirmada se funde a ciegas: si la gemela es de
+      // otra época, la equivocada es ELLA y aquí no se toca nada.
+      const yA = Number(String(nd?.release_date || nd?.first_air_date || '').slice(0, 4)) || 0;
+      const yB = Number(String(twin.release_date || '').slice(0, 4)) || 0;
+      if (yA && yB && Math.abs(yA - yB) > 1) {
+        console.log(`COLISIÓN  ${r.id}: "${r.title}" es "${ndTitle}" (${yA}), pero ${twin.id} = "${twin.title}" es de ${yB} → NO se funde`);
+        continue;
+      }
       console.log(`COLISIÓN  ${r.id}: "${r.title}" es en realidad "${ndTitle}" (${m.id}); ya la tiene ${twin.id} → fundir+borrar`);
       if (APPLY) {
         const badUrls = [r.source_url, ...(r.source_urls || [])].filter(Boolean);

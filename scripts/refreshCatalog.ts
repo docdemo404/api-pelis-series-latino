@@ -100,6 +100,9 @@ function isTmdbIdConflict(message: string): boolean {
  *     fuente quedaban inalcanzables desde la ficha unificada (migración 005);
  *   · sus alias, para que la búsqueda encuentre el título por CUALQUIERA de sus nombres
  *     ("Minions: El origen de Gru" y "Minions: Nace un villano" son la misma película).
+ *
+ * Y NO se funde nada sin comprobar el año: compartir tmdb_id es solo lo que CREE el matcher, y
+ * cuando se equivoca esto suelda dos películas distintas en una fila para siempre. Ver abajo.
  */
 async function mergeIntoExisting(
   row: Record<string, unknown>,
@@ -109,7 +112,7 @@ async function mergeIntoExisting(
   if (!tmdbId) return false;
 
   const columns =
-    'id,title,original_title,aliases,poster,backdrop,logo,overview,runtime,director,source_url,trailer' +
+    'id,title,original_title,aliases,release_date,poster,backdrop,logo,overview,runtime,director,source_url,trailer' +
     (opts.withMultiSource ? ',source_urls' : '');
 
   // El tipo forma parte de la identidad de la ficha: TMDB numera películas y series por
@@ -125,6 +128,28 @@ async function mergeIntoExisting(
 
   const existing: any = data && data[0];
   if (!existing) return false;
+
+  // SEGUNDA LLAVE ANTES DE FUNDIR: que las dos se estrenaran a la vez.
+  //
+  // El tmdb_id no lo pone la fuente, lo DEDUCE el matcher, y cuando se equivoca esta función
+  // suelda dos películas distintas en una sola fila para siempre: la absorbida entrega aquí su
+  // página de origen —o sea sus servidores— y sus alias, y la ficha resultante acaba sirviendo
+  // el vídeo de la otra. Es de aquí de donde salió que "Sin salida" (No Exit, 2022) tuviera
+  // apuntada como fuente propia la página de "13 Minutes" (2021).
+  //
+  // El año es lo único independiente del matcher que hay a mano, así que decide: con más de un
+  // año de diferencia (el desfase de distribución habitual) no se funde nada. La copia se
+  // descarta como antes de existir la fusión, que es el comportamiento seguro.
+  const yearOfRow = (r: Record<string, unknown>) => Number(String(r.release_date || '').slice(0, 4)) || 0;
+  const incomingYear = yearOfRow(row);
+  const existingYear = yearOfRow(existing);
+  if (incomingYear && existingYear && Math.abs(incomingYear - existingYear) > 1) {
+    console.warn(
+      `   ⚠ no se funde "${row.title}" (${incomingYear}) en "${existing.title}" (${existingYear}):` +
+      ` comparten tmdb ${tmdbId} pero no son de la misma época`
+    );
+    return false;
+  }
 
   const patch: Record<string, unknown> = {};
   const fillIfEmpty = (field: string) => {

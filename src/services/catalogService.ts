@@ -158,15 +158,53 @@ export function anosIncompatibles(
 }
 
 /**
- * ¿Esta url es la página de la que SALIÓ la ficha? El id de la fila ES el slug de su fuente
- * (ver mapDbItemToMediaItem), así que se compara contra el id y NO contra el título: comparar
- * títulos es justo lo que confunde homónimos —`carrie-2002` no debe reconocer como propia la
- * página `carrie-1976`—. Sirve para no dudar nunca del origen de la propia ficha.
+ * Los ids con los que una página de origen puede estar registrada en el catálogo.
+ *
+ * Son los DOS moldes exactos con que cada fuente forma el id de su fila, y por eso se descarta
+ * primero el dominio: los dos operan sobre la RUTA.
+ *   · TioPlus  → el último tramo (`/pelicula/sin-salida-2011` → `sin-salida-2011`);
+ *   · FuegoCine → la ruta entera sluguificada (`/2026/03/sin-salida-2022.html`
+ *     → `2026-03-sin-salida-2022-html`).
+ * El tramo final va además en minúsculas porque las fuentes publican rutas con mayúsculas
+ * (`/serie/Inconcebible`) y los ids del catálogo no siempre las conservan.
+ *
+ * Sirve para preguntar QUIÉN es el dueño de una página: si una ficha lleva en sus `source_urls`
+ * la página propia de OTRA ficha con distinto tmdb_id, está sacando el vídeo de otra obra, y eso
+ * se demuestra sin salir a la red. Es la prueba más fuerte que hay, la única que separa homónimos
+ * del MISMO año, donde la fecha ya no distingue nada ("El botín" son dos películas de 2026).
  */
-export function esPaginaPropia(id: string | undefined, url: string): boolean {
+export function candidateIdsForUrl(url: string): string[] {
+  if (!url) return [];
+  const path = String(url).replace(/^https?:\/\/[^/]+/i, '');
+  const last = path.split('/').filter(Boolean).pop() || '';
+  return Array.from(new Set([last, last.toLowerCase(), slugify(path)])).filter(Boolean);
+}
+
+/** La categoría de la ruta de TioPlus dice si la página es de película o de serie. */
+function tipoDeLaRuta(url: string): ContentType | null {
+  if (/\/pelicula\//i.test(url)) return 'movie';
+  if (/\/(serie|anime|dorama)\//i.test(url)) return 'tvseries';
+  return null;
+}
+
+/**
+ * ¿Esta url es la página de la que SALIÓ la ficha? El id de la fila ES el slug de su fuente (ver
+ * mapDbItemToMediaItem), así que se compara contra el id y NO contra el título: comparar títulos
+ * es justo lo que confunde homónimos —`carrie-2002` no debe reconocer como propia la página
+ * `carrie-1976`—. Sirve para no dudar nunca del origen de la propia ficha.
+ *
+ * La comparación es EXACTA contra los moldes de arriba. Antes valía que el id fuera el final del
+ * slug de la url, y eso hacía propias páginas ajenas: la ficha `sobre-ruedas` daba por suya
+ * `/pelicula/amor-sobre-ruedas`, que es otra película, y así se libraba de todas las
+ * comprobaciones. Y cuando dos páginas de categorías distintas caen en el mismo id —el mismo
+ * nombre como película y como serie, `/pelicula/inconcebible` y `/serie/Inconcebible`— desempata
+ * la categoría de la ruta contra el tipo de la ficha.
+ */
+export function esPaginaPropia(id: string | undefined, url: string, type?: ContentType): boolean {
   if (!id || !url) return false;
-  const slug = slugify(url);
-  return slug === id || slug.endsWith(`-${id}`);
+  if (!candidateIdsForUrl(url).includes(id)) return false;
+  const tipoUrl = tipoDeLaRuta(url);
+  return !type || !tipoUrl || tipoUrl === type;
 }
 
 export class CatalogService {
@@ -1086,6 +1124,47 @@ export class CatalogService {
     } catch {}
   }
 
+  /**
+   * De las páginas que se proponen como fuente de esta ficha, cuáles son en realidad la página
+   * PROPIA de otra ficha del catálogo.
+   *
+   * Es la única prueba que separa homónimos del MISMO año, donde comparar fechas ya no distingue
+   * nada: "El botín" son dos películas de 2026 y "Sola" dos de 2020, con títulos idénticos. Si la
+   * página que se quiere adoptar es de la que ya es dueña otra ficha con distinto tmdb_id real, es
+   * de otra obra y punto.
+   *
+   * Cuesta UNA consulta por clave primaria para todas las urls juntas, y solo se paga en el camino
+   * exhaustivo, que de por sí hace varios scrapes. Si la consulta falla no se descarta nada: se
+   * devuelve el conjunto vacío y deciden las demás llaves.
+   */
+  private static async paginasDeOtraFicha(urls: Array<string | undefined>, self: MediaItem): Promise<Set<string>> {
+    const ajenas = new Set<string>();
+    if (!(self.tmdb_id > 0)) return ajenas;
+
+    const porId = new Map<string, string[]>();   // id candidato → urls que lo generan
+    for (const url of urls) {
+      if (!url) continue;
+      for (const id of candidateIdsForUrl(url)) {
+        porId.set(id, [...(porId.get(id) || []), url]);
+      }
+    }
+    if (porId.size === 0) return ajenas;
+
+    try {
+      const { data } = await supabase
+        .from('media_items')
+        .select('id,tmdb_id')
+        .in('id', Array.from(porId.keys()));
+      for (const row of data || []) {
+        if (String(row.id) === self.id) continue;
+        if (!(row.tmdb_id > 0) || row.tmdb_id === self.tmdb_id) continue;
+        for (const url of porId.get(String(row.id)) || []) ajenas.add(url);
+      }
+    } catch {}
+
+    return ajenas;
+  }
+
   /** scrapeDetail con techo de latencia: una fuente lenta no puede bloquear la respuesta. */
   private static async scrapeDetailWithTimeout(url: string, ms: number = 2500): Promise<MediaItem | null> {
     const timeout = new Promise<null>(resolve => setTimeout(() => resolve(null), ms));
@@ -1211,8 +1290,13 @@ export class CatalogService {
       // acabamos de scrapear dice su año: si desmiente al de la ficha, sus servidores no son de
       // esta obra. No se le exige que el título coincida —los nombres regionales de la misma
       // película no se parecen: "En la tormenta" ES "Sin salida"—, solo que el año no lo desmienta.
+      // Y las que son la página propia de otra ficha se caen aunque el año cuadre: ahí está el
+      // resto de homónimos, los del MISMO año, que ninguna fecha puede separar.
+      const deOtraFicha = await this.paginasDeOtraFicha(details.map(d => d.url), result);
+
       const intrusas = details.filter(d =>
-        d.detail && !esPaginaPropia(result.id, d.url) && anosIncompatibles(result, d.detail)
+        d.detail && !esPaginaPropia(result.id, d.url, result.type) &&
+        (deOtraFicha.has(d.url) || anosIncompatibles(result, d.detail))
       );
 
       // Las intrusas se expulsan ANTES de adoptar nada, para que un embed que además sirviera una
@@ -1255,6 +1339,12 @@ export class CatalogService {
       // Candidatos por título de AMBAS fuentes (scrapeRealMovies itera tioplus + fuegocine).
       const candidates = await RealScraperService.scrapeRealMovies(result.title, 8).catch(() => [] as MediaItem[]);
 
+      // Las que ya son de otra ficha se descartan antes de mirarles el año: es el único filtro que
+      // pilla a los homónimos del MISMO año, y con títulos idénticos el año no separa nada.
+      const deOtraFicha = await this.paginasDeOtraFicha(
+        candidates.map(c => (c as any)._tioplus_url), result
+      );
+
       const sourceUrls: string[] = [];
       for (const cand of candidates) {
         const url = (cand as any)._tioplus_url as string | undefined;
@@ -1262,9 +1352,11 @@ export class CatalogService {
         // La página de la que SALIÓ la ficha no necesita demostrar nada: es suya. Importa porque
         // es la única de la que a veces no se puede sacar el año, y porque una ficha sin
         // `source_url` guardada (filas antiguas) la descubre justamente aquí.
-        const esPropia = !!url && esPaginaPropia(result.id, url);
+        const esPropia = !!url && esPaginaPropia(result.id, url, result.type);
 
         if (!esPropia) {
+          // Hay prueba de que es de otra obra: se descarta y NO cuenta como indecidible.
+          if (url && deOtraFicha.has(url)) continue;
           const veredicto = mismaObra(result, cand);
           if (veredicto === 'sin-pruebas') indecidibles++;
           if (veredicto !== 'misma') continue;

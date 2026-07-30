@@ -45,3 +45,34 @@ jobs:
           # Necesaria para escribir en media_items (la tabla tiene RLS activado)
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: npx ts-node scripts/refreshCatalog.ts --streams=300 --verify=500
+
+      # RED DE SEGURIDAD — que ninguna ficha sirva el vídeo de otra película.
+      #
+      # El catálogo está lleno de homónimos exactos ("Sin salida" son cuatro películas, "Carrie"
+      # tres) y el título con el que se muestra una ficha es el de TMDB en español, el que más
+      # colisiona. Cualquier emparejado que no compruebe el año acaba mezclando obras distintas,
+      # y entonces la ficha entrega servidores que no le corresponden.
+      #
+      # La API y el crawl ya exigen prueba de identidad antes de fundir nada, así que esto no
+      # debería encontrar trabajo. Se ejecuta igualmente todos los días porque el fallo es
+      # silencioso —se ve al pulsar Reproducir, no en ningún error— y porque las fuentes cambian
+      # sus páginas cuando quieren. Retira lo que se cuele y lo deja anotado en el log.
+      - name: Retirar fuentes que pertenecen a otra película
+        if: always()
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx ts-node scripts/repairCatalog.ts --fuentes --apply
+
+      # Y se comprueba que la invariante quedó limpia: si el paso anterior no pudo con algo, esto
+      # FALLA y la corrida sale en rojo, que es la única forma de que no pase desapercibido.
+      - name: Comprobar que cada ficha sirve su propio contenido
+        if: always()
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx ts-node scripts/checkCatalog.ts --fallar-si-hay-cruces

@@ -2,12 +2,15 @@
  * Diagnóstico del estado real del catálogo en Supabase.
  *
  *   npm run check:catalog
+ *   npm run check:catalog -- --fallar-si-hay-cruces   # sale con error si hay contenido cruzado
  *
  * Responde de un vistazo a "¿se aplicaron las migraciones?" y "¿llegó a correr el crawl?",
- * que son las dos cosas de las que depende que la ficha emergente abra al instante.
+ * que son las dos cosas de las que depende que la ficha emergente abra al instante, y a la que
+ * no puede fallar nunca: "¿cada película y cada serie sirve SU contenido y no el de otra?".
  */
 import 'dotenv/config';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
+import { candidateIdsForUrl } from '../src/services/catalogService';
 
 const db = getSupabaseAdmin();
 
@@ -24,6 +27,62 @@ async function countWhere(apply: (q: any) => any): Promise<number> {
   const { count, error } = await apply(db.from('media_items').select('id', { count: 'exact', head: true }));
   if (error) return -1;
   return count ?? 0;
+}
+
+/**
+ * AUDITORÍA DE CONTENIDO CRUZADO — ¿alguna ficha saca servidores de la página de otra?
+ *
+ * `source_urls` dice de qué páginas sale el vídeo de una ficha. Que ahí aparezca la página de
+ * OTRA ficha del catálogo es prueba definitiva de contaminación, y se comprueba sin salir a la
+ * red: el id de cada fila ES el slug de su propia página de origen, así que basta preguntar quién
+ * es el dueño de cada url y ver si es alguien con otro tmdb_id.
+ *
+ * Es la invariante que no debe romperse nunca: toda película y serie sirve SU contenido. Si esto
+ * devuelve algo, hay una vía de fusión sin comprobar el año → `repair:catalog --fuentes` lo
+ * limpia, pero además hay que encontrar por dónde entró.
+ */
+async function auditCrossedContent(): Promise<{ cruzadas: number; ejemplos: string[] }> {
+  const rows: any[] = [];
+  const PAGE = 1000;
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await db
+      .from('media_items')
+      .select('id,tmdb_id,type,title,release_date,source_url,source_urls')
+      .range(from, from + PAGE - 1);
+    if (error) return { cruzadas: -1, ejemplos: [`no se pudo leer: ${error.message}`] };
+    if (!data || data.length === 0) break;
+    rows.push(...data);
+    if (data.length < PAGE) break;
+  }
+
+  const byId = new Map<string, any>(rows.map(r => [String(r.id), r]));
+
+  // Los moldes con los que cada fuente forma el id de su fila viven en catalogService, para que
+  // la auditoría y las purgas no puedan discrepar sobre quién es el dueño de una página.
+  const ownerOf = (url: string): any =>
+    candidateIdsForUrl(url).map(c => byId.get(c)).find(Boolean);
+
+  let cruzadas = 0;
+  const ejemplos: string[] = [];
+
+  for (const row of rows) {
+    for (const url of (row.source_urls || []).filter(Boolean) as string[]) {
+      const owner = ownerOf(url);
+      if (!owner || owner.id === row.id) continue;
+      // Dos filas distintas con el MISMO tmdb_id real son la misma obra duplicada (pendiente de
+      // fundir), no contenido cruzado.
+      if (!(owner.tmdb_id > 0) || !(row.tmdb_id > 0) || owner.tmdb_id === row.tmdb_id) continue;
+      cruzadas++;
+      if (ejemplos.length < 10) {
+        ejemplos.push(
+          `"${row.title}" (${String(row.release_date || '').slice(0, 4) || '?'}, tmdb ${row.tmdb_id})` +
+          ` saca vídeo de la página de "${owner.title}" (${String(owner.release_date || '').slice(0, 4) || '?'}, tmdb ${owner.tmdb_id})\n        ${url}`
+        );
+      }
+    }
+  }
+
+  return { cruzadas, ejemplos };
 }
 
 function bar(done: number, total: number): string {
@@ -69,6 +128,27 @@ async function main() {
   console.log(`   Con duración (runtime):     ${withRuntime}/${total}  ${bar(withRuntime, total)}`);
   console.log(`   Con logo para el hero:      ${withLogo}/${total}  ${bar(withLogo, total)}`);
   console.log(`   Etiquetadas como anime:     ${anime}`);
+
+  // ── Paso 3: contenido cruzado ──────────────────────────────────────────────
+  const cruce = await auditCrossedContent();
+  console.log('\nPASO 3 · Cada ficha sirve SU contenido');
+  if (cruce.cruzadas < 0) {
+    console.log(`   ⚠ ${cruce.ejemplos[0]}`);
+  } else if (cruce.cruzadas === 0) {
+    console.log('   ✅ Ninguna ficha saca vídeo de la página de otra.');
+  } else {
+    console.log(`   ❌ ${cruce.cruzadas} fuente(s) pertenecen a OTRA ficha del catálogo:`);
+    for (const e of cruce.ejemplos) console.log(`      · ${e}`);
+    console.log('\n      Límpialo con:  npm run repair:catalog -- --fuentes --apply');
+    console.log('      Y averigua por dónde entró: alguna fusión está emparejando sin comprobar el año.');
+  }
+
+  // Con --fallar-si-hay-cruces el script sale con código 1: es lo que pone en rojo la corrida
+  // diaria del workflow si alguna vía de fusión vuelve a mezclar películas.
+  if (cruce.cruzadas > 0 && process.argv.includes('--fallar-si-hay-cruces')) {
+    console.log('\n❌ La invariante está rota: hay fichas sirviendo contenido de otras.\n');
+    process.exit(1);
+  }
 
   console.log('\n══ Veredicto ══\n');
   if (withSourceUrl === 0) {

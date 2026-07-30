@@ -50,7 +50,7 @@ import { getSupabaseAdmin } from '../src/services/supabaseService';
 import { canonicalTitle, normalizeTitle, searchIndexKey, dedupeTitles, sourceTitleFromSlug } from '../src/utils/text';
 // La puerta de identidad de las fuentes vive en catalogService: el script y la API tienen que
 // decidir lo MISMO sobre qué página pertenece a qué ficha.
-import { esPaginaPropia } from '../src/services/catalogService';
+import { esPaginaPropia, candidateIdsForUrl } from '../src/services/catalogService';
 import { MediaItem, ContentType } from '../src/types';
 
 const db = getSupabaseAdmin();
@@ -436,7 +436,7 @@ async function fuseSyntheticDuplicates(apply: boolean, limitArg?: number): Promi
 
       const { data: clash } = await db
         .from('media_items')
-        .select('id,title,original_title,aliases,source_url,source_urls')
+        .select('id,title,original_title,aliases,release_date,source_url,source_urls')
         .eq('tmdb_id', match.id)
         .neq('id', row.id)
         .limit(1);
@@ -475,6 +475,17 @@ async function fuseSyntheticDuplicates(apply: boolean, limitArg?: number): Promi
       if (!confirmed) {
         skipped++;
         console.log(`   ! ${row.id}\n     "${row.title}" → tmdb ${match.id} = "${twin.title}", pero TMDB no registra ese nombre para la ficha: no se funde`);
+        continue;
+      }
+
+      // Tercera llave: la época. Un remake registra en TMDB los mismos nombres que el original
+      // —los confirma la llave anterior sin pestañear— y aun así es otra película con otros
+      // servidores. Con el año en la mano no hay que suponer nada.
+      const twinYear = Number(String(twin.release_date || '').slice(0, 4)) || Number(sourceTitleFromId(twin.id).year) || 0;
+      const rowYear = Number(year) || 0;
+      if (rowYear && twinYear && Math.abs(rowYear - twinYear) > 1) {
+        skipped++;
+        console.log(`   ! ${row.id}\n     "${row.title}" (${rowYear}) ~ ${twin.id} = "${twin.title}" (${twinYear}): mismo nombre, otra época — no se funde`);
         continue;
       }
 
@@ -636,13 +647,29 @@ async function rewriteRowFromMatch(
  * Lo único que la copia aporta son su(s) página(s) de origen —sus servidores, a menudo de otra
  * fuente distinta a la de la gemela— y sus nombres: se vuelcan en la canónica ANTES de borrar,
  * o al eliminar la fila se perderían enlaces de reproducción.
+ *
+ * Es el ÚNICO sitio del script por el que las fuentes de una fila pasan a otra, así que aquí se
+ * pone la última reja: si las dos fichas no son de la misma época, no son la misma obra y no se
+ * funde nada, diga lo que diga el tmdb_id. Cuesta poco y cierra la vía por la que una película
+ * termina sirviendo el vídeo de otra.
  */
 async function fuseRowInto(
   row: any,
   twin: any,
   extraAliases: string[],
   opts: { apply: boolean; withMultiSource: boolean }
-): Promise<{ ok: boolean; urls: [number, number]; aliases: [number, number] }> {
+): Promise<{ ok: boolean; urls: [number, number]; aliases: [number, number]; rechazada?: string }> {
+  const yearA = Number(String(row.release_date || '').slice(0, 4)) || Number(sourceTitleFromId(row.id).year) || 0;
+  const yearB = Number(String(twin.release_date || '').slice(0, 4)) || Number(sourceTitleFromId(twin.id).year) || 0;
+  if (yearA && yearB && Math.abs(yearA - yearB) > 1) {
+    return {
+      ok: false,
+      urls: [0, 0],
+      aliases: [0, 0],
+      rechazada: `"${row.title}" (${yearA}) y "${twin.title}" (${yearB}) no son de la misma época`
+    };
+  }
+
   const currentUrls: string[] = twin.source_urls || [];
   const mergedUrls = Array.from(new Set(
     [...currentUrls, twin.source_url, ...(row.source_urls || []), row.source_url].filter(Boolean) as string[]
@@ -711,8 +738,8 @@ async function relocateOccupant(
   const { data: nextClash } = await db
     .from('media_items')
     .select(opts.withMultiSource
-      ? 'id,type,title,original_title,aliases,source_url,source_urls'
-      : 'id,type,title,original_title,aliases,source_url')
+      ? 'id,type,title,original_title,aliases,release_date,source_url,source_urls'
+      : 'id,type,title,original_title,aliases,release_date,source_url')
     .eq('tmdb_id', own.id)
     .neq('id', twin.id)
     .limit(1);
@@ -728,6 +755,7 @@ async function relocateOccupant(
       return { freed: false, reason: `su id correcto (${own.id}) lo ocupa una ficha de otro catálogo` };
     }
     const merged = await fuseRowInto(twin, owner, [signals.title], opts);
+    if (merged.rechazada) return { freed: false, reason: `no se funde: ${merged.rechazada}` };
     if (!merged.ok) return { freed: false, reason: 'no se pudo fundir con su ficha oficial' };
     console.log(
       `     ↳ se desaloja ${twin.id}: "${twin.title}" era un duplicado de ${owner.id} = "${owner.title}" (tmdb ${own.id}), su página dice "${signals.title}" ${signals.year || 's/a'}` +
@@ -881,8 +909,8 @@ async function verifyAgainstSource(apply: boolean, limitArg?: number, restart = 
       }
 
       const clashColumns = withMultiSource
-        ? 'id,tmdb_id,type,title,original_title,aliases,source_url,source_urls'
-        : 'id,tmdb_id,type,title,original_title,aliases,source_url';
+        ? 'id,tmdb_id,type,title,original_title,aliases,release_date,source_url,source_urls'
+        : 'id,tmdb_id,type,title,original_title,aliases,release_date,source_url';
       const { data: clash } = await db
         .from('media_items').select(clashColumns).eq('tmdb_id', match.id).neq('id', row.id).limit(1);
 
@@ -929,6 +957,11 @@ async function verifyAgainstSource(apply: boolean, limitArg?: number, restart = 
       // fuente) y su nombre: se vuelcan en la canónica ANTES de borrarla o se perderían enlaces.
       if (twin) {
         const merged = await fuseRowInto(row, twin, [signals.title], { apply, withMultiSource });
+        if (merged.rechazada) {
+          blocked++;
+          console.log(`   ! ${row.id}\n     comparte tmdb ${match.id} con ${twin.id} pero NO se funde: ${merged.rechazada}`);
+          continue;
+        }
         if (!merged.ok) continue;
         console.log(
           `   ⇄ ${row.id}\n     "${row.title}" (tmdb ${row.tmdb_id}) era en realidad "${signals.title}" = tmdb ${match.id}, que ya es ${twin.id} = "${twin.title}"` +
@@ -1063,10 +1096,14 @@ async function unfuseWrongMerges(apply: boolean): Promise<void> {
  * (2014), No Exit (2022) y The Firm (1993, que en es-MX se titula igual).
  *
  * La puerta de identidad de catalogService ya no lo permite, pero lo que se escribió sigue ahí.
- * Este modo vuelve a cada página de origen (UNA petición ligera: `fetchSourceSignals`, que no
- * resuelve servidores) y la interroga con las dos llaves que separan obras distintas:
+ * Este modo interroga cada página de origen con las tres llaves que separan obras distintas:
  *
- *   1. el AÑO — destapa los homónimos, que son el caso masivo;
+ *   0. el DUEÑO — que la página sea la de otra ficha del catálogo con distinto tmdb_id es prueba
+ *      definitiva, y sale del propio catálogo sin gastar una petición. Es además la única llave
+ *      que separa homónimos del MISMO año, donde la fecha no distingue nada ("El botín" son dos
+ *      películas de 2026);
+ *   1. el AÑO — destapa los homónimos de otra época, que son el caso masivo (una petición
+ *      ligera por página: `fetchSourceSignals`, que no resuelve servidores);
  *   2. el NOMBRE — para lo que el año no separa (dos estrenos del mismo año). Comparar los
  *      títulos MOSTRADOS entre sí no vale: los nombres regionales de la misma película no se
  *      parecen ("En la tormenta" y "Sin salida" son las dos No Exit 2022; "Ella" es "Her"), y
@@ -1103,13 +1140,25 @@ async function purgeIntruderSources(apply: boolean, limitArg?: number): Promise<
     if (data.length < PAGE) break;
   }
 
-  // Solo las multifuente pueden tener intrusas: con una sola url, esa url ES la ficha.
-  const multi = rows.filter(r => (r.source_urls || []).filter(Boolean).length > 1);
-  console.log(`   ${multi.length}/${rows.length} fichas con más de una fuente`);
+  // Índice de "quién es el dueño de cada página", para la llave 0 (ver más abajo).
+  const byId = new Map<string, any>(rows.map(r => [String(r.id), r]));
+  const ownerOf = (url: string): any =>
+    candidateIdsForUrl(url).map(c => byId.get(c)).find(Boolean);
+
+  // Se revisa toda ficha con alguna fuente que NO sea su propia página. Suele ser una fusión
+  // legítima (la misma película en las dos fuentes), pero es el único sitio donde puede haberse
+  // colado la página de otra obra. Ojo: no basta con mirar las multifuente — una ficha puede
+  // tener UNA sola url y que sea de otra película ("Moon Knight" apuntaba a la serie "Mo"), y ese
+  // es justo el caso peor, porque entonces TODO lo que sirve es ajeno.
+  const multi = rows.filter(r =>
+    ((r.source_urls || []).filter(Boolean) as string[]).some(u => !esPaginaPropia(r.id, u, r.type === 'tvseries' ? 'tvseries' : 'movie'))
+  );
+  console.log(`   ${multi.length}/${rows.length} fichas con alguna fuente que no es su propia página`);
 
   const targets = Number.isFinite(limitArg) && (limitArg as number) > 0 ? multi.slice(0, limitArg) : multi;
   let depuradas = 0;
   let intrusasTotales = 0;
+  let porDuenno = 0;
   let porAno = 0;
   let porNombre = 0;
   let sinAno = 0;
@@ -1129,7 +1178,30 @@ async function purgeIntruderSources(apply: boolean, limitArg?: number): Promise<
         // el dato dudoso es el `release_date` guardado. Se reconoce por el id de la fila, que ES
         // el slug de su fuente, y no por el título —comparar títulos es justo lo que confunde
         // homónimos: `carrie-2002` no debe reconocer como propia la página `carrie-1976`—.
-        if (sourceUrlOf(row) === url || esPaginaPropia(row.id, url)) {
+        // LLAVE 0 — la página es la de OTRA ficha del catálogo, con otro tmdb_id. Prueba
+        // definitiva y gratis: no hace falta ni visitarla. Es además la ÚNICA que separa
+        // homónimos del mismo año, donde la fecha ya no distingue nada ("El botín" son dos
+        // películas de 2026, "Sola" dos de 2020). Si las dos filas resultan ser la misma obra con
+        // el tmdb_id mal puesto, quitar la fuente ajena tampoco hace daño: cada ficha se queda
+        // con su página, y fundirlas es trabajo de --fuse / --verify, que sí comprueban identidad.
+        //
+        // Va PRIMERO, antes incluso de la excepción de "es su propia página": una fila puede tener
+        // apuntada como principal la página de otra obra —"Moon Knight" apuntaba a la serie "Mo"—
+        // y en ese caso lo que está mal es justamente el `source_url` guardado.
+        const owner = ownerOf(url);
+        if (owner && owner.id !== row.id && owner.tmdb_id > 0 && row.tmdb_id > 0 && owner.tmdb_id !== row.tmdb_id) {
+          return {
+            url,
+            intrusa: true,
+            motivo: `es la página propia de "${owner.title}" (${String(owner.release_date || '').slice(0, 4) || '?'}, tmdb ${owner.tmdb_id})`
+          };
+        }
+
+        // La página de la que SALIÓ la ficha no se juzga por las llaves difusas: si algo no cuadra
+        // con ella, el dato dudoso es el `release_date` guardado. Se reconoce por el id de la fila
+        // —que ES el slug de su fuente— y, para los ids que no derivan de la url (basura del CMS),
+        // por lo que quedó apuntado como fuente principal.
+        if (sourceUrlOf(row) === url || esPaginaPropia(row.id, url, type)) {
           return { url, intrusa: false, motivo: 'su propia página' };
         }
 
@@ -1182,6 +1254,7 @@ async function purgeIntruderSources(apply: boolean, limitArg?: number): Promise<
 
       const kept = veredictos.filter(v => !v.intrusa).map(v => v.url);
       intrusasTotales += intrusas.length;
+      porDuenno += intrusas.filter(v => v.motivo.includes('es la página propia de')).length;
       porAno += intrusas.filter(v => v.motivo.includes('≠ ficha de')).length;
       porNombre += intrusas.filter(v => v.motivo.includes('no es ninguno')).length;
 
@@ -1219,7 +1292,7 @@ async function purgeIntruderSources(apply: boolean, limitArg?: number): Promise<
   // El desglose importa: lo que destapa el año es inequívoco (mismo nombre, otra época), mientras
   // que lo que destapa el nombre depende de que la ficha esté bien emparejada con TMDB — si su
   // tmdb_id es el de otra película, lo que sobra es la ficha y no la fuente (ver --verify).
-  console.log(`   por el año: ${porAno} · por el nombre: ${porNombre}`);
+  console.log(`   porque la página es de otra ficha: ${porDuenno} · por el año: ${porAno} · por el nombre: ${porNombre}`);
   if (sinAno > 0) console.log(`   ${sinAno} fuente(s) sin nada con que comprobarlas: se conservan (no hay prueba en contra).`);
   if (depuradas > 0) {
     console.log('   Sus enlaces se rehacen solos en la próxima apertura, o de golpe con `npm run refresh:catalog`.');
