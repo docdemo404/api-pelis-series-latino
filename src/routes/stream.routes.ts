@@ -412,6 +412,28 @@ function sendRedirect(res: Response, url: string): void {
   res.redirect(302, url);
 }
 
+/**
+ * PLAZOS DEL CAMINO DE REPRODUCCIÓN.
+ *
+ * Los timeouts de dentro son POR PETICIÓN, y acuñar un vídeo son varias encadenadas: se midió un
+ * 502 tardando 54 s. Para quien está mirando la pantalla, un "no" rápido vale mucho más que un
+ * "no" exacto: con él el reproductor pasa al servidor siguiente en un segundo. Estos topes son
+ * para el CAMINO DE FALLO — cuando todo va bien, la respuesta llega mucho antes.
+ */
+const ACUNADO_MAX_MS = 6000;
+const COMPROBACION_MAX_MS = 4000;
+
+/** Tope para una promesa del camino de reproducción; al pasarse se sigue con el respaldo. */
+function conPlazo<T>(promesa: Promise<T>, ms: number, respaldo: T): Promise<T> {
+  return new Promise<T>(resolve => {
+    const reloj = setTimeout(() => resolve(respaldo), ms);
+    promesa.then(
+      v => { clearTimeout(reloj); resolve(v); },
+      () => { clearTimeout(reloj); resolve(respaldo); }
+    );
+  });
+}
+
 // Vídeo directo de un embed: acuña la URL real y la sirve. Es lo que apunta `direct_stream`.
 router.get(DIRECT_BASE, async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -423,8 +445,15 @@ router.get(DIRECT_BASE, async (req: Request, res: Response, next: NextFunction) 
 
     // En paralelo: el presupuesto es un viaje a KV que no depende del acuñado, y encadenarlos
     // sumaba su latencia al tiempo hasta el primer fotograma sin ninguna razón.
+    //
+    // Y CON PLAZO. Acuñar el vídeo son varias peticiones al host y a su CDN, cada una con su
+    // timeout (8 s la extracción, 15 s el manifiesto), y encadenadas llegaban a 54 SEGUNDOS
+    // medidos antes de contestar un 502 — un minuto de pantalla negra para acabar diciendo que
+    // no. Lo que le sirve al reproductor es enterarse RÁPIDO de que este servidor no va, para
+    // pasar al siguiente: por eso el fallo tiene su propio tope, mucho más corto que la suma de
+    // los timeouts de dentro.
     const [minted, overBudget] = await Promise.all([
-      mintDirect(embedUrl),
+      conPlazo(mintDirect(embedUrl), ACUNADO_MAX_MS, null),
       BandwidthService.isOverBudget(),
     ]);
     if (!minted) {
@@ -455,7 +484,13 @@ router.get(DIRECT_BASE, async (req: Request, res: Response, next: NextFunction) 
     // el mismo 403, y no hay cabecera que lo salve porque a `redirect` solo se llega cuando el
     // host no exige ninguna. En los demás modos se sigue perdonando — esas peticiones las hacemos
     // nosotros, con el Referer bueno, y un 403 aislado puede no repetirse.
-    const veredicto = await comprobarDestino(minted, { entregaLiteral: mode === 'redirect', embedUrl });
+    const veredicto = await conPlazo(
+      comprobarDestino(minted, { entregaLiteral: mode === 'redirect', embedUrl }),
+      COMPROBACION_MAX_MS,
+      // Si la comprobación no llega a tiempo NO se condena el servidor: se entrega y que lo diga
+      // el reproductor. Condenar por lentitud enterraría CDN lentos que sí sirven vídeo.
+      { veredicto: 'desconocido' as const, universal: false }
+    );
     if (veredicto.motivo) {
       console.warn(`[direct] ${veredicto.veredicto} (${veredicto.motivo}): ${minted.url.slice(0, 90)}`);
     }
