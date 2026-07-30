@@ -239,8 +239,28 @@ function similarity(a: string, b: string): number {
   const sb = sequelNumber(b);
   if ((sa ?? 1) !== (sb ?? 1)) return 0;
 
-  if (ca.startsWith(cb) || cb.startsWith(ca)) return 0.85;
-  if (ca.includes(cb) || cb.includes(ca)) return 0.7;
+  /**
+   * Prefijo y substring se miden por PALABRAS COMPLETAS, no por caracteres.
+   *
+   * Sobre la clave canónica —que va sin espacios— "humo" es prefijo de "humoreinereisemitbully",
+   * así que "Humo" (2025) puntuaba 0,85 contra el documental alemán "Humor - Eine Reise mit
+   * Bully" (2025) y, cuadrando el año, se daba por respaldado: la ficha se quedó con esa
+   * carátula y esa sinopsis. Cortando por palabras la coincidencia desaparece, porque la palabra
+   * es "humor" y no "humo".
+   *
+   * Los casos legítimos son subtítulos, y esos empiezan justo en un límite de palabra: "Carrie" ⊂
+   * "Carrie: un extraño presentimiento", "Avengers 2" ⊂ "Avengers 2: Era de Ultrón". Siguen
+   * puntuando igual. Y la equivalencia "Spider-Man" == "spiderman" no se toca: la resuelve la
+   * comparación exacta de arriba, que sí es sin espacios.
+   */
+  const wa = normalizeTitle(a).replace(/[^a-z0-9]+/g, ' ').trim();
+  const wb = normalizeTitle(b).replace(/[^a-z0-9]+/g, ' ').trim();
+  if (wa && wb) {
+    const empiezaPor = (corto: string, largo: string) => largo.startsWith(`${corto} `);
+    if (empiezaPor(wa, wb) || empiezaPor(wb, wa)) return 0.85;
+    const contiene = (corto: string, largo: string) => ` ${largo} `.includes(` ${corto} `);
+    if (contiene(wa, wb) || contiene(wb, wa)) return 0.7;
+  }
 
   const tokens = (s: string) => new Set(normalizeTitle(s).split(/[^a-z0-9]+/).filter(Boolean));
   const ta = tokens(a);
