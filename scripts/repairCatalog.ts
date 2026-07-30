@@ -72,6 +72,7 @@ import { canonicalTitle, normalizeTitle, searchIndexKey, dedupeTitles, sourceTit
 import { CatalogService, esPaginaPropia, candidateIdsForUrl, tipoDeLaRuta } from '../src/services/catalogService';
 import { CacheStore } from '../src/cache/store';
 import { inspectEmbed } from '../src/scrapers/embedHealth';
+import { bestMode, policyFor } from '../src/scrapers/hostPolicy';
 import { MediaItem, ContentType } from '../src/types';
 
 const db = getSupabaseAdmin();
@@ -2111,6 +2112,89 @@ async function repairFillerOverviews(apply: boolean, limitArg?: number): Promise
   await purgarCacheDeTocadas(apply);
 }
 
+/**
+ * MODOS DE ENTREGA OBSOLETOS (`--modos`).
+ *
+ * Cada servidor lleva guardado un `direct_mode` que dice cómo se le va a entregar el vídeo
+ * (302 al CDN, manifiesto desde aquí, o reenvío de bytes). Es un ANUNCIO: la decisión real la
+ * vuelve a tomar /api/v1/stream/direct al reproducir, así que un valor viejo no rompe la
+ * reproducción desde un navegador.
+ *
+ * Pero sí engaña a los clientes nativos, que leen ese campo para decidir si piden
+ * `?mode=redirect` y se ahorran el proxy. Y sobre todo: cada vez que se corrige una política de
+ * host, los 16.000 servidores ya guardados se quedan anunciando la política vieja hasta que
+ * vuelva a pasar el crawl por cada ficha — semanas.
+ *
+ * Pasó al descubrir que emturbovid disfraza sus segmentos de PNG: dejó de ser `redirect` y pasó
+ * a `proxy`, y las fichas seguían diciendo `redirect`. Esto lo recalcula sin tocar la red —es
+ * pura política, `bestMode` sobre la url del embed— así que cuesta lo que una escritura.
+ *
+ *   npm run repair:catalog -- --modos            # mide
+ *   npm run repair:catalog -- --modos --apply    # y los reescribe
+ */
+async function repairStaleModes(apply: boolean, limitArg?: number): Promise<void> {
+  console.log(`🔀 Buscando modos de entrega obsoletos${apply ? '' : ' (dry-run: no se escribe nada)'}...`);
+  const rows = (await fetchAllRows(['servers'])).filter(r => (r.servers || []).length > 0);
+
+  let fichasTocadas = 0;
+  let servidoresCambiados = 0;
+  const cambios = new Map<string, number>();
+
+  const objetivo = rows.slice(0, Number.isFinite(limitArg as number) ? limitArg : undefined);
+
+  for (const row of objetivo) {
+    let cambio = false;
+    const servers = (row.servers || []).map((s: any) => {
+      if (!s?.embed_url || !s.direct_stream) return s;
+
+      /**
+       * SOLO SE TOCA LO QUE ES FALSO PARA CUALQUIER CLIENTE. El resto se deja en paz.
+       *
+       * `manifest` y `redirect` no son mejores o peores en abstracto: dependen de lo que el
+       * cliente sepa hacer, y la ruta lo recalcula en cada reproducción con esa información. Al
+       * probar esto sin acotar salían 2.853 cambios `manifest → proxy` de la familia upns —
+       * todos a PEOR: `manifest` es exactamente lo que le corresponde a un navegador que manda
+       * Referer, y reescribirlo habría metido su vídeo por el proxy sin motivo, pagando tránsito
+       * por una "corrección" que empeora.
+       *
+       * Lo que sí es falso para todos es anunciar un 302 en un host cuya política obliga a
+       * proxear pase lo que pase: porque ata por IP, o —el caso de emturbovid— porque sus bytes
+       * no son vídeo hasta que se los desenvolvemos aquí. Ahí ningún cliente puede, y el anuncio
+       * lleva al cliente nativo a pedir `?mode=redirect` y quedarse sin reproducir.
+       *
+       * Y `public` es un modo retirado (ya no se publica ninguna url cruda de CDN): esos se
+       * recalculan siempre.
+       */
+      const politica = policyFor(s.embed_url);
+      const obligaProxy = politica.ipBound || politica.segmentosDisfrazados === true;
+      const esLegado = s.direct_mode === 'public';
+      const anunciaEntregaDirecta = s.direct_mode === 'redirect' || s.direct_mode === 'manifest';
+      if (!esLegado && !(obligaProxy && anunciaEntregaDirecta)) return s;
+
+      const modo = bestMode(s.embed_url, s.direct_kind === 'mp4' ? 'mp4' : 'hls');
+      if (modo === s.direct_mode) return s;
+      cambios.set(`${s.direct_mode} → ${modo}`, (cambios.get(`${s.direct_mode} → ${modo}`) || 0) + 1);
+      servidoresCambiados++;
+      cambio = true;
+      return { ...s, direct_mode: modo };
+    });
+    if (!cambio) continue;
+
+    fichasTocadas++;
+    if (!apply) continue;
+    marcarTocada(row);
+    const { error } = await db.from('media_items').update({ servers }).eq('id', row.id);
+    if (error) console.warn(`   ⚠ ${row.id}: ${error.message}`);
+  }
+
+  console.log(`\n🔀 ${servidoresCambiados} servidores con el modo desactualizado en ${fichasTocadas} fichas`);
+  for (const [c, n] of Array.from(cambios).sort((a, b) => b[1] - a[1])) {
+    console.log(`   ${String(n).padStart(6)}  ${c}`);
+  }
+  console.log(apply ? '   ✅ reescritos' : '   (dry-run: repite con --apply)');
+  await purgarCacheDeTocadas(apply);
+}
+
 async function main() {
   const apply = process.argv.includes('--apply');
   // Elimina las filas duplicadas cuya versión correcta ya existe en el catálogo.
@@ -2175,6 +2259,11 @@ async function main() {
 
   if (process.argv.includes('--fuentes')) {
     await purgeIntruderSources(apply, Number.isFinite(limitArg) ? limitArg : undefined);
+    return;
+  }
+
+  if (process.argv.includes('--modos')) {
+    await repairStaleModes(apply, Number.isFinite(limitArg) ? limitArg : undefined);
     return;
   }
 
