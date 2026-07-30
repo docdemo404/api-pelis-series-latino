@@ -2,6 +2,7 @@ import { ServerOption } from '../types';
 import { CacheStore } from '../cache/store';
 import { mintDirect, MintedStream } from './directResolver';
 import { unwrapRedirector, describeDirect } from '../scrapers/directStream';
+import { verifyEmbedStatus } from '../scrapers/embedHealth';
 import {
   bajarManifiesto,
   revisarManifiesto,
@@ -288,6 +289,17 @@ const MINIMO_PARA_SONDEAR_MS = 600;
  * revienta entera: medido, dos comprobaciones seguidas se fueron a 6,3 s con 4 s de tope. Los
  * timeouts de axios (8 s el sondeo, 15 s el manifiesto) son por petición, no por pasada.
  */
+/** Tope de tiempo para cualquier promesa; si se pasa o falla, se queda con el valor de respaldo. */
+function conTopeSimple<T>(promesa: Promise<T>, ms: number, respaldo: T): Promise<T> {
+  return new Promise<T>(resolve => {
+    const reloj = setTimeout(() => resolve(respaldo), Math.max(0, ms));
+    promesa.then(
+      valor => { clearTimeout(reloj); resolve(valor); },
+      () => { clearTimeout(reloj); resolve(respaldo); }
+    );
+  });
+}
+
 function conTope<T extends Comprobacion>(promesa: Promise<T>, ms: number): Promise<T | Comprobacion> {
   return new Promise<T | Comprobacion>(resolve => {
     const reloj = setTimeout(() => resolve(VIVO_DESCONOCIDO), Math.max(0, ms));
@@ -346,9 +358,39 @@ export async function revisarServidores(
     let sinVideo = false;
 
     if (!veredicto) {
-      // Los que no anuncian vídeo directo no se sondean: no hay nada que acuñar y lo único que
-      // se les puede mirar es el embed, que es justo lo que ya miró el scraper.
-      if (!servidor.direct_stream) continue;
+      /**
+       * SIN VÍDEO DIRECTO: se le vuelve a mirar el EMBED.
+       *
+       * Antes se saltaban con el argumento de que su embed ya lo miró el scraper. Pero ese
+       * veredicto es de cuando se scrapeó —puede ser de hace semanas— y un enlace que ha muerto
+       * desde entonces se sigue entregando como `online`. Es lo que quedaba dando error en las
+       * series: los embeds puros nunca se volvían a comprobar.
+       *
+       * `inspectEmbed` es la misma comprobación del scraper, así que reconoce lo que ya sabía
+       * reconocer: el 404, el "file not found" servido con 200, el redirector que ya no lleva a
+       * ninguna parte y los reproductores por hash cuya API dice que el vídeo no está. Lo que NO
+       * puede es juzgar a los que sirven una SPA —filemoon devuelve la misma página exista el
+       * vídeo o no—: esos se dejan como están, porque condenarlos por no traer reproductor en el
+       * HTML se llevaría por delante a los que sí funcionan.
+       *
+       * Cuesta lo mismo que una sonda y sale del mismo cupo, así que no cambia el presupuesto.
+       */
+      if (!servidor.direct_stream) {
+        const queda = limite - Date.now();
+        if (sondeados >= maximo || queda < MINIMO_PARA_SONDEAR_MS) continue;
+        sondeados++;
+        const estado = await conTopeSimple(verifyEmbedStatus(servidor.embed_url), queda, 'online');
+        if (estado === 'offline') {
+          console.warn(`[salud] ${servidor.embed_url.slice(0, 70)} embed caído`);
+          salida[i] = sinVideoDirecto({ ...servidor, status: 'offline' });
+          continue;
+        }
+        if (servidor.status !== 'online') {
+          salida[i] = { ...servidor, status: 'online', last_checked: new Date().toISOString() };
+        }
+        if (hastaElPrimeroUtil) break;
+        continue;
+      }
       const queda = limite - Date.now();
       // Agotado el cupo o el tiempo se deja de SONDEAR, pero se sigue recorriendo la lista: lo
       // que ya esté en memoria se aplica igual y no cuesta nada. Cortar aquí dejaba sin corregir
