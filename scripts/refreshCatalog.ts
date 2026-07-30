@@ -20,7 +20,7 @@ import { RealScraperService } from '../src/services/realScraperService';
 import { CatalogService } from '../src/services/catalogService';
 import { TmdbService } from '../src/services/tmdbService';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
-import { canonicalTitle, searchIndexKey } from '../src/utils/text';
+import { canonicalTitle, searchIndexKey, yearFromSlug } from '../src/utils/text';
 import { canExtractWithoutFetch } from '../src/scrapers/directStream';
 import { MediaItem } from '../src/types';
 
@@ -447,7 +447,13 @@ async function main() {
   }
 
   // Índice de títulos ya cubiertos por TMDB, para no duplicarlos con una ficha de fallback.
-  const key = (it: MediaItem) => `${it.type}:${canonicalTitle(it.title)}`;
+  //
+  // El AÑO forma parte de la clave: sin él, dos películas distintas que se llaman igual y no
+  // tienen match en TMDB se agrupaban en una sola ficha —quedándose con el póster y la sinopsis
+  // de una de las dos—, y una que sí tuviera match tapaba a su homónima de otra época. El
+  // catálogo está lleno de casos ("Sin salida" son cuatro, "Carrie" tres).
+  const key = (it: MediaItem) =>
+    `${it.type}:${canonicalTitle(it.title)}:${(it.release_date || '').slice(0, 4) || yearFromSlug(it.id) || ''}`;
   const covered = new Set(Array.from(byTmdb.values()).map(key));
   const byFallback = new Map<string, MediaItem>();
   let droppedDupes = 0;

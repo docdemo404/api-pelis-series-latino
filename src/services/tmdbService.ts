@@ -920,13 +920,32 @@ export class TmdbService {
             imageHint
           });
 
-      // Sin match fiable en TMDB no pedimos detalles (traerían metadata de OTRO título):
-      // nos quedamos con la del sitio de origen.
+      /**
+       * SIN RESPALDO NO SE ADOPTA LA FICHA DE TMDB.
+       *
+       * `matched` solo dice que el título se parece lo suficiente (score ≥ 0,6), y con eso se
+       * estaba sobreescribiendo título, póster, sinopsis y reparto con los de OTRA película. Es
+       * la vía por la que una ficha acaba con la carátula equivocada: "Solo en casa" calca al
+       * 100% el nombre de "Gambling House" (1950), y "Atómica" (2017) el de otra "Atomica" del
+       * mismo año. El propio matcher ya calcula si algo INDEPENDIENTE del título respalda al
+       * candidato —el año, el `og:image` de la página o el título original—; lo que faltaba era
+       * exigirlo antes de escribir.
+       *
+       * Sin respaldo nos quedamos con la metadata de la fuente: un póster peor, pero SUYO. Y con
+       * un id sintético, no con el ajeno, porque ese número es lo que después funde dos fichas en
+       * una. Medido sobre el catálogo: de 148 fichas correctas, ninguna se apoyaba solo en el
+       * parecido del título, así que esto no degrada nada — solo corta el paso a los errores.
+       */
+      const respaldado = match.matched && match.verified;
+
       // La ficha se pide por el tipo del MATCH, no por el del ítem: la escalera busca también
       // en el catálogo contrario, y los ids se repiten entre películas y series (ver TmdbMatch).
-      const tmdbData = match.matched ? await this.getTmdbDetails(match.id, match.type) : null;
+      const tmdbData = respaldado ? await this.getTmdbDetails(match.id, match.type) : null;
       if (!tmdbData) {
-        return OverrideService.applyOverridesToItem(this.fromSourceMetadata(item, match.id));
+        // `matched` sin respaldo: se descarta el id ajeno y la ficha se queda con uno sintético.
+        return OverrideService.applyOverridesToItem(
+          this.fromSourceMetadata(item, match.matched && !match.verified ? undefined : match.id)
+        );
       }
 
       const isTv = (tmdbData.number_of_seasons && tmdbData.number_of_seasons > 0) || item.type === 'tvseries' || tmdbData.first_air_date !== undefined;

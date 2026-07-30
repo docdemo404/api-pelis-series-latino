@@ -25,6 +25,10 @@
  *                                                 # origen (og:image + año + título original)
  *   npm run repair:catalog -- --verify --apply    # …y corrige/funde las que estén mal
  *   npm run repair:catalog -- --verify --restart  # ignora el punto de guardado y empieza de cero
+ *   npm run repair:catalog -- --verify --apply --rotar --limit=N
+ *                                                 # tanda de N elegida por la FECHA, sin punto de
+ *                                                 # guardado: barre el catálogo entero en bucle
+ *                                                 # (es la que corre sola cada día en el workflow)
  *
  * Por qué existe: el catálogo se pobló con un matcher que, ante títulos con artículo
  * inicial ("Los Vengadores…") o coletillas de pack ("Todas las temporadas"), obtenía cero
@@ -792,14 +796,16 @@ function saveCheckpoint(file: string, done: Set<string>): void {
   }
 }
 
-async function verifyAgainstSource(apply: boolean, limitArg?: number, restart = false): Promise<void> {
+async function verifyAgainstSource(apply: boolean, limitArg?: number, restart = false, rotar = false): Promise<void> {
   console.log(`🔬 Verificando fichas contra su página de origen${apply ? '' : ' (dry-run: no se escribe nada)'}...`);
 
   const withMultiSource = await hasColumn('source_urls');
   const withMetadataSource = await hasColumn('metadata_source');
 
+  // Con `--rotar` no se usa el punto de guardado: la tanda la elige la FECHA (ver abajo), que es
+  // un estado que no hay que guardar en ninguna parte.
   const checkpoint = verifyCheckpointFile(apply);
-  const done = loadCheckpoint(checkpoint, restart);
+  const done = rotar ? new Set<string>() : loadCheckpoint(checkpoint, restart);
   if (done.size > 0) console.log(`   ↻ reanudando: ${done.size} fichas ya repasadas (usa --restart para empezar de cero)`);
 
   const extraColumns = [
@@ -808,7 +814,29 @@ async function verifyAgainstSource(apply: boolean, limitArg?: number, restart = 
   ];
   const rows = (await fetchAllRows(extraColumns))
     .filter(row => sourceUrlOf(row) && !done.has(row.id));
-  const targets = Number.isFinite(limitArg) && (limitArg as number) > 0 ? rows.slice(0, limitArg) : rows;
+
+  let targets = Number.isFinite(limitArg) && (limitArg as number) > 0 ? rows.slice(0, limitArg) : rows;
+
+  /**
+   * VENTANA ROTATORIA (`--rotar`) — para que el repaso avance solo, día tras día, sin estado.
+   *
+   * El punto de guardado es un archivo local, así que en un runner de CI se pierde en cada
+   * corrida: sin esto, la tarea diaria repasaría eternamente las MISMAS primeras N fichas y el
+   * resto del catálogo no se revisaría nunca. Con la ventana rotatoria la tanda se deriva del
+   * día, sobre las filas ordenadas por id: la cobertura completa llega sola cada
+   * ceil(total/N) días y se repite en bucle, que es exactamente lo que se quiere de una
+   * comprobación que hay que seguir haciendo para siempre (las fuentes cambian sus páginas).
+   */
+  if (rotar && Number.isFinite(limitArg) && (limitArg as number) > 0) {
+    const lote = limitArg as number;
+    const ordenadas = rows.slice().sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    const dias = Math.floor(Date.now() / 86400000);
+    const vueltas = Math.max(1, Math.ceil(ordenadas.length / lote));
+    const desde = (dias % vueltas) * lote;
+    targets = ordenadas.slice(desde, desde + lote);
+    console.log(`   ventana rotatoria: fichas ${desde}–${desde + targets.length} de ${ordenadas.length} (vuelta completa cada ${vueltas} días)`);
+  }
+
   console.log(`   ${targets.length} fichas por repasar`);
 
   let okImage = 0;
@@ -1367,7 +1395,11 @@ async function repairCrossedImages(apply: boolean, limitArg?: number): Promise<v
         if (!tmdbId) {
           const year = String(row.release_date || '').slice(0, 4) || sourceTitleFromId(row.id).year;
           const match = await TmdbService.resolveTmdb(row.title, type, year || undefined, row.id);
-          if (match.matched && match.id > 0) tmdbId = match.id;
+          // Respaldo OBLIGATORIO: de aquí sale el póster que se va a escribir, y un match que
+          // solo se apoya en el parecido del título traería la carátula de otra película. Sin
+          // respaldo se sigue el camino seguro de abajo: conservar el póster de la fuente y
+          // vaciar el backdrop.
+          if (match.matched && match.verified && match.id > 0) tmdbId = match.id;
         }
         const details = tmdbId ? await TmdbService.getTmdbDetails(tmdbId, type) : null;
         return { row, details };
@@ -1429,7 +1461,8 @@ async function main() {
     await verifyAgainstSource(
       apply,
       Number.isFinite(limitArg) ? limitArg : undefined,
-      process.argv.includes('--restart')
+      process.argv.includes('--restart'),
+      process.argv.includes('--rotar')
     );
     return;
   }
@@ -1486,6 +1519,7 @@ async function main() {
   let unresolved = 0;
   let collisions = 0;
   let keptStored = 0;
+  let dudosas = 0;
   let deleted = 0;
 
   const CONCURRENCY = 5;
@@ -1612,6 +1646,20 @@ async function main() {
         continue;
       }
 
+      // Y no se sustituye una ficha sin RESPALDO independiente del título: de aquí sale el
+      // póster, la sinopsis y el reparto que se van a escribir. El parecido del nombre —incluso
+      // clavado— no distingue homónimos ("Solo en casa" calca a "Gambling House", 1950), y el
+      // respaldo de público tampoco: la más votada de las dos puede ser la que no es. Hace falta
+      // el año, el título original o el `og:image` de la página; `--refetch` los va a buscar.
+      if (!match.verified) {
+        dudosas++;
+        console.log(
+          `   ~ ${row.id}\n     "${row.title}" podría ser "${newDetails?.title || newDetails?.name || match.id}" (score ${match.score.toFixed(2)})` +
+          ` pero nada independiente del título lo respalda: se deja igual${refetch ? '' : ' (prueba con --refetch)'}`
+        );
+        continue;
+      }
+
       // Ficha nueva completa: se re-enriquece partiendo del título REAL de la fuente.
       const base: MediaItem = {
         id: row.id,
@@ -1679,6 +1727,7 @@ async function main() {
   console.log(
     `\n${apply ? '✅ Reparación aplicada' : '📋 Dry-run'}: ${fixed} fichas ${apply ? 'corregidas' : 'a corregir'}, ` +
     `${confirmed} ya correctas, ${keptStored} conservadas (la candidata no era mejor), ` +
+    `${dudosas} sin respaldo independiente (se dejan igual), ` +
     `${deleted} duplicados ${apply ? 'eliminados' : 'a eliminar'}, ` +
     `${unresolved} sin match fiable, ${collisions} bloqueadas por tmdb_id duplicado`
   );

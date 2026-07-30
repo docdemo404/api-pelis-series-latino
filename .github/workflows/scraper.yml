@@ -68,6 +68,27 @@ jobs:
 
       # Y se comprueba que la invariante quedó limpia: si el paso anterior no pudo con algo, esto
       # FALLA y la corrida sale en rojo, que es la única forma de que no pase desapercibido.
+      # Y que cada ficha tenga SU carátula y SU sinopsis.
+      #
+      # El tmdb_id de una fila no lo da la fuente: lo deduce el matcher a partir del título, y con
+      # títulos que colisionan ("Atomica" 2017 son dos películas distintas, "El botín" 2026 otras
+      # dos) puede acertar de menos y dejar la ficha con el póster, la sinopsis y el reparto de
+      # otra. El crawl ya no adopta una ficha de TMDB sin respaldo independiente —año, título
+      # original o el og:image de la página—, pero las fuentes reescriben sus páginas cuando
+      # quieren, así que esto sigue repasando el catálogo contra el origen.
+      #
+      # --rotar elige la tanda por la FECHA en vez de por un punto de guardado (que en un runner
+      # se pierde en cada corrida): así avanza sola y da la vuelta al catálogo entero cada ~21
+      # días, en bucle y sin estado. Solo reescribe cuando la página de origen lo RESPALDA.
+      - name: Repasar carátulas y sinopsis contra la página de origen
+        if: always()
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx ts-node scripts/repairCatalog.ts --verify --apply --rotar --limit=700
+
       - name: Comprobar que cada ficha sirve su propio contenido
         if: always()
         env:

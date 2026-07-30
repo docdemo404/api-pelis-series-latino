@@ -3,14 +3,19 @@
  *
  *   npm run check:catalog
  *   npm run check:catalog -- --fallar-si-hay-cruces   # sale con error si hay contenido cruzado
+ *   npm run check:catalog -- --muestra=0              # sin el muestreo de carátulas (más rápido)
  *
  * Responde de un vistazo a "¿se aplicaron las migraciones?" y "¿llegó a correr el crawl?",
  * que son las dos cosas de las que depende que la ficha emergente abra al instante, y a la que
- * no puede fallar nunca: "¿cada película y cada serie sirve SU contenido y no el de otra?".
+ * no puede fallar nunca: "¿cada película y cada serie tiene SU contenido, SU carátula y SU
+ * sinopsis, y no las de otra?".
  */
 import 'dotenv/config';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
 import { candidateIdsForUrl } from '../src/services/catalogService';
+import { TmdbService, tmdbImagePath } from '../src/services/tmdbService';
+import { RealScraperService } from '../src/services/realScraperService';
+import { ContentType } from '../src/types';
 
 const db = getSupabaseAdmin();
 
@@ -85,6 +90,71 @@ async function auditCrossedContent(): Promise<{ cruzadas: number; ejemplos: stri
   return { cruzadas, ejemplos };
 }
 
+/**
+ * MUESTREO DE CARÁTULAS Y SINOPSIS — ¿la metadata de cada ficha es de la película que dice ser?
+ *
+ * El `tmdb_id` de una fila no lo publica la fuente: lo DEDUCE el matcher a partir del título, y
+ * cuando acierta de menos la ficha se queda con el póster, la sinopsis y el reparto de otra
+ * película ("Atomica" de 2017 son dos películas distintas, y una se llevaba la carátula de la
+ * otra). No hay forma de detectarlo sin salir a la red, porque una vez escrita la fila es
+ * coherente consigo misma: hay que preguntarle a su página de origen.
+ *
+ * Así que aquí se ESTIMA con una muestra pequeña, para que el número esté a la vista. Quien de
+ * verdad repasa y corrige el catálogo entero es `repair:catalog --verify`, que corre solo cada día
+ * sobre una tanda rotatoria. Las dos comprobaciones son la misma: el `og:image` de la página
+ * apunta a una ficha concreta de TMDB, y si no lo trae se re-resuelve con todo lo que publique.
+ */
+async function sampleMetadataMismatch(n: number): Promise<{ revisadas: number; malas: number; ejemplos: string[] }> {
+  const { data } = await db
+    .from('media_items')
+    .select('id,tmdb_id,type,title,release_date,source_url,source_urls')
+    .eq('metadata_source', 'tmdb')
+    .gt('tmdb_id', 0)
+    .limit(2000);
+
+  const pool = (data || []).sort(() => Math.random() - 0.5).slice(0, n);
+  let revisadas = 0;
+  let malas = 0;
+  const ejemplos: string[] = [];
+
+  const CONC = 5;
+  for (let i = 0; i < pool.length; i += CONC) {
+    await Promise.all(pool.slice(i, i + CONC).map(async (r: any) => {
+      const url = r.source_url || (r.source_urls || [])[0];
+      if (!url) return;
+      const s = await RealScraperService.fetchSourceSignals(url).catch(() => null);
+      if (!s || !s.title) return;
+      const type: ContentType = r.type === 'tvseries' ? 'tvseries' : 'movie';
+
+      // Etapa 1 — el og:image confirma la ficha guardada: no hay nada que revisar.
+      const img = tmdbImagePath(s.imageHint);
+      if (img) {
+        const stored = await TmdbService.getTmdbDetails(r.tmdb_id, type).catch(() => null);
+        if (stored && (img === tmdbImagePath(stored.poster_path) || img === tmdbImagePath(stored.backdrop_path))) {
+          revisadas++;
+          return;
+        }
+      }
+
+      // Etapa 2 — re-resolver con todo lo que publica la página. Solo cuenta como error si el
+      // resultado viene RESPALDADO: una sospecha sin respaldo no es prueba de nada.
+      const m = await TmdbService.resolveTmdb(s.title, type, s.year || undefined, r.id, {
+        originalTitle: s.originalTitle || null,
+        imageHint: s.imageHint || null
+      }).catch(() => null);
+      revisadas++;
+      if (!m || !m.matched || !m.verified || m.id === r.tmdb_id) return;
+
+      malas++;
+      if (ejemplos.length < 5) {
+        ejemplos.push(`${r.id} — guardado "${r.title}" (tmdb ${r.tmdb_id}); su página dice "${s.title}" (${s.year || '?'}) = tmdb ${m.id}`);
+      }
+    }));
+  }
+
+  return { revisadas, malas, ejemplos };
+}
+
 function bar(done: number, total: number): string {
   if (total <= 0) return '';
   const pct = Math.round((done / total) * 100);
@@ -141,6 +211,26 @@ async function main() {
     for (const e of cruce.ejemplos) console.log(`      · ${e}`);
     console.log('\n      Límpialo con:  npm run repair:catalog -- --fuentes --apply');
     console.log('      Y averigua por dónde entró: alguna fusión está emparejando sin comprobar el año.');
+  }
+
+  // ── Paso 4: carátulas y sinopsis (muestreo) ────────────────────────────────
+  const muestraFlag = process.argv.find(a => a.startsWith('--muestra'));
+  const nMuestra = muestraFlag
+    ? (muestraFlag.includes('=') ? parseInt(muestraFlag.split('=')[1], 10) : 25)
+    : 25;
+  if (Number.isFinite(nMuestra) && nMuestra > 0) {
+    console.log('\nPASO 4 · Cada ficha tiene SU carátula y SU sinopsis (muestreo)');
+    const m = await sampleMetadataMismatch(nMuestra);
+    if (m.revisadas === 0) {
+      console.log('   ⚠ no se pudo comprobar ninguna (¿las fuentes no responden?)');
+    } else if (m.malas === 0) {
+      console.log(`   ✅ ${m.revisadas}/${m.revisadas} de la muestra concuerdan con su página de origen.`);
+    } else {
+      const pct = (m.malas / m.revisadas) * 100;
+      console.log(`   ⚠ ${m.malas}/${m.revisadas} de la muestra tienen metadata de otra película (≈${pct.toFixed(1)}% del catálogo):`);
+      for (const e of m.ejemplos) console.log(`      · ${e}`);
+      console.log('\n      Corrígelo con:  npm run repair:catalog -- --verify --apply');
+    }
   }
 
   // Con --fallar-si-hay-cruces el script sale con código 1: es lo que pone en rojo la corrida
