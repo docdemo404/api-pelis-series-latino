@@ -25,6 +25,9 @@
  *                                                 # origen (og:image + año + título original)
  *   npm run repair:catalog -- --verify --apply    # …y corrige/funde las que estén mal
  *   npm run repair:catalog -- --verify --restart  # ignora el punto de guardado y empieza de cero
+ *   npm run repair:catalog -- --verify --apply --ids=a,b,c
+ *                                                 # solo esas fichas (para volver sobre las que
+ *                                                 # quedaron pendientes de algo)
  *   npm run repair:catalog -- --verify --apply --tipos
  *                                                 # solo las fichas cuya clase (película/serie)
  *                                                 # contradice a su fuente
@@ -667,9 +670,18 @@ async function fuseRowInto(
   row: any,
   twin: any,
   extraAliases: string[],
-  opts: { apply: boolean; withMultiSource: boolean }
+  opts: { apply: boolean; withMultiSource: boolean; sourceYear?: string }
 ): Promise<{ ok: boolean; urls: [number, number]; aliases: [number, number]; rechazada?: string }> {
-  const yearA = Number(String(row.release_date || '').slice(0, 4)) || Number(sourceTitleFromId(row.id).year) || 0;
+  // El año de la fila se toma de su PÁGINA de origen, no de `release_date`.
+  //
+  // Aquí se llega porque la página confirmó que la fila es la ficha que ya tiene la gemela, así
+  // que lo guardado es justo el dato en duda: en una fila mal emparejada `release_date` es el de
+  // la película equivocada. Comparando eso, la reja rechazaba dedupes legítimos —el pack
+  // "One Piece Todas Las Temporadas" estaba guardado como "ONE PIECE BONUS CONTENT" (2026) y no
+  // se dejaba fundir con "ONE PIECE" (2023), que es lo que es—.
+  const yearA = Number(opts.sourceYear)
+    || Number(String(row.release_date || '').slice(0, 4))
+    || Number(sourceTitleFromId(row.id).year) || 0;
   const yearB = Number(String(twin.release_date || '').slice(0, 4)) || Number(sourceTitleFromId(twin.id).year) || 0;
   if (yearA && yearB && Math.abs(yearA - yearB) > 1) {
     return {
@@ -764,7 +776,7 @@ async function relocateOccupant(
     if ((owner.type === 'tvseries' ? 'tvseries' : 'movie') !== own.type) {
       return { freed: false, reason: `su id correcto (${own.id}) lo ocupa una ficha de otro catálogo` };
     }
-    const merged = await fuseRowInto(twin, owner, [signals.title], opts);
+    const merged = await fuseRowInto(twin, owner, [signals.title], { ...opts, sourceYear: signals.year });
     if (merged.rechazada) return { freed: false, reason: `no se funde: ${merged.rechazada}` };
     if (!merged.ok) return { freed: false, reason: 'no se pudo fundir con su ficha oficial' };
     console.log(
@@ -802,7 +814,14 @@ function saveCheckpoint(file: string, done: Set<string>): void {
   }
 }
 
-async function verifyAgainstSource(apply: boolean, limitArg?: number, restart = false, rotar = false, soloTipos = false): Promise<void> {
+async function verifyAgainstSource(
+  apply: boolean,
+  limitArg?: number,
+  restart = false,
+  rotar = false,
+  soloTipos = false,
+  soloIds?: string[]
+): Promise<void> {
   console.log(`🔬 Verificando fichas contra su página de origen${apply ? '' : ' (dry-run: no se escribe nada)'}...`);
 
   const withMultiSource = await hasColumn('source_urls');
@@ -820,6 +839,14 @@ async function verifyAgainstSource(apply: boolean, limitArg?: number, restart = 
   ];
   let rows = (await fetchAllRows(extraColumns))
     .filter(row => sourceUrlOf(row) && !done.has(row.id));
+
+  // `--ids=a,b,c`: repasar unas fichas concretas. Sirve para volver sobre las que quedaron
+  // pendientes de algo (una migración, un arreglo del matcher) sin pagar el catálogo entero.
+  if (soloIds && soloIds.length > 0) {
+    const pedidas = new Set(soloIds);
+    rows = rows.filter(row => pedidas.has(String(row.id)));
+    console.log(`   ${rows.length}/${soloIds.length} de las fichas pedidas tienen página de origen`);
+  }
 
   // `--tipos`: solo las fichas cuya CLASE contradice a su fuente (una página de `/pelicula/`
   // guardada como serie, o al revés). Es el residuo que deja un emparejado que cruzó de catálogo,
@@ -873,12 +900,14 @@ async function verifyAgainstSource(apply: boolean, limitArg?: number, restart = 
     const chunk = targets.slice(i, i + CONCURRENCY);
 
     const results = await Promise.all(chunk.map(async row => {
-      // El tipo lo dice la RUTA de la fuente cuando la declara (`/pelicula/` vs `/serie/`), no la
-      // columna: si un emparejado cruzó de catálogo, `type` ya está mal y verificar con él vuelve
-      // a confirmar el error. La fuente sabe si publicó una película o una serie.
-      const type: ContentType = tipoDeLaRuta(sourceUrlOf(row))
-        || (row.type === 'tvseries' ? 'tvseries' : 'movie');
       const signals = await refetchSourceSignals(row);
+      // El tipo lo dice la FUENTE, no la columna: si un emparejado cruzó de catálogo, `type` ya
+      // está mal y verificar con él vuelve a confirmar el error en cada pasada. Lo declara la
+      // propia ficha de datos de la página (FuegoCine publica sus temporadas y episodios) y, si
+      // no, la categoría de la ruta (`/pelicula/` frente a `/serie/` en TioPlus).
+      const type: ContentType = signals?.type
+        || tipoDeLaRuta(sourceUrlOf(row))
+        || (row.type === 'tvseries' ? 'tvseries' : 'movie');
       if (!signals || !signals.title) return { row, type, signals: null, confirmedByImage: false, match: null };
 
       // Etapa 1: el hash del og:image contra las imágenes de la ficha guardada.
@@ -1032,7 +1061,7 @@ async function verifyAgainstSource(apply: boolean, limitArg?: number, restart = 
       // DUPLICADO. Lo único que aporta son su página de origen (sus servidores, a menudo de otra
       // fuente) y su nombre: se vuelcan en la canónica ANTES de borrarla o se perderían enlaces.
       if (twin) {
-        const merged = await fuseRowInto(row, twin, [signals.title], { apply, withMultiSource });
+        const merged = await fuseRowInto(row, twin, [signals.title], { apply, withMultiSource, sourceYear: signals.year });
         if (merged.rechazada) {
           blocked++;
           console.log(`   ! ${row.id}\n     comparte tmdb ${match.id} con ${twin.id} pero NO se funde: ${merged.rechazada}`);
@@ -1511,7 +1540,8 @@ async function main() {
       Number.isFinite(limitArg) ? limitArg : undefined,
       process.argv.includes('--restart'),
       process.argv.includes('--rotar'),
-      process.argv.includes('--tipos')
+      process.argv.includes('--tipos'),
+      (process.argv.find(a => a.startsWith('--ids=')) || '').split('=')[1]?.split(',').map(s => s.trim()).filter(Boolean)
     );
     return;
   }

@@ -1,6 +1,6 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
-import { MediaItem, ServerOption, CastMember } from '../types';
+import { MediaItem, ServerOption, CastMember, ContentType } from '../types';
 import { SourceManager } from './sourceManager';
 import { TmdbService } from './tmdbService';
 import { USER_AGENT, httpClient } from '../utils/httpClient';
@@ -142,6 +142,15 @@ export interface SourceSignals {
   originalTitle: string;
   /** `og:image`: en TioPlus apunta a image.tmdb.org, y ese hash señala UNA ficha concreta. */
   imageHint: string;
+  /**
+   * Qué dice la PÁGINA que es, película o serie, cuando lo declara; `null` si no lo declara.
+   *
+   * No es un detalle menor: si la ficha se guarda con la clase equivocada, el emparejado busca en
+   * el catálogo equivocado de TMDB y la ficha acaba con el póster y la sinopsis de otra obra. Pasó
+   * con la miniserie "Eric" (2024), publicada por FuegoCine en un post sin la palabra "serie" en
+   * el título: se guardó como película y se quedó con la ficha de un especial de monólogos.
+   */
+  type: ContentType | null;
 }
 
 export class RealScraperService {
@@ -187,15 +196,60 @@ export class RealScraperService {
         year = label ? label[1] : (yearFromSlug(url.split('/').filter(Boolean).pop()) || '');
       }
 
-      const originalTitle = $('h2')
+      let originalTitle = $('h2')
         .filter((_, el) => $(el).parent().find('b').text().includes('Titulo Original'))
         .first().text().trim();
+
+      let imageHint = $('meta[property="og:image"]').attr('content') || '';
+      let type: ContentType | null = null;
+
+      /**
+       * FICHA DE DATOS DE FUEGOCINE (`ul.post-details`).
+       *
+       * La plantilla publica en atributos `data-*` justo lo que el emparejado necesita, y no se
+       * estaba leyendo nada de ello: se resolvían las fichas de FuegoCine —media DB— solo con el
+       * título y el año, sin una sola señal independiente con la que confirmarlas.
+       *
+       *   <ul class="post-details" data-backdrop="https://image.tmdb.org/t/p/original/2eX8….jpg">
+       *     <li data-original-title="Eric">…  <li data-year="2024">…
+       *     <li data-seasons-count="1">…      <li data-episodes-count="6">…
+       *     <li data-release-data="2024-05-30">…
+       *
+       * El `data-backdrop` es lo más valioso: apunta a image.tmdb.org, así que su hash señala UNA
+       * ficha concreta de TMDB. El `og:image` de estas páginas es un proxy de Blogger que no
+       * identifica nada, de modo que hasta ahora la confirmación por imagen —la más fuerte que
+       * hay— no llegaba a usarse en ninguna ficha de FuegoCine.
+       */
+      if (isFuegocine) {
+        const detalles = $('ul.post-details').first();
+        if (detalles.length > 0) {
+          const attr = (sel: string, name: string) => (detalles.find(sel).attr(name) || '').trim();
+
+          const backdrop = (detalles.attr('data-backdrop') || '').trim();
+          if (/image\.tmdb\.org/i.test(backdrop)) imageHint = backdrop;
+
+          const orig = attr('li[data-original-title]', 'data-original-title');
+          if (orig && !originalTitle) originalTitle = orig;
+
+          // La fecha completa manda sobre el año del título: es la de estreno, no la del post.
+          const fecha = attr('li[data-release-data]', 'data-release-data');
+          const anoFicha = attr('li[data-year]', 'data-year');
+          const mejorAno = (fecha.match(/^(\d{4})/) || [])[1] || (anoFicha.match(/^(\d{4})$/) || [])[1] || '';
+          if (mejorAno) year = mejorAno;
+
+          // Declarar temporadas o episodios es declararse serie. Si no los declara, película.
+          const temporadas = Number(attr('li[data-seasons-count]', 'data-seasons-count')) || 0;
+          const episodios = Number(attr('li[data-episodes-count]', 'data-episodes-count')) || 0;
+          type = temporadas > 0 || episodios > 0 ? 'tvseries' : 'movie';
+        }
+      }
 
       return {
         title: rawTitle.replace(TRAILING_YEAR_RANGE, '').trim(),
         year,
         originalTitle,
-        imageHint: $('meta[property="og:image"]').attr('content') || ''
+        imageHint,
+        type
       };
     } catch {
       return null;

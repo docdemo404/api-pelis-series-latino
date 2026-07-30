@@ -376,7 +376,12 @@ async function withSourceSignals(item: MediaItem, onHit: () => void): Promise<Me
     // Nunca se pisa un dato bueno del listado con uno vacío del detalle.
     release_date: signals.year || item.release_date,
     original_title: signals.originalTitle || item.original_title,
-    poster: signals.imageHint || item.poster
+    poster: signals.imageHint || item.poster,
+    // La CLASE también sale de la página cuando la declara. El listado la deduce del título del
+    // post, y eso falla en cuanto no lleva la palabra "serie": la miniserie "Eric" (2024) se
+    // recolectaba como película, buscaba en el catálogo de películas de TMDB y acababa con la
+    // ficha de un especial de monólogos. La página sí publica sus temporadas y episodios.
+    type: signals.type || item.type
   };
 }
 
