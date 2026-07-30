@@ -797,6 +797,25 @@ export class CatalogService {
   }
 
   /**
+   * Retira del caché las listas y las búsquedas, que son las que enseñan la ficha ANTES de que
+   * nadie la abra.
+   *
+   * Invalidar la ficha no basta: sus datos viven además copiados dentro de los resultados de
+   * búsqueda (`searchp:*`) y de los carruseles del home (`home:*`, `home_pool:*`, `all_homepage`).
+   * Arreglar "Invencible" en la base y purgar su ficha dejaba la búsqueda enseñándola igual de
+   * rota —sin póster y con id sintético—, que es por donde la ve quien usa la app.
+   *
+   * Se borran TODAS, no las que contengan la ficha: no hay forma de saber en qué consultas sale, y
+   * reconstruirlas cuesta una lectura a la base. Son unas pocas claves.
+   */
+  static async invalidateListings(): Promise<void> {
+    const prefijos = ['searchp:', 'home:', 'home_pool:', 'all_homepage'];
+    const todas = await CacheStore.keys('*');
+    const aBorrar = todas.filter(k => prefijos.some(p => k.startsWith(p)));
+    if (aBorrar.length > 0) await CacheStore.del(...aBorrar);
+  }
+
+  /**
    * Todas las claves con las que una ficha puede estar cacheada. Se expone aparte de
    * `invalidateItem` para poder purgar MUCHAS fichas en pocas peticiones: cada `del` es una llamada
    * de red al Redis, y purgar el catálogo de una en una son decenas de miles de llamadas —suficiente

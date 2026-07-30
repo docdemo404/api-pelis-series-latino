@@ -1090,6 +1090,17 @@ export class RealScraperService {
         total_seasons: seasons.length,
         total_episodes: totalEps,
         seasons,
+        /**
+         * PÁGINA DE ORIGEN DE LA SERIE: la del primer episodio.
+         *
+         * Una serie de FuegoCine no tiene página propia —se arma agrupando los posts de sus
+         * episodios—, así que estas fichas se quedaban SIN ninguna url de origen. Y sin url no hay
+         * señales que leer: ni año, ni título original, ni la imagen de TMDB. Con eso el emparejado
+         * no se puede corroborar, y desde que adoptar la ficha de TMDB exige respaldo, todas estas
+         * series caían a la metadata de su fuente: 62 fichas sin póster y con id sintético, entre
+         * ellas "Invencible". El post de cualquiera de sus episodios SÍ publica esos datos.
+         */
+        _source_url: group.episodes[0]?.link || undefined,
         _fuegocine_blogger_id: bloggerIdCat,
       } as any);
     }

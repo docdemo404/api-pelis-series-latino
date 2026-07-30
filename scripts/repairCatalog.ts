@@ -840,6 +840,11 @@ async function purgarCacheDeTocadas(apply: boolean): Promise<void> {
   const claves = unicas.flatMap(t => CatalogService.cacheKeysFor(t));
   const TANDA = 400;
   for (let i = 0; i < claves.length; i += TANDA) await CacheStore.del(...claves.slice(i, i + TANDA));
+
+  // Y las listas: los datos de la ficha viven además COPIADOS dentro de los resultados de búsqueda
+  // y de los carruseles del home. Sin esto, la ficha queda arreglada pero la búsqueda —por donde
+  // la ve quien usa la app— la sigue enseñando rota.
+  await CatalogService.invalidateListings();
   console.log(
     `
 🧹 ${unicas.length} ficha(s) retiradas del caché` +
@@ -917,7 +922,8 @@ async function purgeRecentlyChanged(apply: boolean, horas: number, ids?: string[
     await CacheStore.del(...claves.slice(i, i + TANDA));
     console.log(`   ...${Math.min(i + TANDA, claves.length)}/${claves.length} claves`);
   }
-  console.log(`   ✅ ${filas.length} fichas retiradas del caché (${claves.length} claves en ${Math.ceil(claves.length / TANDA)} peticiones)`);
+  await CatalogService.invalidateListings();
+  console.log(`   ✅ ${filas.length} fichas retiradas del caché (${claves.length} claves en ${Math.ceil(claves.length / TANDA)} peticiones) + listas y búsquedas`);
 }
 
 /**
