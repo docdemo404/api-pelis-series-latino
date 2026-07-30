@@ -308,28 +308,52 @@ async function verifyAvailability(max: number): Promise<void> {
 async function fillDirectStreams(max: number): Promise<void> {
   // Solo fichas que YA tienen enlaces resueltos: son las únicas a las que se les puede añadir
   // el vídeo directo. Las de `servers: []` no se han resuelto nunca y son trabajo de --verify.
-  const { data, error } = await db
-    .from('media_items')
-    .select('id,type,title,servers')
-    .not('servers', 'is', null)
-    .neq('servers', '[]')
-    .order('streams_updated_at', { ascending: true, nullsFirst: false })
-    .limit(max);
-
-  if (error) {
-    console.warn(`   ⚠ No se pueden leer las fichas: ${error.message}`);
-    return;
+  /**
+   * SE RECORRE EL CATÁLOGO ENTERO, no las primeras N fichas.
+   *
+   * Antes se pedían las `max` más antiguas por `streams_updated_at` y se filtraban ahí. Con el
+   * catálogo por encima de esa cifra, la consulta devolvía SIEMPRE la misma cabecera de la lista:
+   * en cuanto esas quedaban resueltas, el repaso contestaba "todas las fichas revisadas ya tienen
+   * su vídeo directo resuelto" y no llegaba nunca al resto. Sonaba a trabajo terminado y era una
+   * ventana que no se movía.
+   *
+   * Se notó midiendo: 2.343 servidores seguían sin vídeo directo en hosts que SÍ sabemos extraer,
+   * mientras el repaso se declaraba al día ronda tras ronda. Ahora se leen todas las fichas con
+   * enlaces (paginando), se filtran las que de verdad tienen algo pendiente y solo entonces se
+   * aplica el tope — que pasa a limitar el TRABAJO, no la búsqueda.
+   */
+  const filas: any[] = [];
+  for (let desde = 0; ; desde += 1000) {
+    const { data, error } = await db
+      .from('media_items')
+      .select('id,type,title,servers')
+      .not('servers', 'is', null)
+      .neq('servers', '[]')
+      .order('streams_updated_at', { ascending: true, nullsFirst: false })
+      .range(desde, desde + 999);
+    if (error) {
+      console.warn(`   ⚠ No se pueden leer las fichas: ${error.message}`);
+      return;
+    }
+    if (!data?.length) break;
+    filas.push(...data);
+    if (data.length < 1000) break;
   }
+  const data = filas;
 
   // Interesan las que no tienen NINGÚN vídeo directo, y también aquellas donde un servidor
   // que HOY sabemos resolver se quedó sin él: pasa cada vez que se añade un extractor nuevo,
   // y también con upns, que responde 429 si se le insiste y deja el servidor sin resolver.
-  const pending = (data || []).filter(row => {
+  const candidatas = data.filter(row => {
     if (!Array.isArray(row.servers) || row.servers.length === 0) return false;
     const servers = row.servers as any[];
-    if (!servers.some(s => s?.direct_stream)) return true;
     return servers.some(s => s?.embed_url && !s.direct_stream && mereceRepasoDeExtraccion(s.embed_url));
   });
+
+  // El tope acota el TRABAJO de esta pasada, no la búsqueda: las que sobren salen en la
+  // siguiente, y como se ordena por antigüedad se avanza siempre.
+  const pending = candidatas.slice(0, max);
+  console.log(`   ${candidatas.length} fichas con algo extraíble pendiente en todo el catálogo`);
 
   if (pending.length === 0) {
     console.log('✔ Todas las fichas revisadas ya tienen su vídeo directo resuelto.');
