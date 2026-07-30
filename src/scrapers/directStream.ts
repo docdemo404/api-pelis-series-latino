@@ -743,8 +743,12 @@ async function seguirAnidado(
 }
 
 /** URL permanente de esta API que acuña y sirve el vídeo de un embed al reproducir. */
-export function directEndpointUrl(embedUrl: string): string {
-  return `/api/v1/stream/direct?e=${Buffer.from(embedUrl, 'utf8').toString('base64url')}`;
+export function directEndpointUrl(embedUrl: string, kind?: DirectKind): string {
+  // La extensión va en la RUTA porque hay reproductores que eligen el descodificador por ella
+  // antes de pedir nada (ExoPlayer, AVPlayer). Sin ella, una url con query es un formato
+  // desconocido y ni lo intentan. El nombre del fichero es decorativo: la ruta lo ignora.
+  const nombre = kind === 'mp4' ? '/v.mp4' : kind === 'hls' ? '/v.m3u8' : '';
+  return `/api/v1/stream/direct${nombre}?e=${Buffer.from(embedUrl, 'utf8').toString('base64url')}`;
 }
 
 /** Inversa de `directEndpointUrl`: recupera el embed del parámetro `?e=`. */
@@ -866,7 +870,7 @@ export function deferredDirectFields(embedUrl: string): DirectFields {
   // reproducción (el endpoint decide de nuevo al acuñar) pero sí engaña al ordenador de servidores.
   const kind: DirectKind = familia === 'drive' ? 'mp4' : 'hls';
   return {
-    direct_stream: directEndpointUrl(embedUrl),
+    direct_stream: directEndpointUrl(embedUrl, kind),
     direct_kind: kind,
     direct_mode: bestMode(embedUrl, kind),
     direct_host: host || undefined,
@@ -914,7 +918,7 @@ export function describeDirect(embedUrl: string, direct: DirectStream): DirectFi
   } catch {}
 
   return {
-    direct_stream: directEndpointUrl(embedUrl),
+    direct_stream: directEndpointUrl(embedUrl, direct.kind),
     direct_kind: direct.kind,
     direct_mode: mode,
     direct_host: host || undefined,

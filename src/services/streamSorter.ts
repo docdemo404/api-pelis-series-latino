@@ -54,7 +54,7 @@ export function enlaceDirecto(server: ServerOption): string | undefined {
   if (!actual || !server.embed_url) return actual;
   // Lo que ya apunta a la API (relativo o absoluto) se queda como está.
   if (!/^https?:\/\//i.test(actual) || actual.includes('/api/v1/stream/direct')) return actual;
-  return directEndpointUrl(server.embed_url);
+  return directEndpointUrl(server.embed_url, server.direct_kind === 'mp4' ? 'mp4' : 'hls');
 }
 
 /**

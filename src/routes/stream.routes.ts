@@ -551,7 +551,22 @@ function conPlazo<T>(promesa: Promise<T>, ms: number, respaldo: T): Promise<T> {
 }
 
 // Vídeo directo de un embed: acuña la URL real y la sirve. Es lo que apunta `direct_stream`.
-router.get(DIRECT_BASE, async (req: Request, res: Response, next: NextFunction) => {
+/**
+ * LA MISMA RUTA, TAMBIÉN CON EXTENSIÓN EN LA URL.
+ *
+ * `/api/v1/stream/direct?e=…` no dice en ninguna parte qué es lo que hay al otro lado, y hay
+ * reproductores que eligen el descodificador POR LA EXTENSIÓN de la URI antes de pedir nada:
+ * ExoPlayer y AVPlayer lo hacen de serie. Para ellos una url sin extensión y con query es un
+ * formato desconocido, así que ni lo intentan — y desde fuera se ve como "dice vídeo directo y
+ * no reproduce", que es exactamente lo que se reportó con el servidor de FuegoCine de "La
+ * sociedad de los poetas muertos". Ese enlace estaba perfecto: comprobado en un navegador,
+ * arranca en 3,3 s y da los 7.724 s de duración que dura la película.
+ *
+ * `/api/v1/stream/direct/v.mp4?e=…` y `/v.m3u8?e=…` hacen EXACTAMENTE lo mismo; el nombre del
+ * fichero es decorativo y no se mira. La forma vieja sigue funcionando: nada de lo ya publicado
+ * deja de valer.
+ */
+router.get([DIRECT_BASE, `${DIRECT_BASE}/v.mp4`, `${DIRECT_BASE}/v.m3u8`], async (req: Request, res: Response, next: NextFunction) => {
   /**
    * PLAZO PARA TODA LA RUTA — la red de seguridad que no depende de acertar con cada await.
    *
