@@ -20,6 +20,22 @@
  * misma ruta, que es lo que ya hacía la API.
  *
  * Cloudflare no cobra egreso, así que el vídeo deja de consumir plan.
+ *
+ * ⚠️ PROBADO EN PRODUCCIÓN (2026-07-30) Y NO FUNCIONA CON LOS HOSTS QUE MÁS IMPORTAN.
+ *
+ * Se desplegó, se enchufó y TODA reproducción delegada respondió 502: el CDN devuelve 403 después
+ * de acuñar. La premisa de arriba —"este Worker acuña y sirve, así que el CDN ve una sola IP"— NO
+ * se cumple en Cloudflare: acuñar y descargar son dos subpeticiones y pueden salir por IP
+ * distinta, y estos CDN atan la firma a la IP que acuñó. Se añadió el reintento con re-acuñado que
+ * ya tenían los segmentos y siguió dando 403.
+ *
+ * Comprobado que no era el vídeo: el mismo embed, acuñado y descargado desde una sola máquina,
+ * devuelve 200. Y son justo los hosts que dominan el modo proxy — vidhideplus 772 de 797.
+ *
+ * Así que la delegación está APAGADA (sin `VIDEO_PROXY_URL`/`VIDEO_PROXY_KEY` en Vercel) y el
+ * modo proxy vuelve a servirse desde la función, que sí mantiene la misma IP en las dos
+ * operaciones. Este Worker queda aquí porque sirve para cualquier host que NO ate por IP; antes
+ * de volver a enchufarlo hay que comprobar host por host, no en bloque.
  * ───────────────────────────────────────────────────────────────────────────────────────────
  */
 
@@ -244,16 +260,34 @@ export default {
       return new Response('no se pudo extraer el vídeo de este embed', { status: 502, headers: CORS });
     }
 
-    const upstream = await fetch(acunado.url, {
-      headers: {
-        'User-Agent': UA,
-        Referer: acunado.referer,
-        ...(request.headers.get('Range') ? { Range: request.headers.get('Range') } : {}),
-      },
-      cf: { cacheTtl: 0 },
-    });
+    const pedirEntrada = destino =>
+      fetch(destino, {
+        headers: {
+          'User-Agent': UA,
+          Referer: acunado.referer,
+          ...(request.headers.get('Range') ? { Range: request.headers.get('Range') } : {}),
+        },
+        cf: { cacheTtl: 0 },
+      });
+
+    let upstream = await pedirEntrada(acunado.url);
+
+    /**
+     * REINTENTO EN LA ENTRADA, que faltaba.
+     *
+     * Los segmentos ya lo hacían y la entrada no, y es el MISMO problema: estos CDN atan la URL
+     * firmada a la IP que la acuñó, y en Cloudflare acuñar y descargar son dos subpeticiones que
+     * pueden salir por IP distinta. Sin este reintento el Worker acuñaba bien y acto seguido se
+     * comía un 403 del CDN, así que TODA reproducción delegada respondía 502 — medido en cuanto se
+     * enchufó. Se vuelve a acuñar y se trasplanta la firma nueva a la misma ruta.
+     */
+    if (upstream.status === 403 || upstream.status === 410) {
+      const refrescado = await refrescar(acunado.url, embedUrl);
+      if (refrescado) upstream = await pedirEntrada(refrescado);
+    }
+
     if (upstream.status >= 400) {
-      return new Response('el CDN rechazó la petición', { status: 502, headers: CORS });
+      return new Response(`el CDN rechazó la petición (${upstream.status})`, { status: 502, headers: CORS });
     }
 
     const tipo = upstream.headers.get('content-type') || '';
