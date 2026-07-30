@@ -437,6 +437,8 @@ function sendRedirect(res: Response, url: string): void {
 const ACUNADO_MAX_MS = 6000;
 const COMPROBACION_MAX_MS = 4000;
 const PRIMER_BYTE_MAX_MS = 6000;
+/** Tope de TODA la ruta de vídeo directo: pasado esto, el cliente recibe un no y prueba otro. */
+const RUTA_MAX_MS = 12000;
 
 /** Tope para una promesa del camino de reproducción; al pasarse se sigue con el respaldo. */
 function conPlazo<T>(promesa: Promise<T>, ms: number, respaldo: T): Promise<T> {
@@ -451,6 +453,25 @@ function conPlazo<T>(promesa: Promise<T>, ms: number, respaldo: T): Promise<T> {
 
 // Vídeo directo de un embed: acuña la URL real y la sirve. Es lo que apunta `direct_stream`.
 router.get(DIRECT_BASE, async (req: Request, res: Response, next: NextFunction) => {
+  /**
+   * PLAZO PARA TODA LA RUTA — la red de seguridad que no depende de acertar con cada await.
+   *
+   * Dentro hay varios pasos con red (acuñar, comprobar el destino, mirar si sirve CORS, arrancar la
+   * entrega) y cada uno lleva su propio tope, pero basta con que uno se escape para que el
+   * espectador se coma la suma: medido, 54 s la primera vez y 36 s después de acotar dos de ellos.
+   * Esto corta por lo sano: si en `RUTA_MAX_MS` no se ha empezado a responder, se contesta 502 y el
+   * reproductor pasa al servidor siguiente. Un "no" en 12 s es infinitamente mejor que uno en 36.
+   *
+   * No aborta el trabajo de dentro —no se puede— pero sí libera al cliente, que es lo que importa;
+   * y lo que ese trabajo aprenda queda anotado en el caché de salud para la próxima.
+   */
+  const plazoRuta = setTimeout(() => {
+    if (!res.headersSent) {
+      console.warn(`[direct] plazo agotado (${RUTA_MAX_MS} ms): ${String(req.query.e || '').slice(0, 40)}`);
+      sendErrorResponse(res, 502, 'DIRECT_UNAVAILABLE', 'El servidor no respondió a tiempo. Prueba otro servidor.');
+    }
+  }, RUTA_MAX_MS);
+
   try {
     const embedParam = String(req.query.e || '');
     const embedUrl = decodeEmbedParam(embedParam);
@@ -604,6 +625,8 @@ router.get(DIRECT_BASE, async (req: Request, res: Response, next: NextFunction) 
     }
   } catch (err) {
     next(err);
+  } finally {
+    clearTimeout(plazoRuta);
   }
 });
 
