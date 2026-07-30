@@ -377,6 +377,34 @@ function scoreResult(
   const originalConfirms = !!knownOriginal && !!original
     && canonicalTitle(knownOriginal) === canonicalTitle(original);
 
+  /**
+   * EL TÍTULO ORIGINAL DE LA FUENTE TAMBIÉN PUEDE DESMENTIR, no solo confirmar.
+   *
+   * Aquí se coló "Sin salida (2024)" con el vídeo de "Bunker (2025)". La página de FuegoCine
+   * declaraba `data-original-title="Bunker"` y `data-year="2025"`; el candidato de TMDB se
+   * llamaba "Sin salida" y se estrenó en 2024. O sea que la fuente estaba diciendo, con todas
+   * las letras, que esa película se llama Bunker — y se le hizo caso omiso, porque un año de
+   * diferencia bastaba para marcar la ficha como respaldada.
+   *
+   * El fallo de fondo era tratar el título original como una señal que solo SUMA. Un dato que
+   * confirma cuando coincide tiene que restar cuando contradice; si no, no es una prueba, es un
+   * atajo. Y el año no distingue nada por sí solo: estrenos contiguos hay a miles.
+   *
+   * DOS CALIBRACIONES QUE HAY QUE RESPETAR, las dos comprobadas contra casos reales:
+   *
+   * 1. Se compara contra TODOS los nombres del candidato, no solo contra su `original_title`.
+   *    Es lo que salva a los pares legítimos original/regional: "Home Alone" no se parece NADA
+   *    a "Mi pobre angelito" (0,00), exactamente igual que "Bunker" no se parece a "Sin salida".
+   *    Lo que los distingue es que el candidato bueno SÍ se llama "Home Alone" por su original.
+   *
+   * 2. El listón es el umbral de emparejamiento, no el de alias (0,9). Con 0,9 se vetaba a
+   *    "Gigantes, una Aventura extraordinaria" (0,85 contra "Gigantes") y a "A Marvel Television
+   *    Special Presentation - The Punisher: One Last Kill" (0,70): títulos de cartel que
+   *    CONTIENEN al real. Un desmentido es no parecerse a nada, no ser más largo.
+   */
+  const originalContradice = !!knownOriginal && candidates.length > 0 && !originalConfirms
+    && !candidates.some(c => similarity(knownOriginal, c) >= MATCH_THRESHOLD);
+
   let verified = originalConfirms;
 
   const date: string = result.release_date || result.first_air_date || '';
@@ -390,7 +418,10 @@ function scoreResult(
       const diff = Math.abs(parseInt(date.substring(0, 4), 10) - parseInt(year, 10));
       // Un estreno que cuadra es el respaldo más común: descarta de un plumazo al homónimo
       // de otra época, que es de donde salen casi todos los emparejados equivocados.
-      if (diff <= 1) verified = true;
+      //
+      // Pero NO cuando la propia fuente dice que la película se llama de otra manera: ahí el año
+      // ya no respalda nada, solo tapa un desmentido. Ver `originalContradice`.
+      if (diff <= 1 && !originalContradice) verified = true;
       if (diff === 0) best += 0.1;
       else if (diff === 1) { /* desfase de distribución (festival vs. estreno): ni premia ni penaliza */ }
       // Dos años de diferencia YA distinguen homónimos: "El fundador" (2016) frente a
