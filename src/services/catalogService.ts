@@ -1257,6 +1257,57 @@ export class CatalogService {
     return null;
   }
 
+  /**
+   * UN EPISODIO CONCRETO, con SUS enlaces y de nadie más.
+   *
+   * Es el único camino por el que las rutas deben pedir un episodio, y existe por lo que hacía cada
+   * una por su cuenta: si el episodio no se resolvía, devolvían los servidores DE LA SERIE como si
+   * fueran los del capítulo. El resultado es lo peor que puede pasarle a esta API sin dar error —
+   * pides el capítulo 1 y ves otro—: todos los episodios de "One Piece" servían el mismo vídeo.
+   *
+   * Aquí no hay sustitución posible. El episodio se resuelve contra la PÁGINA DE ORIGEN de la serie
+   * (el id de la fila no siempre es el slug de la fuente) y solo se aceptan enlaces de una página
+   * que se declare de ese capítulo. Si no se consigue, el episodio se devuelve SIN enlaces: la app
+   * lo enseña como no disponible, que es la verdad, en vez de reproducir otra cosa.
+   */
+  static async getEpisode(id: string, season: number, episode: number): Promise<any | null> {
+    const serie = await this.getMetadata(id, 'tvseries');
+    if (!serie) return null;
+
+    const sourceUrls = [...(serie._source_urls || []), serie._source_url].filter(Boolean) as string[];
+    const scraped = await RealScraperService
+      .scrapeEpisodeDetail(serie.id || id, season, episode, { sourceUrls })
+      .catch(() => null);
+
+    // La ficha de la temporada da nombre, imagen y sinopsis del capítulo; los ENLACES, solo la
+    // página del episodio o los que ya estuvieran guardados para ESE episodio.
+    const deLaFicha = (serie.seasons || [])
+      .find(s => s.season_number === season)?.episodes
+      ?.find(e => e.episode_number === episode);
+
+    const propios = scraped?.servers?.length
+      ? scraped.servers
+      : (deLaFicha?.servers || []).filter(s => s && s.embed_url);
+
+    const servers = sortServersBySourcePriority(propios);
+
+    return {
+      id: `${serie.tmdb_id || serie.id}-${season}-${episode}`,
+      series_id: serie.id,
+      series_title: serie.title,
+      season_number: season,
+      episode_number: episode,
+      name: deLaFicha?.name || `Episodio ${episode}`,
+      overview: deLaFicha?.overview || '',
+      still_path: deLaFicha?.still_path || serie.poster,
+      air_date: deLaFicha?.air_date || null,
+      poster: deLaFicha?.still_path || serie.poster,
+      backdrop: serie.backdrop,
+      primary_stream: servers.length > 0 ? getPrimaryStream(servers) : undefined,
+      servers
+    };
+  }
+
   /** scrapeDetail con techo de latencia: una fuente lenta no puede bloquear la respuesta. */
   private static async scrapeDetailWithTimeout(url: string, ms: number = 2500): Promise<MediaItem | null> {
     const timeout = new Promise<null>(resolve => setTimeout(() => resolve(null), ms));

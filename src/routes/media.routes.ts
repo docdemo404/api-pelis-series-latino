@@ -98,29 +98,11 @@ router.get(
       const sNum = parseInt(season);
       const epNum = parseInt(episode);
 
-      let epDetail = await RealScraperService.scrapeEpisodeDetail(id, sNum, epNum);
-
-      // Fallback inteligente: Buscar la serie por ID/Slug en el catálogo y resolver el episodio solicitado
-      if (!epDetail) {
-        const seriesItem = await CatalogService.getById(id);
-        if (seriesItem && seriesItem.seasons) {
-          const targetSeason = seriesItem.seasons.find((s: any) => s.season_number === sNum);
-          if (targetSeason) {
-            const targetEp = targetSeason.episodes.find((e: any) => e.episode_number === epNum);
-            if (targetEp) {
-              epDetail = {
-                ...targetEp,
-                series_id: seriesItem.id,
-                series_title: seriesItem.title,
-                season_number: sNum,
-                poster: targetEp.still_path || seriesItem.poster,
-                backdrop: seriesItem.backdrop,
-                servers: targetEp.servers?.length > 0 ? targetEp.servers : seriesItem.servers
-              } as any;
-            }
-          }
-        }
-      }
+      // TODO episodio se pide por aquí. El fallback que había antes rellenaba los enlaces del
+      // capítulo con los DE LA SERIE cuando no lo resolvía, y entonces todos los episodios
+      // reproducían el mismo vídeo. `getEpisode` no sustituye nada: si no hay enlaces del
+      // capítulo, el capítulo va sin enlaces.
+      const epDetail = await CatalogService.getEpisode(id, sNum, epNum);
 
       if (!epDetail) {
         return sendErrorResponse(res, 404, 'RESOURCE_NOT_FOUND', 'El episodio solicitado no existe o no está disponible.');
@@ -155,7 +137,7 @@ router.get('/api/v1/series/:id', async (req: Request, res: Response, next: NextF
   try {
     const { season, episode } = req.query;
     if (season && episode) {
-      const epDetail = await RealScraperService.scrapeEpisodeDetail(req.params.id, parseInt(season as string), parseInt(episode as string));
+      const epDetail = await CatalogService.getEpisode(req.params.id, parseInt(season as string), parseInt(episode as string));
       if (epDetail) return res.json({ status: 'success', data: epDetail });
     }
 
@@ -175,7 +157,7 @@ router.get('/api/v1/media/:id', async (req: Request, res: Response, next: NextFu
   try {
     const { season, episode, include } = req.query;
     if (season && episode) {
-      const epDetail = await RealScraperService.scrapeEpisodeDetail(req.params.id, parseInt(season as string), parseInt(episode as string));
+      const epDetail = await CatalogService.getEpisode(req.params.id, parseInt(season as string), parseInt(episode as string));
       if (epDetail) return res.json({ status: 'success', data: epDetail });
     }
 
@@ -188,7 +170,7 @@ router.get('/api/v1/media/:id', async (req: Request, res: Response, next: NextFu
     const payload: Record<string, unknown> = withStreamsBlock(item, 'media');
 
     if (include === 'season_1' || include === 'first_season') {
-      const firstEp = await RealScraperService.scrapeEpisodeDetail(item.id, 1, 1);
+      const firstEp = await CatalogService.getEpisode(item.id, 1, 1);
       if (firstEp) {
         payload.season_1_first_episode = firstEp;
       }

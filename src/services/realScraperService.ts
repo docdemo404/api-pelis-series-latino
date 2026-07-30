@@ -132,6 +132,24 @@ function extractCardTitle($el: cheerio.Cheerio<any>): string {
 // series ("Bridgerton - Todas las Temporadas (2020 - 2026)"), donde vale el año de estreno.
 const TRAILING_YEAR_RANGE = /\((\d{4})(?:\s*[-–—/]\s*(?:\d{4}|presente|actualidad))?\)\s*$/i;
 
+/**
+ * ¿La página que ha contestado es la del episodio que se pidió?
+ *
+ * Las páginas de episodio de TioPlus se rotulan con la temporada y el capítulo dentro del título
+ * ("ONE PIECE S01 E01 - Amanecer de una aventura"), así que se puede COMPROBAR en vez de suponer.
+ * Hace falta porque probar varias URLs y quedarse con la primera que traiga servidores es una
+ * apuesta: si el sitio redirige, pagina distinto o cambia el orden de las temporadas, se sirve el
+ * vídeo de otro capítulo — y eso el reproductor no lo nota, lo nota quien lo está viendo.
+ *
+ * Si la página NO declara ningún S/E, se acepta: hay plantillas que no lo rotulan y rechazarlas
+ * dejaría sin enlaces a series que funcionan. Lo que no se acepta es que declare OTRO.
+ */
+function esDelEpisodio(titulo: string | undefined, season: number, episode: number): boolean {
+  const m = String(titulo || '').match(/\bS\s*(\d{1,3})\s*E\s*(\d{1,3})\b/i);
+  if (!m) return true;
+  return Number(m[1]) === season && Number(m[2]) === episode;
+}
+
 /** Señales de una página de origen que el emparejado con TMDB necesita para no fallar. */
 export interface SourceSignals {
   /** Título de la ficha, ya sin el `(AAAA)`. */
@@ -634,18 +652,35 @@ export class RealScraperService {
   /**
    * Scrapea los servidores reales de un episodio específico (soporta serie, anime y dorama)
    */
-  static async scrapeEpisodeDetail(seriesSlug: string, season: number, episode: number) {
-    const categories = ['serie', 'anime', 'dorama'];
-    // Probar las 3 categorías EN PARALELO (antes era secuencial => hasta 3x la latencia).
-    // Las 2 categorías incorrectas devuelven 404 rápido; se conserva la prioridad serie>anime>dorama.
-    const settled = await Promise.allSettled(
-      categories.map(cat =>
-        this.scrapeDetail(`${BASE_URL}/${cat}/${seriesSlug}/season/${season}/episode/${episode}`)
-      )
-    );
+  static async scrapeEpisodeDetail(
+    seriesSlug: string,
+    season: number,
+    episode: number,
+    opts: { sourceUrls?: string[] } = {}
+  ) {
+    /**
+     * La página del episodio se pide, PRIMERO, a partir de la página de origen de la serie.
+     *
+     * Antes se construía solo con el id de la fila, y el id no siempre es el slug de la fuente: la
+     * ficha del anime de One Piece es `fc-one-piece` y su página es `/anime/one-piece-1999`, así que
+     * las tres URLs que se probaban daban 404 y el episodio no se resolvía nunca. Toda serie cuyo id
+     * no calque el slug —todas las de FuegoCine, para empezar— estaba en ese caso.
+     */
+    const desdeFuente = (opts.sourceUrls || [])
+      .map(u => String(u).match(/\/(serie|anime|dorama)\/([^/?#]+)/i))
+      .filter((m): m is RegExpMatchArray => Boolean(m))
+      .map(m => `${BASE_URL}/${m[1].toLowerCase()}/${m[2]}/season/${season}/episode/${episode}`);
+
+    // Y después, a ciegas por categoría con el id, que es lo que sirve cuando el id SÍ es el slug.
+    const porId = ['serie', 'anime', 'dorama']
+      .map(cat => `${BASE_URL}/${cat}/${seriesSlug}/season/${season}/episode/${episode}`);
+
+    const candidatas = Array.from(new Set([...desdeFuente, ...porId]));
+
+    const settled = await Promise.allSettled(candidatas.map(u => this.scrapeDetail(u)));
     const detail = settled
       .map(r => (r.status === 'fulfilled' ? r.value : null))
-      .find(d => d && d.servers && d.servers.length > 0);
+      .find(d => d && d.servers && d.servers.length > 0 && esDelEpisodio(d.title, season, episode));
 
     if (!detail) return null;
 
