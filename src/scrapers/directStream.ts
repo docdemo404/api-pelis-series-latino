@@ -673,7 +673,10 @@ async function extraer(
     if (host.includes('unlimplay')) {
       const { directo, candidatos } = extraerUnlimplay(html);
       if (directo) return directo;
-      for (const candidato of candidatos) {
+      // Como mucho dos candidatos: esto corre entre pulsar Play y el primer fotograma, y su lista
+      // trae seis hosts. Probarlos todos serían seis viajes de ida y vuelta encadenados por un
+      // vídeo que, cuando `remux` no está, lo más probable es que tampoco tengan los demás.
+      for (const candidato of candidatos.slice(0, 2)) {
         const anidado = await seguirAnidado(candidato, opts, profundidad);
         if (anidado) return anidado;
       }

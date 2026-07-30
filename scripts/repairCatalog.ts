@@ -1905,7 +1905,7 @@ async function purgeDeadServers(apply: boolean, limitArg?: number, soloHost?: st
 
       if (!apply) continue;
       marcarTocada(row);
-      const { error } = await supabase
+      const { error } = await db
         .from('media_items')
         .update({ servers: despues, has_streams: despues.length > 0 })
         .eq('id', row.id);
