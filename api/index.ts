@@ -76,9 +76,22 @@ app.use((req: Request, res: Response, next: NextFunction) => {
       res.setHeader('CDN-Cache-Control', 'public, max-age=600, stale-while-revalidate=86400');
       res.setHeader('Vercel-CDN-Cache-Control', 'public, max-age=600, stale-while-revalidate=86400');
     } else if (req.path.includes('/media/') || req.path.includes('/series/')) {
-      res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=3600');
-      res.setHeader('CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=3600');
-      res.setHeader('Vercel-CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=3600');
+      /**
+       * Fichas y episodios: lo que más se pide y lo más caro de reconstruir.
+       *
+       * La ventana de `stale-while-revalidate` era de 1 h, y ahí estaba el coste escondido: pasada
+       * esa hora sin que nadie pidiera una ficha, su entrada desaparece del borde y el siguiente
+       * paga la reconstrucción entera — 3-7 s en un episodio, porque hay que scrapear su página y
+       * sondear sus servidores. Con un día de ventana, ese golpe deja de tocarle a un usuario.
+       *
+       * `stale-while-revalidate` no sirve nada viejo a nadie a cambio de nada: entrega al instante
+       * lo que tiene y refresca por detrás, así que el que llega tarde recibe rápido y el siguiente
+       * ya tiene lo nuevo. Los 15 min de `s-maxage` son el margen en el que una reparación tarda en
+       * verse en el borde (el caché propio sí se purga al reparar, el de Vercel no se puede).
+       */
+      res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=900, stale-while-revalidate=86400');
+      res.setHeader('CDN-Cache-Control', 'public, max-age=900, stale-while-revalidate=86400');
+      res.setHeader('Vercel-CDN-Cache-Control', 'public, max-age=900, stale-while-revalidate=86400');
     } else {
       res.setHeader('Cache-Control', 'public, max-age=3600, s-maxage=86400, stale-while-revalidate=604800');
       res.setHeader('CDN-Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
