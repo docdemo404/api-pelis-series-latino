@@ -1323,10 +1323,27 @@ export class CatalogService {
      */
     const revisados = await revisarServidores(
       sortServersBySourcePriority(aplicarVeredictosRecordados(propios)),
-      { presupuestoMs: 4000, maximo: 3 }
+      // Un episodio trae 4-6 servidores y a menudo la mitad están caídos: con tope de 3 sondas se
+      // gastaban todas en los muertos y el último se entregaba SIN comprobar, conservando su
+      // `online` viejo. Se sube el cupo para que quepa la lista entera; el que manda de verdad es
+      // el presupuesto de tiempo, y lo ya sabido sale del caché sin gastar sonda.
+      { presupuestoMs: 6000, maximo: 6 }
     );
 
-    const servers = sortServersBySourcePriority(revisados);
+    /**
+     * Los que se han demostrado caídos NO se entregan.
+     *
+     * Se devolvían al final de la lista, marcados `offline`, con la idea de que el cliente los
+     * ignorase. En la práctica es peor que no darlos: un reproductor los intenta igual y el
+     * espectador ve un error. En "El Chavo" T6E3 los cuatro servidores están caídos, así que lo
+     * único cierto que se puede contestar es que ese capítulo no se puede ver — no una lista de
+     * cuatro cosas que no funcionan.
+     *
+     * Se informa de cuántos se descartaron, para que esto no sea nunca una pérdida silenciosa.
+     */
+    const todos = sortServersBySourcePriority(revisados);
+    const servers = todos.filter(s => s.status !== 'offline');
+    const descartados = todos.length - servers.length;
 
     return {
       id: `${serie.tmdb_id || serie.id}-${season}-${episode}`,
@@ -1341,7 +1358,16 @@ export class CatalogService {
       poster: deLaFicha?.still_path || serie.poster,
       backdrop: serie.backdrop,
       primary_stream: servers.length > 0 ? getPrimaryStream(servers) : undefined,
-      servers
+      servers,
+      /**
+       * Contrato explícito de disponibilidad, en vez de dejar que el cliente lo deduzca de una
+       * lista vacía: `ready` hay algo que reproducir · `unavailable` se comprobaron y ninguno
+       * responde · `pending` no se encontró ninguna fuente para este capítulo.
+       */
+      streams: {
+        status: servers.length > 0 ? 'ready' : (descartados > 0 ? 'unavailable' : 'pending'),
+        descartados_por_no_reproducir: descartados
+      }
     };
   }
 

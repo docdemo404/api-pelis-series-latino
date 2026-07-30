@@ -376,19 +376,36 @@ export async function revisarServidores(
        * Cuesta lo mismo que una sonda y sale del mismo cupo, así que no cambia el presupuesto.
        */
       if (!servidor.direct_stream) {
-        const queda = limite - Date.now();
-        if (sondeados >= maximo || queda < MINIMO_PARA_SONDEAR_MS) continue;
-        sondeados++;
-        const estado = await conTopeSimple(verifyEmbedStatus(servidor.embed_url), queda, 'online');
-        if (estado === 'offline') {
+        // Lo que ya se sepa de este embed —lo haya averiguado esta instancia u otra— sale del
+        // caché y no gasta sonda. Sin esto cada petición volvía a empezar de cero, se le iban las
+        // tres sondas en los muertos y el último de la lista se quedaba SIN comprobar,
+        // conservando su `online` viejo. Es lo que dejaba el único servidor que quedaba en pie de
+        // "El Chavo" T6E3 siendo precisamente uno que no reproduce.
+        let conocido = await veredictoConocido(servidor.embed_url);
+
+        if (!conocido) {
+          const queda = limite - Date.now();
+          if (sondeados >= maximo || queda < MINIMO_PARA_SONDEAR_MS) continue;
+          sondeados++;
+          const estado = await conTopeSimple(verifyEmbedStatus(servidor.embed_url), queda, 'desconocido');
+          if (estado === 'online' || estado === 'offline') {
+            conocido = estado === 'offline' ? 'muerto' : 'vivo';
+            // Y se anota, para que la siguiente petición —y las demás instancias— no lo repitan.
+            await anotarVeredicto(servidor.embed_url, conocido);
+          }
+        }
+
+        if (conocido === 'muerto') {
           console.warn(`[salud] ${servidor.embed_url.slice(0, 70)} embed caído`);
           salida[i] = sinVideoDirecto({ ...servidor, status: 'offline' });
           continue;
         }
-        if (servidor.status !== 'online') {
-          salida[i] = { ...servidor, status: 'online', last_checked: new Date().toISOString() };
+        if (conocido === 'vivo') {
+          if (servidor.status !== 'online') {
+            salida[i] = { ...servidor, status: 'online', last_checked: new Date().toISOString() };
+          }
+          if (hastaElPrimeroUtil) break;
         }
-        if (hastaElPrimeroUtil) break;
         continue;
       }
       const queda = limite - Date.now();
