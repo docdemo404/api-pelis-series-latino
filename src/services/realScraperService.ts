@@ -153,6 +153,50 @@ export interface SourceSignals {
   type: ContentType | null;
 }
 
+/**
+ * Lee la ficha de datos de FuegoCine (`ul.post-details`), donde la plantilla publica en atributos
+ * `data-*` justo lo que hace falta para identificar la obra:
+ *
+ *   <ul class="post-details" data-backdrop="https://image.tmdb.org/t/p/original/2eX8….jpg">
+ *     <li data-original-title="Eric">…  <li data-year="2024">…
+ *     <li data-seasons-count="1">…      <li data-episodes-count="6">…
+ *     <li data-release-data="2024-05-30">…
+ *
+ * Vive aquí, en una sola función, porque la usan los DOS caminos que leen una página de FuegoCine:
+ * `fetchSourceSignals` (crawl y reparaciones) y `scrapeFuegocineDetail` (la API, cuando le piden un
+ * slug que no está en la base). Tenerlo duplicado fue el problema: se arregló en el primero y el
+ * segundo siguió tipando por el título del post, así que pedir `2026-01-eric-2024-html` seguía
+ * devolviendo en vivo la ficha de un especial de monólogos en vez de la miniserie.
+ */
+function fuegocineDetalles($: cheerio.CheerioAPI): {
+  originalTitle: string;
+  year: string;
+  imageHint: string;
+  type: ContentType | null;
+} {
+  const vacio = { originalTitle: '', year: '', imageHint: '', type: null };
+  const detalles = $('ul.post-details').first();
+  if (detalles.length === 0) return vacio;
+
+  const attr = (sel: string, name: string) => (detalles.find(sel).attr(name) || '').trim();
+
+  const backdrop = (detalles.attr('data-backdrop') || '').trim();
+  const fecha = attr('li[data-release-data]', 'data-release-data');
+  const anoFicha = attr('li[data-year]', 'data-year');
+
+  // Declarar temporadas o episodios es declararse serie. Si no los declara, película.
+  const temporadas = Number(attr('li[data-seasons-count]', 'data-seasons-count')) || 0;
+  const episodios = Number(attr('li[data-episodes-count]', 'data-episodes-count')) || 0;
+
+  return {
+    originalTitle: attr('li[data-original-title]', 'data-original-title'),
+    // La fecha completa manda sobre el año suelto: es la de estreno, no la del post.
+    year: (fecha.match(/^(\d{4})/) || [])[1] || (anoFicha.match(/^(\d{4})$/) || [])[1] || '',
+    imageHint: /image\.tmdb\.org/i.test(backdrop) ? backdrop : '',
+    type: temporadas > 0 || episodios > 0 ? 'tvseries' : 'movie'
+  };
+}
+
 export class RealScraperService {
   /**
    * Lee de la PÁGINA de origen solo lo que el emparejado con TMDB necesita: título, año,
@@ -203,45 +247,15 @@ export class RealScraperService {
       let imageHint = $('meta[property="og:image"]').attr('content') || '';
       let type: ContentType | null = null;
 
-      /**
-       * FICHA DE DATOS DE FUEGOCINE (`ul.post-details`).
-       *
-       * La plantilla publica en atributos `data-*` justo lo que el emparejado necesita, y no se
-       * estaba leyendo nada de ello: se resolvían las fichas de FuegoCine —media DB— solo con el
-       * título y el año, sin una sola señal independiente con la que confirmarlas.
-       *
-       *   <ul class="post-details" data-backdrop="https://image.tmdb.org/t/p/original/2eX8….jpg">
-       *     <li data-original-title="Eric">…  <li data-year="2024">…
-       *     <li data-seasons-count="1">…      <li data-episodes-count="6">…
-       *     <li data-release-data="2024-05-30">…
-       *
-       * El `data-backdrop` es lo más valioso: apunta a image.tmdb.org, así que su hash señala UNA
-       * ficha concreta de TMDB. El `og:image` de estas páginas es un proxy de Blogger que no
-       * identifica nada, de modo que hasta ahora la confirmación por imagen —la más fuerte que
-       * hay— no llegaba a usarse en ninguna ficha de FuegoCine.
-       */
+      // La ficha de datos de FuegoCine trae el título original, el año exacto, la clase y —lo más
+      // valioso— una ruta de image.tmdb.org, que señala UNA ficha concreta. Sin ella, las páginas
+      // de esta fuente solo daban título y año: ni una señal con la que confirmar el emparejado.
       if (isFuegocine) {
-        const detalles = $('ul.post-details').first();
-        if (detalles.length > 0) {
-          const attr = (sel: string, name: string) => (detalles.find(sel).attr(name) || '').trim();
-
-          const backdrop = (detalles.attr('data-backdrop') || '').trim();
-          if (/image\.tmdb\.org/i.test(backdrop)) imageHint = backdrop;
-
-          const orig = attr('li[data-original-title]', 'data-original-title');
-          if (orig && !originalTitle) originalTitle = orig;
-
-          // La fecha completa manda sobre el año del título: es la de estreno, no la del post.
-          const fecha = attr('li[data-release-data]', 'data-release-data');
-          const anoFicha = attr('li[data-year]', 'data-year');
-          const mejorAno = (fecha.match(/^(\d{4})/) || [])[1] || (anoFicha.match(/^(\d{4})$/) || [])[1] || '';
-          if (mejorAno) year = mejorAno;
-
-          // Declarar temporadas o episodios es declararse serie. Si no los declara, película.
-          const temporadas = Number(attr('li[data-seasons-count]', 'data-seasons-count')) || 0;
-          const episodios = Number(attr('li[data-episodes-count]', 'data-episodes-count')) || 0;
-          type = temporadas > 0 || episodios > 0 ? 'tvseries' : 'movie';
-        }
+        const d = fuegocineDetalles($);
+        if (d.imageHint) imageHint = d.imageHint;
+        if (d.originalTitle && !originalTitle) originalTitle = d.originalTitle;
+        if (d.year) year = d.year;
+        type = d.type;
       }
 
       return {
@@ -792,10 +806,18 @@ export class RealScraperService {
       // El año viene en el título ("… (2016)") o embebido en el slug de FuegoCine (`…-2016-html`).
       // Antes se guardaba release_date:'' y el emparejado con TMDB se hacía a ciegas de época.
       const fcYearMatch = titleRaw.match(/\((\d{4})\)/);
-      const year = fcYearMatch ? fcYearMatch[1] : (yearFromSlug(slug) || '');
       const poster = $('meta[property="og:image"]').attr('content') || $('img').first().attr('src') || null;
       const overview = $('.post-body, .entry-content').text().trim().substring(0, 300);
-      const isMovie = !titleRaw.toLowerCase().includes('temporada') && !/\d+x\d+/.test(titleRaw);
+
+      // La ficha de datos de la página manda sobre lo que se pueda adivinar del título: da el año
+      // de estreno, el título original, la clase y una imagen de TMDB con la que confirmar la
+      // identidad. Deducir la clase del título es lo que convirtió la miniserie "Eric" (2024) en un
+      // especial de monólogos: su post se titula "Eric (2024)" y no lleva la palabra "temporada".
+      const d = fuegocineDetalles($);
+      const year = d.year || (fcYearMatch ? fcYearMatch[1] : (yearFromSlug(slug) || ''));
+      const isMovie = d.type
+        ? d.type === 'movie'
+        : (!titleRaw.toLowerCase().includes('temporada') && !/\d+x\d+/.test(titleRaw));
 
       const servers: ServerOption[] = [];
       const svMatch = html.match(/const\s+_SV_LINKS\s*=\s*(\[[\s\S]*?\]);/);
@@ -838,7 +860,9 @@ export class RealScraperService {
         imdb_id: null,
         type: isMovie ? 'movie' as const : 'tvseries' as const,
         title: titleRaw,
-        original_title: titleRaw,
+        // El título original de la página es una señal INDEPENDIENTE del nombre regional, y es lo
+        // que permite confirmar el emparejado; repetir el título mostrado no aporta nada.
+        original_title: d.originalTitle || titleRaw,
         aliases: [titleRaw],
         overview: overview || `Ver ${titleRaw} online gratis en FuegoCine con audio Latino.`,
         rating: 0,
@@ -847,7 +871,10 @@ export class RealScraperService {
         genres: [],
         subcategories: ['Latino HD', 'FuegoCine'],
         poster,
-        backdrop: poster,
+        // El `data-backdrop` de la página apunta a image.tmdb.org: su hash señala UNA ficha concreta
+        // de TMDB, así que `enrichMediaItem` lo usa para confirmar la identidad. Va en `backdrop`
+        // porque es apaisado — meterlo en `poster` daría una vertical falsa.
+        backdrop: d.imageHint || poster,
         logo: null,
         trailer: null,
         cast: [],

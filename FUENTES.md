@@ -135,6 +135,8 @@ Están todas comentadas en el código, pero conviene conocerlas antes de escribi
 | Números de entrega | Un guard que anulaba el parecido con entregas discordantes dejó "Rápidos y Furiosos 4" (2009) **sin emparejar**, porque TMDB la titula "Rápidos y furiosos" a secas. A las entregas de una saga las separan AÑOS: deja que el año haga su trabajo. |
 | Años dentro del título | "Blade Runner 2049", "Madrid 1987", "Cherry 2000", "Mujer Maravilla 1984". No los confundas con el año de estreno ni con un número de entrega. |
 | `release_date` de una fila mal emparejada | Es el año de la película equivocada. Para decidir sobre una fila, usa el año de su **página**. |
+| Parsear la misma página en dos sitios | La lectura de la ficha de datos de FuegoCine estaba duplicada: se arregló en `fetchSourceSignals` (crawl y reparaciones) y `scrapeFuegocineDetail` (la API, cuando le piden un slug que no está en la base) siguió tipando por el título. Pedir `2026-01-eric-2024-html` seguía devolviendo **en vivo** la ficha equivocada. Si tu fuente publica datos útiles, léelos en UNA función y úsala en los dos caminos. |
+| El caché tapa las reparaciones | La metadata se cachea 6 h y, con Redis compartido, las claves **sobreviven a los despliegues**. Arreglar la fila no basta: hay que retirarla del caché (`CatalogService.invalidateItem`, que ya llaman los modos de reparación). Y una ficha BORRADA al fundir un duplicado deja su entrada viva respondiendo 200 con la obra equivocada: esas hay que nombrarlas (`--purgar-cache --ids=…`). |
 
 ---
 
@@ -153,6 +155,7 @@ npm run check:catalog
 Reparaciones, todas con `dry-run` por defecto y `--apply` para escribir:
 
 ```bash
+npm run repair:catalog -- --purgar-cache     # retira del caché lo cambiado en 24 h (¡o no se ve!)
 npm run repair:catalog -- --fuentes          # retira fuentes que son de otra película
 npm run repair:catalog -- --verify           # repasa fichas contra su página (carátula, sinopsis, clase)
 npm run repair:catalog -- --verify --tipos   # solo las que tienen la clase volteada
@@ -178,4 +181,6 @@ cada ~21 días y vuelve a empezar) → auditoría que falla en rojo si algo se c
 3. La clase la dice la fuente.
 4. Retira solo con prueba en contra.
 5. Registra el molde url→id de tu fuente.
-6. Corre `check:catalog` y no te vayas hasta que los PASOS 3 y 4 estén en verde.
+6. Lee la página en UNA función y úsala en todos los caminos que la necesiten.
+7. Después de reparar, purga el caché: si no, el arreglo no se ve y parece que no funcionó.
+8. Corre `check:catalog` y no te vayas hasta que los PASOS 3 y 4 estén en verde.

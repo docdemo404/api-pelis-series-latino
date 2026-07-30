@@ -96,8 +96,30 @@ export class CacheStore {
   }
 
   /**
+   * BORRA claves concretas, en Redis y en memoria.
+   *
+   * Hace falta porque el caché de metadata vive 6 h: sin esto, arreglar una ficha en la base de
+   * datos no se nota hasta que caduque su entrada, y la API sigue sirviendo el póster, la sinopsis
+   * o los alias viejos durante horas. Con Redis compartido no basta ni con redesplegar —las claves
+   * sobreviven a los despliegues—, así que quien repara una ficha tiene que retirarla del caché.
+   *
+   * Nunca lanza: fallar al invalidar no puede tumbar una reparación.
+   */
+  static async del(...keys: string[]): Promise<void> {
+    const full = keys.filter(Boolean).map(k => NAMESPACE + k);
+    if (full.length === 0) return;
+
+    for (const k of full) memoryCache.delete(k);
+    if (!this.isShared()) return;
+    try {
+      await kvCommand(['DEL', ...full]);
+    } catch {}
+  }
+
+  /**
    * Limpia el caché en memoria del proceso. En Redis las claves expiran por TTL;
-   * no se hace FLUSH global para no arrasar claves ajenas al proyecto.
+   * no se hace FLUSH global para no arrasar claves ajenas al proyecto (para borrar las de una
+   * ficha concreta, `del`).
    */
   static clear(): void {
     memoryCache.clear();

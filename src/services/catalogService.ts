@@ -781,6 +781,37 @@ export class CatalogService {
     await Promise.all(Array.from(keys).filter(Boolean).map(k => CacheStore.set(`${prefix}:${k}`, item, ttl)));
   }
 
+  /**
+   * Retira una ficha del caché, por TODAS las claves con las que se guardó.
+   *
+   * Es la contrapartida de `cacheItem` y la tiene que llamar quien REPARE una fila: la metadata se
+   * cachea 6 h y con Redis compartido las claves sobreviven a los despliegues, así que sin esto una
+   * ficha corregida sigue sirviendo el póster, la sinopsis o los alias viejos durante horas — y el
+   * arreglo parece no haber servido de nada.
+   *
+   * Se le pasa la fila TAL COMO ESTABA antes de arreglarla (id y tmdb_id viejos), que es con lo que
+   * se construyeron las claves. Nunca lanza.
+   */
+  static async invalidateItem(item: { id?: string; tmdb_id?: number; type?: ContentType }): Promise<void> {
+    await CacheStore.del(...this.cacheKeysFor(item));
+  }
+
+  /**
+   * Todas las claves con las que una ficha puede estar cacheada. Se expone aparte de
+   * `invalidateItem` para poder purgar MUCHAS fichas en pocas peticiones: cada `del` es una llamada
+   * de red al Redis, y purgar el catálogo de una en una son decenas de miles de llamadas —suficiente
+   * para agotar la cuota del plan gratuito—. Agrupando claves, el mismo trabajo cabe en un puñado.
+   */
+  static cacheKeysFor(item: { id?: string; tmdb_id?: number; type?: ContentType }): string[] {
+    const bases = new Set<string>();
+    for (const base of [item.id, item.tmdb_id ? String(item.tmdb_id) : '']) {
+      if (!base) continue;
+      bases.add(base);
+      for (const t of ['movie', 'tvseries']) bases.add(`${base}:${t}`);
+    }
+    return Array.from(bases).flatMap(k => [`meta:${k}`, `byid:${k}`]);
+  }
+
   /** ¿La ficha de la DB ya trae metadata utilizable, o hay que pasarla por TMDB? */
   private static isMetadataComplete(item: MediaItem): boolean {
     return Boolean(item.title && item.poster && item.overview && item.overview.length > 20);

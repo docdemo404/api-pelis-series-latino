@@ -18,6 +18,12 @@
  *   npm run repair:catalog -- --fuentes           # informa de fichas que sacan servidores de la
  *                                                 # página de OTRA película (homónimos)
  *   npm run repair:catalog -- --fuentes --apply   # retira esas fuentes y vacía sus enlaces
+ *   npm run repair:catalog -- --purgar-cache --apply
+ *                                                 # retira del caché las fichas cambiadas en 24 h
+ *                                                 # (necesita las credenciales del caché)
+ *   npm run repair:catalog -- --purgar-cache --apply --ids=a,b
+ *                                                 # por id: para fichas ya BORRADAS, cuya entrada
+ *                                                 # de caché seguiría respondiendo 200
  *   npm run repair:catalog -- --reindex --apply   # reconstruye title_normalized
  *   npm run repair:catalog -- --aliases           # informa de títulos regionales que faltan
  *   npm run repair:catalog -- --aliases --apply   # añade los nombres regionales de TMDB a aliases
@@ -60,7 +66,8 @@ import { getSupabaseAdmin } from '../src/services/supabaseService';
 import { canonicalTitle, normalizeTitle, searchIndexKey, dedupeTitles, sourceTitleFromSlug, slugify } from '../src/utils/text';
 // La puerta de identidad de las fuentes vive en catalogService: el script y la API tienen que
 // decidir lo MISMO sobre qué página pertenece a qué ficha.
-import { esPaginaPropia, candidateIdsForUrl, tipoDeLaRuta } from '../src/services/catalogService';
+import { CatalogService, esPaginaPropia, candidateIdsForUrl, tipoDeLaRuta } from '../src/services/catalogService';
+import { CacheStore } from '../src/cache/store';
 import { MediaItem, ContentType } from '../src/types';
 
 const db = getSupabaseAdmin();
@@ -278,6 +285,7 @@ async function reindexSearchKeys(apply: boolean): Promise<void> {
   const CHUNK = 25;
   for (let i = 0; i < pending.length; i += CHUNK) {
     await Promise.all(pending.slice(i, i + CHUNK).map(async p => {
+      marcarTocada(p);
       const { error } = await db.from('media_items').update({ title_normalized: p.key }).eq('id', p.id);
       if (!error) updated++;
     }));
@@ -355,6 +363,7 @@ async function backfillRegionalAliases(apply: boolean, limitArg?: number): Promi
       console.log(`   + ${row.id}\n     "${row.title}" gana ${JSON.stringify(added)}`);
 
       if (apply) {
+        marcarTocada(row);
         const { error } = await db.from('media_items').update(patch).eq('id', row.id);
         if (error) { console.warn(`     ⚠ ${error.message}`); failed++; continue; }
       }
@@ -525,6 +534,7 @@ async function fuseSyntheticDuplicates(apply: boolean, limitArg?: number): Promi
 
       if (apply) {
         if (Object.keys(patch).length > 0) {
+          marcarTocada(twin);
           const { error } = await db.from('media_items').update(patch).eq('id', twin.id);
           if (error) {
             console.warn(`     ⚠ no se pudo enriquecer la ficha canónica: ${error.message} (no se borra el duplicado)`);
@@ -532,6 +542,7 @@ async function fuseSyntheticDuplicates(apply: boolean, limitArg?: number): Promi
             continue;
           }
         }
+        marcarTocada(row);
         const { error: delError } = await db.from('media_items').delete().eq('id', row.id);
         if (delError) {
           console.warn(`     ⚠ no se pudo borrar el duplicado: ${delError.message}`);
@@ -641,6 +652,7 @@ async function rewriteRowFromMatch(
   };
   if (opts.withMetadataSource) update.metadata_source = enriched.metadata_source || 'tmdb';
 
+  marcarTocada(row);
   const { error } = await db.from('media_items').update(update).eq('id', row.id);
   if (error) {
     // 23505 = violación de unicidad: el id ya lo tiene otra fila. Quien lo decide es la
@@ -718,12 +730,14 @@ async function fuseRowInto(
   }
 
   if (Object.keys(patch).length > 0) {
+    marcarTocada(twin);
     const { error } = await db.from('media_items').update(patch).eq('id', twin.id);
     if (error) {
       console.warn(`     ⚠ no se pudo enriquecer ${twin.id}: ${error.message} (no se borra el duplicado)`);
       return { ok: false, ...sizes };
     }
   }
+  marcarTocada(row);
   const { error: delErr } = await db.from('media_items').delete().eq('id', row.id);
   if (delErr) {
     console.warn(`     ⚠ no se pudo borrar ${row.id}: ${delErr.message}`);
@@ -796,6 +810,111 @@ async function relocateOccupant(
 
   console.log(`     ↳ se desaloja ${twin.id}: "${twin.title}" → "${moved.title}" (tmdb ${twin.tmdb_id} → ${own.id}), su página dice "${signals.title}" ${signals.year || 's/a'}`);
   return { freed: true, reason: '' };
+}
+
+/**
+ * Fichas cuya fila se ha modificado. Al terminar se retiran del CACHÉ.
+ *
+ * Sin esto una reparación no se nota: la metadata se cachea 6 h y, con Redis compartido, las claves
+ * sobreviven incluso a un redespliegue. O sea que la ficha corregida sigue sirviendo el póster, la
+ * sinopsis o los alias viejos durante horas y el arreglo parece no haber servido de nada — pasó con
+ * "Eric", que ya estaba bien en la base de datos y la API seguía devolviendo el alias ajeno.
+ *
+ * Se marca ANTES de escribir y con los datos VIEJOS de la fila, que es con lo que se construyeron
+ * las claves. Marcar una fila cuya escritura luego falle no hace daño: se relee de la base.
+ */
+const tocadas: Array<{ id: string; tmdb_id?: number }> = [];
+
+function marcarTocada(row: any): void {
+  if (row && row.id) tocadas.push({ id: String(row.id), tmdb_id: row.tmdb_id });
+}
+
+/** Retira del caché todo lo que se haya tocado. Se llama una vez, al final. */
+async function purgarCacheDeTocadas(apply: boolean): Promise<void> {
+  if (!apply || tocadas.length === 0) return;
+  const vistas = new Set<string>();
+  const unicas = tocadas.filter(t => (vistas.has(t.id) ? false : (vistas.add(t.id), true)));
+  const claves = unicas.flatMap(t => CatalogService.cacheKeysFor(t));
+  const TANDA = 400;
+  for (let i = 0; i < claves.length; i += TANDA) await CacheStore.del(...claves.slice(i, i + TANDA));
+  console.log(
+    `
+🧹 ${unicas.length} ficha(s) retiradas del caché` +
+    (CacheStore.isShared() ? ' (Redis compartido)' : ' (solo memoria local: en producción caducan por TTL)')
+  );
+}
+
+/**
+ * PURGA DE CACHÉ (`--purgar-cache`).
+ *
+ * Retira del caché las fichas modificadas recientemente, para que un arreglo se note YA. Existe
+ * porque la metadata se cachea 6 h y, con Redis compartido, las claves sobreviven a los
+ * despliegues: sin esto una reparación tarda horas en verse y parece no haber funcionado.
+ *
+ * Los modos de reparación ya purgan lo que tocan. Esto es para arreglos hechos ANTES de que eso
+ * existiera, o hechos a mano en el SQL Editor.
+ *
+ *   npm run repair:catalog -- --purgar-cache --apply             # las tocadas en las últimas 24 h
+ *   npm run repair:catalog -- --purgar-cache --apply --desde=12  # en las últimas 12 h
+ *
+ * OJO: para que llegue al Redis de PRODUCCIÓN, el proceso necesita las credenciales del caché
+ * (`KV_REST_API_URL` + `KV_REST_API_TOKEN`, o el par `UPSTASH_REDIS_REST_*`). Sin ellas solo limpia
+ * la memoria de este proceso, que no le sirve a nadie: el propio comando lo avisa.
+ */
+async function purgeRecentlyChanged(apply: boolean, horas: number, ids?: string[]): Promise<void> {
+  const desde = new Date(Date.now() - horas * 3600 * 1000).toISOString();
+  console.log(ids && ids.length
+    ? `🧹 Purgando del caché ${ids.length} ficha(s) por id...`
+    : `🧹 Purgando del caché las fichas modificadas desde ${desde}...`);
+
+  if (!CacheStore.isShared()) {
+    console.warn('   ⚠ Sin credenciales de caché en el entorno: esto NO alcanza al Redis de producción.');
+    console.warn('     Exporta KV_REST_API_URL y KV_REST_API_TOKEN (los tiene el proyecto en Vercel) y repite.');
+  }
+
+  const filas: any[] = [];
+
+  if (ids && ids.length > 0) {
+    /**
+     * Purga por ID, para fichas que YA NO EXISTEN.
+     *
+     * Cuando una reparación funde un duplicado, borra su fila — pero su entrada de caché sigue
+     * viva, y entonces ese id responde 200 con la metadata de la obra equivocada durante horas.
+     * Al no estar en la tabla, no hay consulta que las encuentre: hay que nombrarlas. Los ids
+     * salen del log de la reparación (las líneas ⇄ y ␡).
+     *
+     * Sin fila no se conoce su tmdb_id, así que se purgan las claves que dependen del id. Las que
+     * dependían del número las cubre la purga por fecha de la ficha que la absorbió.
+     */
+    for (const id of ids) filas.push({ id });
+  } else {
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await db
+        .from('media_items')
+        .select('id,tmdb_id,type,title,updated_at')
+        .gte('updated_at', desde)
+        .range(from, from + 999);
+      if (error) throw new Error(error.message);
+      if (!data || data.length === 0) break;
+      filas.push(...data);
+      if (data.length < 1000) break;
+    }
+    console.log(`   ${filas.length} fichas modificadas en ese plazo`);
+  }
+  if (!apply) {
+    console.log('   (dry-run: no se ha borrado ninguna clave. Repite con --apply)');
+    return;
+  }
+
+  // Las claves se juntan y se borran en tandas grandes: cada llamada a `del` es una petición de
+  // red, y una por ficha son decenas de miles — suficiente para agotar la cuota del plan gratuito.
+  const claves = filas.flatMap(f => CatalogService.cacheKeysFor(f));
+  const TANDA = 400;
+  for (let i = 0; i < claves.length; i += TANDA) {
+    await CacheStore.del(...claves.slice(i, i + TANDA));
+    console.log(`   ...${Math.min(i + TANDA, claves.length)}/${claves.length} claves`);
+  }
+  console.log(`   ✅ ${filas.length} fichas retiradas del caché (${claves.length} claves en ${Math.ceil(claves.length / TANDA)} peticiones)`);
 }
 
 const verifyCheckpointFile = (apply: boolean) =>
@@ -1232,6 +1351,7 @@ async function unfuseWrongMerges(apply: boolean): Promise<void> {
       );
 
       if (apply) {
+        marcarTocada(row);
         const { error } = await db.from('media_items').update(patch).eq('id', row.id);
         if (error) { console.warn(`     ⚠ ${error.message}`); continue; }
       }
@@ -1440,6 +1560,7 @@ async function purgeIntruderSources(apply: boolean, limitArg?: number): Promise<
       }
 
       if (apply) {
+        marcarTocada(row);
         const { error } = await db.from('media_items').update(patch).eq('id', row.id);
         if (error) { console.warn(`     ⚠ ${error.message}`); continue; }
       }
@@ -1552,6 +1673,7 @@ async function repairCrossedImages(apply: boolean, limitArg?: number): Promise<v
         patch.backdrop = details.backdrop_path ? `https://image.tmdb.org/t/p/w1280${details.backdrop_path}` : null;
         console.log(`   ✓ ${row.id}\n     "${row.title}" → imágenes oficiales de TMDB${details.backdrop_path ? '' : ' (sin backdrop en TMDB: se vacía)'}`);
         if (apply) {
+          marcarTocada(row);
           const { error } = await db.from('media_items').update(patch).eq('id', row.id);
           if (error) { console.warn(`     ⚠ ${error.message}`); failed++; continue; }
         }
@@ -1562,6 +1684,7 @@ async function repairCrossedImages(apply: boolean, limitArg?: number): Promise<v
       patch.backdrop = null;
       console.log(`   ␡ ${row.id}\n     "${row.title}" sin ficha en TMDB: se conserva el póster y se vacía el backdrop duplicado`);
       if (apply) {
+        marcarTocada(row);
         const { error } = await db.from('media_items').update(patch).eq('id', row.id);
         if (error) { console.warn(`     ⚠ ${error.message}`); failed++; continue; }
       }
@@ -1620,6 +1743,17 @@ async function main() {
 
   if (process.argv.includes('--unfuse')) {
     await unfuseWrongMerges(apply);
+    return;
+  }
+
+  if (process.argv.includes('--purgar-cache')) {
+    const h = parseInt((process.argv.find(a => a.startsWith('--desde=')) || '').split('=')[1] || '', 10);
+    const idsArg = (process.argv.find(a => a.startsWith('--ids=')) || '').split('=')[1];
+    await purgeRecentlyChanged(
+      apply,
+      Number.isFinite(h) && h > 0 ? h : 24,
+      idsArg ? idsArg.split(',').map(x => x.trim()).filter(Boolean) : undefined
+    );
     return;
   }
 
@@ -1740,6 +1874,7 @@ async function main() {
 
           if (apply) {
             if (Object.keys(patch).length > 0) {
+              marcarTocada(twin);
               const { error: mergeErr } = await db.from('media_items').update(patch).eq('id', twin.id);
               if (mergeErr) {
                 console.warn(`     ⚠ no se pudo enriquecer la gemela ${twin.id}: ${mergeErr.message} (no se borra el duplicado)`);
@@ -1747,6 +1882,7 @@ async function main() {
                 continue;
               }
             }
+            marcarTocada(row);
             const { error } = await db.from('media_items').delete().eq('id', row.id);
             if (error) {
               console.warn(`     ⚠ no se pudo borrar ${row.id}: ${error.message}`);
@@ -1851,6 +1987,7 @@ async function main() {
       };
       if (withMetadataSource) update.metadata_source = enriched.metadata_source || 'tmdb';
 
+      marcarTocada(row);
       const { error } = await db.from('media_items').update(update).eq('id', row.id);
       if (error) {
         console.warn(`     ⚠ no se pudo guardar: ${error.message}`);
@@ -1882,7 +2019,10 @@ function exitWhenSettled(code: number): void {
   setTimeout(() => process.exit(code), 250).unref();
 }
 
+// La purga del caché va DESPUÉS de main y fuera de ella: main tiene una salida por modo (once
+// `return`), y colgar la purga de cada una es la forma segura de olvidarse de alguna.
 main()
+  .then(() => purgarCacheDeTocadas(process.argv.includes('--apply')))
   .then(() => exitWhenSettled(0))
   .catch(err => {
     console.error('❌ repairCatalog:', err);
