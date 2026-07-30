@@ -2007,36 +2007,66 @@ async function purgeDeadServers(apply: boolean, limitArg?: number, soloHost?: st
 const SINOPSIS_DE_RELLENO = /^Ver .* online (gratis )?(en |con )/i;
 
 async function repairFillerOverviews(apply: boolean, limitArg?: number): Promise<void> {
-  console.log(`📝 Buscando sinopsis de relleno${apply ? '' : ' (dry-run: no se escribe nada)'}...`);
-  const rows = await fetchAllRows(['overview', 'metadata_source']);
+  console.log(`📝 Buscando huecos de metadata${apply ? '' : ' (dry-run: no se escribe nada)'}...`);
+  const rows = await fetchAllRows(['overview', 'metadata_source', 'poster']);
 
-  const objetivo = rows.filter(r =>
-    r.tmdb_id > 0 && (SINOPSIS_DE_RELLENO.test(String(r.overview || '')) || !String(r.overview || '').trim())
-  ).slice(0, Number.isFinite(limitArg as number) ? limitArg : undefined);
+  /**
+   * Se rellenan los TRES huecos, no solo la sinopsis.
+   *
+   * La primera versión solo miraba el texto, y el PASO 5 recién estrenado encontró siete series
+   * a las que lo que les faltaba era la FECHA DE ESTRENO —"WandaVision", "Alien: Earth",
+   * "Marvel Zombies"…—, todas agrupadas de FuegoCine. Son el mismo caso de "Invencible": su
+   * página de origen es la de un episodio y no publica el año, así que la ficha se quedó sin él
+   * aunque TMDB lo tenga. Y una ficha sin año no se puede ni auditar contra su fuente: el año es
+   * la señal con la que se descartan los homónimos.
+   */
+  const falta = (r: any) => ({
+    overview: SINOPSIS_DE_RELLENO.test(String(r.overview || '')) || !String(r.overview || '').trim(),
+    release_date: !String(r.release_date || '').trim(),
+    poster: r.poster && !/image\.tmdb\.org|themoviedb\.org/i.test(String(r.poster)),
+  });
 
-  console.log(`   ${objetivo.length} fichas con ficha de TMDB adoptada y sinopsis de relleno o vacía\n`);
+  const objetivo = rows
+    .filter(r => r.tmdb_id > 0 && Object.values(falta(r)).some(Boolean))
+    .slice(0, Number.isFinite(limitArg as number) ? limitArg : undefined);
+
+  console.log(`   ${objetivo.length} fichas con ficha de TMDB adoptada y algún hueco\n`);
 
   let rellenadas = 0;
-  let sinTexto = 0;
+  let sinRemedio = 0;
 
   for (let i = 0; i < objetivo.length; i += 6) {
     await Promise.all(objetivo.slice(i, i + 6).map(async row => {
-      const detalles = await TmdbService.getTmdbDetails(row.tmdb_id, row.type).catch(() => null);
-      const texto = String(detalles?.overview || '').trim();
-      // Sin texto en TMDB no hay nada que hacer: la de relleno al menos no miente sobre la trama.
-      if (!texto || SINOPSIS_DE_RELLENO.test(texto)) { sinTexto++; return; }
+      const d = await TmdbService.getTmdbDetails(row.tmdb_id, row.type).catch(() => null);
+      if (!d) { sinRemedio++; return; }
+
+      const hueco = falta(row);
+      const update: Record<string, any> = {};
+
+      const texto = String(d.overview || '').trim();
+      if (hueco.overview && texto && !SINOPSIS_DE_RELLENO.test(texto)) update.overview = texto;
+
+      const fecha = String(d.release_date || d.first_air_date || '').trim();
+      if (hueco.release_date && fecha) update.release_date = fecha;
+
+      if (hueco.poster && d.poster_path) update.poster = `https://image.tmdb.org/t/p/w500${d.poster_path}`;
+
+      // TMDB tampoco lo tiene: no hay nada que arreglar y no debe contarse como pendiente.
+      if (Object.keys(update).length === 0) { sinRemedio++; return; }
 
       rellenadas++;
-      if (rellenadas <= 10) console.log(`   ✓ ${String(row.id).slice(0, 44).padEnd(45)} "${texto.slice(0, 64)}…"`);
+      if (rellenadas <= 10) {
+        console.log(`   ✓ ${String(row.id).slice(0, 40).padEnd(41)} ${Object.keys(update).join(', ')}`);
+      }
       if (!apply) return;
 
       marcarTocada(row);
-      const { error } = await db.from('media_items').update({ overview: texto }).eq('id', row.id);
+      const { error } = await db.from('media_items').update(update).eq('id', row.id);
       if (error) console.warn(`   ⚠ ${row.id}: ${error.message}`);
     }));
   }
 
-  console.log(`\n📝 ${rellenadas} sinopsis recuperadas · ${sinTexto} que TMDB tampoco tiene`);
+  console.log(`\n📝 ${rellenadas} fichas completadas · ${sinRemedio} cuyos huecos TMDB tampoco cubre`);
   console.log(apply ? '   ✅ escritas' : '   (dry-run: repite con --apply)');
   await purgarCacheDeTocadas(apply);
 }
