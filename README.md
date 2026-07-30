@@ -2,6 +2,11 @@
 
 API REST completa de alto rendimiento construida en Node.js y TypeScript. Entrega catálogo completo de Películas y Series con temporadas, episodios, super metadatos en Español Latino y enlaces de video 100% verificados.
 
+> **¿Vas a añadir otra web al scraping?** Lee primero **[FUENTES.md](FUENTES.md)**. Es el contrato
+> que garantiza que cada ficha sirva SU contenido, SU carátula y SU sinopsis, y no las de otra
+> película: qué señales tiene que entregar la fuente, qué no se puede hacer nunca, las trampas que
+> ya nos han costado un arreglo y cómo comprobarlo antes de dar el trabajo por hecho.
+
 ## 🚀 Características Principales
 - 🌟 **Feeds Estilo Netflix**: Endpoint `/api/v1/feeds/home` con carruseles por país (`CL`, `MX`, `LATAM`).
 - 📺 **Soporte para Series y Temporadas**: Desglose por temporada, número de capítulo, fotos de episodios y reproductores funcionales.

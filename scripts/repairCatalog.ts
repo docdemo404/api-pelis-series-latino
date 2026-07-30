@@ -54,10 +54,10 @@
  */
 import 'dotenv/config';
 import * as fs from 'fs';
-import { TmdbService, tmdbImagePath, OTRO_ALFABETO } from '../src/services/tmdbService';
+import { TmdbService, tmdbImagePath, OTRO_ALFABETO, similarity as tmdbSimilarity } from '../src/services/tmdbService';
 import { RealScraperService, SourceSignals } from '../src/services/realScraperService';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
-import { canonicalTitle, normalizeTitle, searchIndexKey, dedupeTitles, sourceTitleFromSlug } from '../src/utils/text';
+import { canonicalTitle, normalizeTitle, searchIndexKey, dedupeTitles, sourceTitleFromSlug, slugify } from '../src/utils/text';
 // La puerta de identidad de las fuentes vive en catalogService: el script y la API tienen que
 // decidir lo MISMO sobre qué página pertenece a qué ficha.
 import { esPaginaPropia, candidateIdsForUrl, tipoDeLaRuta } from '../src/services/catalogService';
@@ -1159,7 +1159,7 @@ async function unfuseWrongMerges(apply: boolean): Promise<void> {
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await db
       .from('media_items')
-      .select('id,tmdb_id,type,title,original_title,aliases,source_urls,source_url')
+      .select('id,tmdb_id,type,title,original_title,release_date,aliases,source_urls,source_url')
       .gt('tmdb_id', 0)
       .range(from, from + PAGE - 1);
     if (error) throw new Error(error.message);
@@ -1178,33 +1178,57 @@ async function unfuseWrongMerges(apply: boolean): Promise<void> {
 
     const checked = await Promise.all(chunk.map(async row => {
       const type: ContentType = row.type === 'tvseries' ? 'tvseries' : 'movie';
-      const orphans: string[] = [];
+      const year = String(row.release_date || '').slice(0, 4) || sourceTitleFromId(row.id).year || undefined;
+      const ajenos: Array<{ alias: string; deQuien: string }> = [];
+
       for (const alias of row.aliases || []) {
-        // El propio título nunca es huérfano, y una variante regional la confirma TMDB.
-        if (similarity(alias, row.title) >= 0.6 || similarity(alias, row.original_title || '') >= 0.6) continue;
-        const ok = await TmdbService.confirmsTitle(row.tmdb_id, type, alias).catch(() => true);
-        if (!ok) orphans.push(alias);
+        // 0. Es el nombre con el que la FUENTE publicó esta ficha: intocable. Se reconoce porque el
+        //    id de la fila ES el slug de su página, así que el alias aparece dentro. Sin esto se le
+        //    retiraba "Furia" a la fila `furia` y "Abismo" a la fila `abismo` —los nombres que ve
+        //    quien usa la web— solo porque TMDB rotula esas fichas con su título original.
+        const slugAlias = slugify(alias);
+        if (slugAlias.length >= 4 && String(row.id).includes(slugAlias)) continue;
+
+        // 1. Se parece a como se llama la ficha: es suyo. Se usa la similitud del MATCHER, que sabe
+        //    de alfabetos no latinos y de variantes de escritura; la local de este script no.
+        if (tmdbSimilarity(alias, row.title) >= 0.6) continue;
+        if (row.original_title && tmdbSimilarity(alias, row.original_title) >= 0.6) continue;
+
+        // 2. TMDB lo registra para esta ficha: es uno de sus nombres regionales.
+        const suyo = await TmdbService.confirmsTitle(row.tmdb_id, type, alias).catch(() => true);
+        if (suyo) continue;
+
+        // 3. ¿De quién es, entonces? Solo se retira con PRUEBA doble: que TMDB resuelva ese nombre,
+        //    con respaldo, a otra ficha, Y que esa otra ficha lo tenga REGISTRADO como nombre suyo.
+        //    Lo segundo es imprescindible: resolver un alias suelto es tan falible como cualquier
+        //    emparejado por título, y sin exigirlo se retiraba "The Tiger" de "Tiger: Tanque de
+        //    guerra" alegando que pertenecía a "The Lost Tiger", que no lo lleva registrado.
+        const otro = await TmdbService.resolveTmdb(alias, type, year, `unfuse:${row.id}:${alias}`).catch(() => null);
+        if (!otro || !otro.matched || !otro.verified || otro.id === row.tmdb_id) continue;
+
+        const registrado = await TmdbService.confirmsTitle(otro.id, otro.type, alias).catch(() => false);
+        if (!registrado) continue;
+
+        const ficha = await TmdbService.getTmdbDetails(otro.id, otro.type).catch(() => null);
+        ajenos.push({ alias, deQuien: `"${ficha?.title || ficha?.name || otro.id}" (tmdb ${otro.id})` });
       }
-      return { row, orphans };
+      return { row, ajenos };
     }));
 
-    for (const { row, orphans } of checked) {
-      if (orphans.length === 0) continue;
+    for (const { row, ajenos } of checked) {
+      if (ajenos.length === 0) continue;
 
-      const keptAliases = (row.aliases || []).filter((a: string) => !orphans.includes(a));
-      // La URL de origen que entró con el alias huérfano se reconoce por su slug.
-      const keptUrls = (row.source_urls || []).filter((u: string) => {
-        const slug = String(u).toLowerCase();
-        return !orphans.some(o => slug.includes(slugOf(o)));
-      });
+      const fuera = ajenos.map(a => a.alias);
+      const keptAliases = (row.aliases || []).filter((a: string) => !fuera.includes(a));
+      // Ninguna ficha se queda sin nombres: al menos el suyo.
+      if (keptAliases.length === 0) keptAliases.push(row.title);
 
       const patch: Record<string, unknown> = { aliases: keptAliases };
-      if (keptUrls.length !== (row.source_urls || []).length) patch.source_urls = keptUrls;
       if (withNormalized) patch.title_normalized = searchIndexKey(row.title, row.original_title, keptAliases);
 
       console.log(
-        `   ␡ ${row.id} "${row.title}"\n     retira ${JSON.stringify(orphans)}` +
-        (patch.source_urls ? ` y ${(row.source_urls || []).length - keptUrls.length} fuente(s)` : '')
+        `   ␡ ${row.id} "${row.title}"\n` +
+        ajenos.map(a => `     retira "${a.alias}" — ese nombre es de ${a.deQuien}`).join('\n')
       );
 
       if (apply) {

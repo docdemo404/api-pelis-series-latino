@@ -242,7 +242,7 @@ function pickCreators(tmdbData: any): string[] | undefined {
 }
 
 /** Similitud 0..1 entre dos títulos: exacto > prefijo > substring > solapamiento de palabras. */
-function similarity(a: string, b: string): number {
+export function similarity(a: string, b: string): number {
   // IDÉNTICOS letra por letra, aunque el alfabeto no sea latino. Va antes que todo lo demás
   // porque `canonicalTitle` solo conserva [a-z0-9]: un título tailandés, japonés o coreano se
   // queda VACÍO y entonces puntuaba 0 incluso comparado consigo mismo. Es la única señal que
