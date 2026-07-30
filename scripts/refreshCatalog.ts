@@ -215,6 +215,30 @@ async function prewarmStreams(items: MediaItem[], max: number): Promise<void> {
   }
 
   console.log(`   ${ok}/${targets.length} títulos con enlaces persistidos`);
+
+  /**
+   * Y de las SERIES, su primer capítulo.
+   *
+   * Precalentar la ficha de una serie no sirve para reproducir: en una serie se reproduce por
+   * episodio, y la ficha del episodio se resolvía entera en el momento en que alguien le daba a
+   * Reproducir — 7 s medidos la primera vez que se abre uno, porque hay que scrapear su página y
+   * sondear sus servidores. El capítulo 1 de la temporada 1 es por donde entra casi todo el mundo,
+   * así que se deja resuelto y cacheado de antemano. Los demás capítulos siguen costando la
+   * primera apertura: son miles y no se pueden precalentar todos.
+   */
+  const series = targets.filter(i => i.type === 'tvseries');
+  if (series.length === 0) return;
+
+  console.log(`🔥 Pre-resolviendo el capítulo 1 de ${series.length} series...`);
+  let eps = 0;
+  for (let i = 0; i < series.length; i += CONCURRENCY) {
+    const chunk = series.slice(i, i + CONCURRENCY);
+    const resueltos = await Promise.all(
+      chunk.map(s => CatalogService.getEpisode(s.id, 1, 1).catch(() => null))
+    );
+    eps += resueltos.filter(r => r && r.servers && r.servers.length > 0).length;
+  }
+  console.log(`   ${eps}/${series.length} primeros capítulos listos`);
 }
 
 /**
