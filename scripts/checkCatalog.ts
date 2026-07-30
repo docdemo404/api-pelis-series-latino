@@ -140,7 +140,8 @@ async function sampleMetadataMismatch(n: number): Promise<{ revisadas: number; m
       // resultado viene RESPALDADO: una sospecha sin respaldo no es prueba de nada.
       const m = await TmdbService.resolveTmdb(s.title, type, s.year || undefined, r.id, {
         originalTitle: s.originalTitle || null,
-        imageHint: s.imageHint || null
+        imageHint: s.imageHint || null,
+        episodeHint: s.episode || null
       }).catch(() => null);
       revisadas++;
       if (!m || !m.matched || !m.verified || m.id === r.tmdb_id) return;

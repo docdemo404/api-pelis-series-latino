@@ -326,9 +326,61 @@ export function similarity(a: string, b: string): number {
  * depender del título. Devuelve null si la URL no es de TMDB. `poster_path`/`backdrop_path`
  * que ya vienen como `/<hash>.jpg` se normalizan igual (por su nombre de archivo).
  */
+/**
+ * Imágenes de una ficha que NO son su póster ni su fondo principal: las de sus temporadas y las
+ * de sus episodios. Se rellena antes de resolver, con `precargarImagenesDeFicha`.
+ *
+ * Existe por "Invencible", que se quedó sin metadata teniendo la prueba delante. Su página de
+ * origen es la de un episodio (`invencible-4x8`) —esas páginas de FuegoCine no llevan ficha de
+ * datos: ni año, ni título original, nada— pero enlaza una imagen de TMDB. Esa imagen no era el
+ * póster ni el fondo de la serie, ni estaba entre sus 351 imágenes generales: es el FOTOGRAMA del
+ * episodio 4x8. Comprobando solo póster y fondo, la única prueba disponible pasaba desapercibida
+ * y la serie se quedaba con un tmdb_id sintético y una sinopsis de relleno.
+ *
+ * Es un mapa en memoria y no una petición dentro de `scoreCandidate` a propósito: puntuar es
+ * síncrono y se hace sobre decenas de candidatos por búsqueda. Aquí solo se consulta.
+ */
+const imagenesExtra = new Map<number, Set<string>>();
+
+function imagenExtraDeLaFicha(id: number | undefined, hash: string): boolean {
+  if (!id) return false;
+  return imagenesExtra.get(id)?.has(hash) === true;
+}
+
+/**
+ * Descarga los fotogramas de UN episodio y los deja disponibles para la comprobación por imagen.
+ *
+ * Una sola petición, y solo cuando hace falta: la página de origen tiene que ser de un episodio
+ * concreto (`4x8`) y traer una imagen de TMDB que no haya casado por las vías baratas.
+ */
+export async function precargarImagenesDeFicha(
+  id: number,
+  temporada: number,
+  episodio: number
+): Promise<void> {
+  if (imagenesExtra.has(id)) return;
+  try {
+    const res = await axios.get(`https://api.themoviedb.org/3/tv/${id}/season/${temporada}/episode/${episodio}/images`, {
+      params: { api_key: API_KEY },
+      timeout: 4000,
+      validateStatus: () => true,
+    });
+    const stills: any[] = res.data?.stills || [];
+    imagenesExtra.set(id, new Set(stills.map(s => tmdbImagePath(s.file_path)).filter((p): p is string => !!p)));
+  } catch {
+    imagenesExtra.set(id, new Set());
+  }
+}
+
 export function tmdbImagePath(url: string | null | undefined): string | null {
   if (!url) return null;
-  const m = String(url).match(/image\.tmdb\.org\/t\/p\/[^/]+\/([\w-]+\.(?:jpg|jpeg|png|webp|svg))/i);
+  // Se aceptan LOS DOS hosts desde los que TMDB sirve la misma ruta `/t/p/<tamaño>/<hash>`:
+  // `image.tmdb.org` (el CDN) y `www.themoviedb.org` (su web). Reconocer solo el primero costó
+  // la metadata entera de "Invencible": su página de FuegoCine enlaza el fondo como
+  // `https://www.themoviedb.org/t/p/w1280/zmmrC3E0…jpg`, o sea que la prueba de identidad MÁS
+  // fuerte que existe —el hash de una imagen de TMDB— estaba delante y se descartaba por el
+  // nombre del servidor. La ficha se quedó sin año, sin sinopsis y con un tmdb_id sintético.
+  const m = String(url).match(/(?:image\.tmdb\.org|themoviedb\.org)\/t\/p\/[^/]+\/([\w-]+\.(?:jpg|jpeg|png|webp|svg))/i);
   if (m) return `/${m[1]}`;
   // TMDB devuelve poster_path/backdrop_path ya como "/<hash>.jpg": se normaliza por basename.
   const bare = String(url).match(/^\/?([\w-]+\.(?:jpg|jpeg|png|webp|svg))$/i);
@@ -365,6 +417,9 @@ function scoreResult(
     if (imageHint === tmdbImagePath(result.poster_path) || imageHint === tmdbImagePath(result.backdrop_path)) {
       return { score: 1, verified: true, originalMatch: true };
     }
+  }
+  if (imageHint && imagenExtraDeLaFicha(result.id, imageHint)) {
+    return { score: 1, verified: true, originalMatch: true };
   }
 
   const candidates = [result.title, result.name, result.original_title, result.original_name].filter(Boolean);
@@ -622,7 +677,12 @@ export class TmdbService {
     type: ContentType = 'movie',
     year?: string,
     seed?: string,
-    opts: { originalTitle?: string | null; imageHint?: string | null } = {}
+    opts: {
+      originalTitle?: string | null;
+      imageHint?: string | null;
+      /** De qué episodio venía la página, cuando lo declara ("INVENCIBLE 4x8"). */
+      episodeHint?: { season: number; episode: number } | null;
+    } = {}
   ): Promise<TmdbMatch> {
     const cleanTitle = cleanForSearch(title);
     const imageHint = tmdbImagePath(opts.imageHint);
@@ -835,6 +895,26 @@ export class TmdbService {
       } catch {}
     }
 
+    /**
+     * ÚLTIMO RESPALDO: el fotograma del episodio del que viene la página.
+     *
+     * Solo se intenta cuando ya hay un candidato bueno por título pero NADA lo respalda, y la
+     * página que lo trajo era la de un episodio concreto con una imagen de TMDB. Es el caso de
+     * las series agrupadas de FuegoCine, cuyas páginas de episodio no publican ni año ni título
+     * original: sin esto se quedan para siempre con la metadata de relleno de la fuente, que es
+     * exactamente lo que le pasaba a "Invencible".
+     *
+     * Cuesta UNA petición y solo en ese callejón. Y sigue siendo una prueba dura, no una
+     * concesión: comparar el hash de una imagen no admite parecidos.
+     */
+    if (!bestVerified && bestId > 0 && imageHint && opts.episodeHint && bestEndpoint === 'tv') {
+      await precargarImagenesDeFicha(bestId, opts.episodeHint.season, opts.episodeHint.episode);
+      if (imagenExtraDeLaFicha(bestId, imageHint)) {
+        bestVerified = true;
+        bestScore = 1;
+      }
+    }
+
     const matchedType: ContentType = bestEndpoint === 'tv' ? 'tvseries' : 'movie';
     const result: TmdbMatch = bestScore >= MATCH_THRESHOLD && bestId > 0
       ? { id: bestId, matched: true, score: bestScore, verified: bestVerified, type: matchedType }
@@ -902,6 +982,27 @@ export class TmdbService {
       // Usar sinopsis en español de España si la de México está vacía
       if (!data.overview && fallbackEsRes.status === 'fulfilled' && fallbackEsRes.value.data?.overview) {
         data.overview = fallbackEsRes.value.data.overview;
+      }
+
+      /**
+       * Y si TMDB no la tiene en NINGÚN español, se busca entre sus traducciones antes de rendirse.
+       *
+       * Sin esto, "Max Is Missing" se quedaba con el relleno de la fuente —"Ver Max ha desaparecido
+       * online gratis en HD con audio Latino"—, que no cuenta nada de la película, teniendo TMDB
+       * una sinopsis en inglés perfectamente escrita. La ficha había adoptado su póster, su título
+       * y su tmdb_id: la única parte que se quedó atrás fue el texto.
+       *
+       * No cuesta una petición más: `translations` ya viene en la respuesta principal
+       * (`append_to_response`), así que esto es solo leer lo que ya está descargado. Se recorren
+       * primero todas las variantes del español (es-AR, es-CL…) y solo después el inglés: una
+       * sinopsis real en otro idioma informa; una plantilla de SEO no informa en ninguno.
+       */
+      if (!data.overview) {
+        const traducciones: any[] = data.translations?.translations || [];
+        const texto = (t: any) => (t?.data?.overview || '').trim();
+        const enEspanol = traducciones.find(t => t?.iso_639_1 === 'es' && texto(t));
+        const enIngles = traducciones.find(t => t?.iso_639_1 === 'en' && texto(t));
+        if (enEspanol || enIngles) data.overview = texto(enEspanol || enIngles);
       }
 
       // Usar vídeos globales si los de es-MX están vacíos

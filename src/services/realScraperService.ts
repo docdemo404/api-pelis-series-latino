@@ -161,6 +161,15 @@ export interface SourceSignals {
   /** `og:image`: en TioPlus apunta a image.tmdb.org, y ese hash señala UNA ficha concreta. */
   imageHint: string;
   /**
+   * De qué episodio es la página, cuando su título lo declara ("INVENCIBLE 4x8").
+   *
+   * Las series agrupadas de FuegoCine se quedan con la página de su primer episodio como origen,
+   * y esas páginas no publican ficha de datos: sin año ni título original no hay nada que
+   * respalde una ficha de TMDB. Lo que sí traen es el fotograma del episodio, y ese hash
+   * identifica la serie sin margen de error — pero para buscarlo hay que saber QUÉ episodio es.
+   */
+  episode?: { season: number; episode: number } | null;
+  /**
    * Qué dice la PÁGINA que es, película o serie, cuando lo declara; `null` si no lo declara.
    *
    * No es un detalle menor: si la ficha se guarda con la clase equivocada, el emparejado busca en
@@ -192,7 +201,33 @@ function fuegocineDetalles($: cheerio.CheerioAPI): {
   imageHint: string;
   type: ContentType | null;
 } {
-  const vacio = { originalTitle: '', year: '', imageHint: '', type: null };
+  /**
+   * La imagen de TMDB se busca en CUATRO sitios, no solo en la ficha de datos.
+   *
+   * Las páginas de EPISODIO de las series agrupadas no llevan `ul.post-details` —ni año, ni
+   * título original, nada—, y son justo las que quedan como página de origen de esas series.
+   * Pero sí enlazan el fondo de TMDB, en `link[rel=image_src]` y en un `div[data-backdrop]`
+   * suelto. Buscarlo solo dentro de la ficha de datos dejó a "Invencible" sin metadata: la
+   * prueba de identidad más fuerte que existe estaba en la página y no se miraba.
+   *
+   * `og:image` va el ÚLTIMO a propósito: en Blogger casi siempre es un `blogger_img_proxy`,
+   * que no lleva hash de TMDB y no prueba nada.
+   */
+  const pistaDeImagen = (): string => {
+    const candidatos = [
+      $('ul.post-details').first().attr('data-backdrop'),
+      $('[data-backdrop]').first().attr('data-backdrop'),
+      $('link[rel="image_src"]').attr('href'),
+      $('meta[property="og:image"]').attr('content'),
+    ];
+    for (const c of candidatos) {
+      const url = (c || '').trim();
+      if (url && /(?:image\.tmdb\.org|themoviedb\.org)\/t\/p\//i.test(url)) return url;
+    }
+    return '';
+  };
+
+  const vacio = { originalTitle: '', year: '', imageHint: pistaDeImagen(), type: null };
   const detalles = $('ul.post-details').first();
   if (detalles.length === 0) return vacio;
 
@@ -210,7 +245,7 @@ function fuegocineDetalles($: cheerio.CheerioAPI): {
     originalTitle: attr('li[data-original-title]', 'data-original-title'),
     // La fecha completa manda sobre el año suelto: es la de estreno, no la del post.
     year: (fecha.match(/^(\d{4})/) || [])[1] || (anoFicha.match(/^(\d{4})$/) || [])[1] || '',
-    imageHint: /image\.tmdb\.org/i.test(backdrop) ? backdrop : '',
+    imageHint: /(?:image\.tmdb\.org|themoviedb\.org)\/t\/p\//i.test(backdrop) ? backdrop : pistaDeImagen(),
     type: temporadas > 0 || episodios > 0 ? 'tvseries' : 'movie'
   };
 }
@@ -276,12 +311,21 @@ export class RealScraperService {
         type = d.type;
       }
 
+      // "INVENCIBLE 4x8" → la página es del episodio 8 de la temporada 4. Se guarda porque su
+      // fotograma en TMDB puede ser la única prueba de identidad disponible (ver `episode`), y
+      // el título se limpia: el `4x8` no forma parte del nombre de la serie.
+      const marcaEpisodio = rawTitle.match(/\s(\d{1,2})\s*x\s*(\d{1,3})\s*$/i);
+      const episode = marcaEpisodio
+        ? { season: parseInt(marcaEpisodio[1], 10), episode: parseInt(marcaEpisodio[2], 10) }
+        : null;
+
       return {
-        title: rawTitle.replace(TRAILING_YEAR_RANGE, '').trim(),
+        title: rawTitle.replace(TRAILING_YEAR_RANGE, '').replace(/\s\d{1,2}\s*x\s*\d{1,3}\s*$/i, '').trim(),
         year,
         originalTitle,
         imageHint,
-        type
+        type: type || (episode ? 'tvseries' : null),
+        episode
       };
     } catch {
       return null;

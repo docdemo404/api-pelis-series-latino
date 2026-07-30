@@ -773,7 +773,8 @@ async function relocateOccupant(
 
   const own = await TmdbService.resolveTmdb(signals.title, twinType, signals.year || undefined, twin.id, {
     originalTitle: signals.originalTitle || null,
-    imageHint: signals.imageHint || null
+    imageHint: signals.imageHint || null,
+    episodeHint: signals.episode || null
   }).catch(() => null);
 
   if (!own || !own.matched || !own.verified) return { freed: false, reason: 'su página no confirma otra ficha' };
@@ -1119,7 +1120,8 @@ async function verifyAgainstSource(
       // Etapa 2: re-resolver con TODO lo que publica la página.
       const match = await TmdbService.resolveTmdb(signals.title, type, signals.year || undefined, row.id, {
         originalTitle: signals.originalTitle || null,
-        imageHint: signals.imageHint || null
+        imageHint: signals.imageHint || null,
+        episodeHint: signals.episode || null
       }).catch(() => null);
 
       return { row, type, signals, confirmedByImage: false, match };
@@ -1987,6 +1989,58 @@ async function purgeDeadServers(apply: boolean, limitArg?: number, soloHost?: st
   await purgarCacheDeTocadas(apply);
 }
 
+/**
+ * SINOPSIS DE RELLENO (`--sinopsis`).
+ *
+ * Una ficha puede haber adoptado su película de TMDB —con su póster, su título y su tmdb_id— y
+ * quedarse con la frase de relleno de la fuente: "Ver Max ha desaparecido online gratis en HD con
+ * audio Latino", que no cuenta absolutamente nada de la película. Son 174 fichas, el 1,2% de las
+ * emparejadas.
+ *
+ * Pasaba porque TMDB tiene la sinopsis en inglés pero VACÍA en español, y el código solo probaba
+ * es-MX y es-ES antes de rendirse. Ya se busca también entre sus traducciones (ver
+ * `getTmdbDetails`), así que aquí basta con volver a pedirlas.
+ *
+ *   npm run repair:catalog -- --sinopsis            # mide
+ *   npm run repair:catalog -- --sinopsis --apply    # y las rellena
+ */
+const SINOPSIS_DE_RELLENO = /^Ver .* online (gratis )?(en |con )/i;
+
+async function repairFillerOverviews(apply: boolean, limitArg?: number): Promise<void> {
+  console.log(`📝 Buscando sinopsis de relleno${apply ? '' : ' (dry-run: no se escribe nada)'}...`);
+  const rows = await fetchAllRows(['overview', 'metadata_source']);
+
+  const objetivo = rows.filter(r =>
+    r.tmdb_id > 0 && (SINOPSIS_DE_RELLENO.test(String(r.overview || '')) || !String(r.overview || '').trim())
+  ).slice(0, Number.isFinite(limitArg as number) ? limitArg : undefined);
+
+  console.log(`   ${objetivo.length} fichas con ficha de TMDB adoptada y sinopsis de relleno o vacía\n`);
+
+  let rellenadas = 0;
+  let sinTexto = 0;
+
+  for (let i = 0; i < objetivo.length; i += 6) {
+    await Promise.all(objetivo.slice(i, i + 6).map(async row => {
+      const detalles = await TmdbService.getTmdbDetails(row.tmdb_id, row.type).catch(() => null);
+      const texto = String(detalles?.overview || '').trim();
+      // Sin texto en TMDB no hay nada que hacer: la de relleno al menos no miente sobre la trama.
+      if (!texto || SINOPSIS_DE_RELLENO.test(texto)) { sinTexto++; return; }
+
+      rellenadas++;
+      if (rellenadas <= 10) console.log(`   ✓ ${String(row.id).slice(0, 44).padEnd(45)} "${texto.slice(0, 64)}…"`);
+      if (!apply) return;
+
+      marcarTocada(row);
+      const { error } = await db.from('media_items').update({ overview: texto }).eq('id', row.id);
+      if (error) console.warn(`   ⚠ ${row.id}: ${error.message}`);
+    }));
+  }
+
+  console.log(`\n📝 ${rellenadas} sinopsis recuperadas · ${sinTexto} que TMDB tampoco tiene`);
+  console.log(apply ? '   ✅ escritas' : '   (dry-run: repite con --apply)');
+  await purgarCacheDeTocadas(apply);
+}
+
 async function main() {
   const apply = process.argv.includes('--apply');
   // Elimina las filas duplicadas cuya versión correcta ya existe en el catálogo.
@@ -2051,6 +2105,11 @@ async function main() {
 
   if (process.argv.includes('--fuentes')) {
     await purgeIntruderSources(apply, Number.isFinite(limitArg) ? limitArg : undefined);
+    return;
+  }
+
+  if (process.argv.includes('--sinopsis')) {
+    await repairFillerOverviews(apply, Number.isFinite(limitArg) ? limitArg : undefined);
     return;
   }
 
