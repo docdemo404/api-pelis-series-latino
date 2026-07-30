@@ -272,7 +272,18 @@ async function pipeUpstream(
   mode: RewriteMode = 'proxy'
 ): Promise<number | null> {
   const range = req.headers.range;
-  const upstream = await streamClient.get(target, {
+  /**
+   * PLAZO HASTA EL PRIMER BYTE.
+   *
+   * `streamClient` da 20 s, que es lo razonable para una descarga pero una eternidad para EMPEZAR:
+   * sumados al acuñado y a la comprobación, un servidor caído tardaba 36 s en admitir que no
+   * reproducía. Como esto es `responseType: 'stream'`, la promesa se resuelve en cuanto llegan las
+   * CABECERAS, así que ponerle tope aquí acota el arranque sin tocar la descarga — una vez que los
+   * bytes fluyen, pueden tardar lo que hagan falta.
+   *
+   * Si no llegan a tiempo se devuelve 504 y el reproductor pasa al servidor siguiente.
+   */
+  const upstream = await conPlazo(streamClient.get(target, {
     headers: {
       Referer: referer,
       // El CDN no debe comprimir: se reenvían sus Content-Length y Content-Range tal cual, y
@@ -287,7 +298,10 @@ async function pipeUpstream(
     // cuadran con los bytes que recibe.
     decompress: false,
     validateStatus: () => true
-  });
+  }), PRIMER_BYTE_MAX_MS, null);
+
+  // Ni cabeceras a tiempo: no hay vídeo que servir por aquí. 504 para que el cliente pruebe otro.
+  if (!upstream) return 504;
 
   if (upstream.status >= 400) {
     upstream.data?.destroy?.();
@@ -422,6 +436,7 @@ function sendRedirect(res: Response, url: string): void {
  */
 const ACUNADO_MAX_MS = 6000;
 const COMPROBACION_MAX_MS = 4000;
+const PRIMER_BYTE_MAX_MS = 6000;
 
 /** Tope para una promesa del camino de reproducción; al pasarse se sigue con el respaldo. */
 function conPlazo<T>(promesa: Promise<T>, ms: number, respaldo: T): Promise<T> {
