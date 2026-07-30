@@ -1289,7 +1289,25 @@ export class CatalogService {
       ? scraped.servers
       : (deLaFicha?.servers || []).filter(s => s && s.embed_url);
 
-    const servers = sortServersBySourcePriority(propios);
+    /**
+     * ANTES DE ENTREGARLOS: que el de arriba REPRODUZCA.
+     *
+     * Esta comprobación existía solo en el camino de las películas, así que los episodios se
+     * entregaban tal cual salían del scraping — con el vídeo directo primero, que es justo el que
+     * más caduca. Resultado: el primer servidor del capítulo 1 de "Invencible" daba error al darle
+     * a reproducir. `revisarServidores` baja hasta un segmento real, con tope de tiempo, y degrada
+     * lo que no responde; después se reordena, porque el sorter recoloca lo que quedó `offline` y
+     * vuelve a sellar el nombre como `[Embed]` cuando su vídeo directo ya no vale.
+     *
+     * Presupuesto de petición (4 s, 3 sondas, parando en el primero útil): el mismo que usa el
+     * detalle de una película, para no cambiar la latencia de pulsar Reproducir.
+     */
+    const revisados = await revisarServidores(
+      sortServersBySourcePriority(aplicarVeredictosRecordados(propios)),
+      { presupuestoMs: 4000, maximo: 3 }
+    );
+
+    const servers = sortServersBySourcePriority(revisados);
 
     return {
       id: `${serie.tmdb_id || serie.id}-${season}-${episode}`,
