@@ -1,5 +1,6 @@
 
 import { streamClient } from '../utils/httpClient';
+import { bytesReproducibles } from '../utils/segmentBytes';
 
 /**
  * ───────────────────────────────────────────────────────────────────────────────────────────
@@ -287,14 +288,14 @@ export async function revisarManifiesto(
 }
 
 /** ¿Son bytes de vídeo? Una página de error también viaja con 200 y con su Content-Length. */
-function pareceVideo(buf: Buffer): boolean {
-  if (buf.length < 16) return false;
-  const cabecera = buf.slice(0, 400).toString('latin1');
-  if (/^\s*<(!doctype|html|\?xml)/i.test(cabecera)) return false;
-  // MPEG-TS empieza por 0x47; fMP4 declara `ftyp`/`moof`/`styp` en los primeros bytes. Se acepta
-  // lo desconocido: hay CDN que sirven contenedores raros y no se va a condenar un vídeo por eso.
-  return true;
-}
+/**
+ * El criterio vive en src/utils/segmentBytes.ts, compartido con el camino que SIRVE el vídeo.
+ *
+ * Aquí antes se aceptaba todo lo que no fuera HTML, "lo desconocido incluido". Sonaba prudente y
+ * dejó pasar durante meses los segmentos de emturbovid, que llegan disfrazados de PNG: un PNG no
+ * es un contenedor desconocido, es un formato conocido que no es vídeo.
+ */
+const pareceVideo = bytesReproducibles;
 
 /**
  * Baja hasta un SEGMENTO de verdad y comprueba que se puede descargar.
@@ -341,7 +342,11 @@ export async function segmentoDescargable(
 
   try {
     const res = await streamClient.get(objetivo, {
-      headers: { Referer: referer, Range: 'bytes=0-1023' },
+      // 8 KB, no 1. Con 1 KB no cabía la comprobación del disfraz: el MPEG-TS de emturbovid
+      // empieza en el byte 941 y `inicioDelTs` necesita ver hasta 376 bytes más allá, así que
+      // habría dado "no es vídeo" y habría condenado al host entero — el arreglo matando a quien
+      // venía a salvar. Siguen siendo bytes que no se notan al lado de un segmento de 1,3 MB.
+      headers: { Referer: referer, Range: 'bytes=0-8191' },
       responseType: 'arraybuffer',
       timeout: 10000,
       validateStatus: () => true,

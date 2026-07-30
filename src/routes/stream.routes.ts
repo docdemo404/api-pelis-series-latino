@@ -1,4 +1,5 @@
 import { Router, Request, Response, NextFunction } from 'express';
+import { Transform, TransformCallback } from 'stream';
 import { ResolverService } from '../services/resolverService';
 import { BandwidthService } from '../services/bandwidthService';
 import { mintDirect, MintedStream } from '../services/directResolver';
@@ -7,6 +8,7 @@ import { bestMode, policyFor } from '../scrapers/hostPolicy';
 import { DirectMode } from '../types';
 import { sendErrorResponse } from '../utils/apiHelpers';
 import { USER_AGENT, streamClient } from '../utils/httpClient';
+import { inicioDelTs } from '../utils/segmentBytes';
 import { destinoSirveCors } from '../services/manifestHealth';
 import { comprobarDestino } from '../services/playbackHealth';
 import { externalProxyEnabled, proxyUrlFor } from '../utils/externalProxy';
@@ -262,6 +264,60 @@ async function serveManifest(
  * Si resulta que lo pedido era otra playlist (lo dice el Content-Type, no la extensión), se
  * reescribe en vez de reenviarse: sus segmentos también tienen que pasar por aquí.
  */
+/**
+ * SEGMENTOS DISFRAZADOS DE IMAGEN.
+ *
+ * emturbovid guarda su vídeo en Google Drive, y Drive no sirve ficheros de vídeo a cualquiera —
+ * pero sí sirve imágenes. Así que cada segmento sale de `lh3.googleusercontent.com` con
+ * `Content-Type: image/png` y ESTO dentro:
+ *
+ *     [ PNG de verdad, 806 bytes ] [ "a - S01E01 - vip.hdlatino.us" + relleno 0xFF ] [ MPEG-TS ]
+ *
+ * El vídeo real empieza en el byte 941 del ejemplo medido: a partir de ahí hay 7.028 paquetes de
+ * 188 bytes, el 100 % con su marca de sincronía y sin sobrar ninguno. O sea que el vídeo está
+ * perfecto; lo que sobra es el disfraz, y quitarlo lo hace su reproductor por JavaScript.
+ *
+ * Nosotros no lo quitábamos, y encima a esta familia se le entregaba en modo `redirect`: el
+ * cliente pedía los segmentos al CDN directamente y recibía imágenes. De ahí el síntoma que se
+ * reportó — un servidor rotulado "Vídeo directo" que ningún reproductor arranca: `<video src>`
+ * daba error 4 y hasta hls.js moría con `bufferAppendError`, que es exactamente lo que dice un
+ * reproductor cuando le das bytes que no son vídeo.
+ *
+ * SE DECIDE POR LOS BYTES, NO POR EL HOST, y eso importa: un segmento de vídeo legítimo no
+ * empieza nunca por la firma de un PNG, así que esto no puede estropear a nadie que ya funcione,
+ * y cubre de paso a cualquier otro host que se invente el mismo truco.
+ */
+class QuitarDisfraz extends Transform {
+  private cabecera: Buffer[] = [];
+  private acumulado = 0;
+  private yaDecidido = false;
+
+  _transform(chunk: Buffer, _enc: BufferEncoding, done: TransformCallback): void {
+    if (this.yaDecidido) return done(null, chunk);
+
+    this.cabecera.push(chunk);
+    this.acumulado += chunk.length;
+    // Con 64 KB basta de sobra: el disfraz medido ocupa menos de 1 KB. Esperar más sería
+    // retrasar el arranque del vídeo por nada.
+    if (this.acumulado < 65536) return done();
+
+    const junto = Buffer.concat(this.cabecera);
+    const inicio = inicioDelTs(junto);
+    this.yaDecidido = true;
+    this.cabecera = [];
+    // Si no se reconoce dónde empieza, se entrega tal cual: es mejor que el reproductor lo
+    // intente a que le llegue un segmento cortado por una corazonada nuestra.
+    done(null, inicio >= 0 ? junto.subarray(inicio) : junto);
+  }
+
+  _flush(done: TransformCallback): void {
+    if (this.yaDecidido || this.cabecera.length === 0) return done();
+    const junto = Buffer.concat(this.cabecera);
+    const inicio = inicioDelTs(junto);
+    done(null, inicio >= 0 ? junto.subarray(inicio) : junto);
+  }
+}
+
 async function pipeUpstream(
   req: Request,
   res: Response,
@@ -317,14 +373,28 @@ async function pipeUpstream(
     return null;
   }
 
-  res.status(upstream.status);
-  const passthrough = ['content-range', 'content-length', 'content-type', 'accept-ranges'];
+  /**
+   * Un segmento anunciado como imagen es el disfraz de `QuitarDisfraz`. Al quitarlo cambian los
+   * bytes, así que NO pueden reenviarse `Content-Length` ni `Content-Range` —dirían un tamaño que
+   * ya no es— ni ofrecerse Range: los desplazamientos se corren. Se sirve entero y troceado.
+   */
+  const disfrazado = /^image\//i.test(String(upstream.headers['content-type'] || ''));
+
+  res.status(disfrazado ? 200 : upstream.status);
+  const passthrough = disfrazado
+    ? []
+    : ['content-range', 'content-length', 'content-type', 'accept-ranges'];
   for (const header of passthrough) {
     const value = upstream.headers[header];
     if (value) res.setHeader(header, String(value));
   }
-  if (!upstream.headers['accept-ranges']) res.setHeader('Accept-Ranges', 'bytes');
-  if (!upstream.headers['content-type']) {
+  if (disfrazado) {
+    res.setHeader('Content-Type', 'video/mp2t');
+    res.setHeader('Accept-Ranges', 'none');
+  } else if (!upstream.headers['accept-ranges']) {
+    res.setHeader('Accept-Ranges', 'bytes');
+  }
+  if (!disfrazado && !upstream.headers['content-type']) {
     res.setHeader('Content-Type', target.includes('.m3u8') ? 'application/x-mpegURL' : 'video/mp4');
   }
   applyCachePolicy(res, cacheControl);
@@ -343,7 +413,13 @@ async function pipeUpstream(
     res.destroy();
   });
 
-  upstream.data.pipe(res);
+  if (disfrazado) {
+    const limpiador = new QuitarDisfraz();
+    limpiador.on('error', () => res.destroy());
+    upstream.data.pipe(limpiador).pipe(res);
+  } else {
+    upstream.data.pipe(res);
+  }
   return null;
 }
 

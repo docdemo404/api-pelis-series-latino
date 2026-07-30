@@ -81,6 +81,19 @@ export interface HostPolicy {
   segmentRefererChecked: boolean;
   /** El host del segmento manda `Access-Control-Allow-Origin`. Sin esto hls.js no puede leerlo. */
   segmentCors: boolean;
+  /**
+   * Sus segmentos NO son vídeo tal y como se sirven: llegan envueltos en otra cosa.
+   *
+   * emturbovid aloja en Google Drive, que no sirve vídeo a cualquiera pero sí imágenes, así que
+   * cada segmento sale con `Content-Type: image/png` y con un PNG de 806 bytes por delante del
+   * MPEG-TS. Su reproductor lo desenvuelve por JavaScript; un reproductor cualquiera no.
+   *
+   * Es la única propiedad que puede ATAR un host al proxy aunque su CDN sea impecable: da igual
+   * que cruce redes, que no pida Referer y que mande CORS —lo hace todo bien— si los bytes que
+   * entrega no se pueden reproducir sin quitarles el disfraz, y eso solo lo podemos hacer aquí.
+   * Ver `QuitarDisfraz` en src/routes/stream.routes.ts.
+   */
+  segmentosDisfrazados?: boolean;
   /** Vida observada de la firma, en segundos. `null` = no la declara en la URL. */
   tokenTtlSeconds: number | null;
   measuredAt: string;
@@ -264,7 +277,7 @@ const POLICIES: HostPolicy[] = [
     // (tres muestras) dio exactamente este perfil. Antes no casaba con nada: `vimeos.net` estaba
     // en la lista, pero eso es el CDN y `policyFor` compara contra el host del EMBED, así que sus
     // 276 servidores se quedaban en `CONSERVATIVE` pagando proxy sin motivo.
-    match: ['emturbovid', 'turbovidhls', 'vimeos.net', 'unlimplay'],
+    match: ['vimeos.net', 'unlimplay'],
     ipBound: false,
     refererRequired: false,
     refererChecked: false,
@@ -275,6 +288,34 @@ const POLICIES: HostPolicy[] = [
     segmentCors: true,
     tokenTtlSeconds: null,
     measuredAt: MEASURED_AT,
+  },
+  {
+    /**
+     * emturbovid SE SEPARA de la entrada de arriba, con la que compartía perfil, porque hay una
+     * cosa que aquella medición no miró: QUÉ HAY DENTRO de los segmentos.
+     *
+     * Todo lo demás lo cumple —cruza redes, no pide Referer, manda CORS— y por eso se le venía
+     * dando `redirect`, que es lo más rápido que hay. Pero sus segmentos salen de Google Drive
+     * disfrazados de PNG, así que el cliente recibía imágenes y ningún reproductor arrancaba: se
+     * reportó como "el primer servidor dice Vídeo directo y no reproduce", y era exactamente eso.
+     *
+     * Con `segmentosDisfrazados` vuelve al proxy. Cuesta ancho de banda —es uno de los hosts más
+     * grandes del catálogo— y aun así es la opción barata: lo otro es un servidor que se anuncia
+     * y no funciona, que es peor que no ofrecerlo.
+     */
+    match: ['emturbovid', 'turbovidhls'],
+    ipBound: false,
+    refererRequired: false,
+    refererChecked: false,
+    cors: true,
+    browserUaRequired: false,
+    segmentRefererRequired: false,
+    segmentRefererChecked: false,
+    segmentCors: true,
+    segmentosDisfrazados: true,
+    tokenTtlSeconds: null,
+    measuredAt: '2026-07-30',
+    cdn: 'lh3.googleusercontent.com (PNG + MPEG-TS)',
   },
 ];
 
@@ -336,6 +377,11 @@ export function bestMode(embedUrl: string, kind: DirectKind, caps: ClientCaps = 
 
   // La firma va atada a la red que la pidió: solo sirve desde la máquina que la acuñó.
   if (policy.ipBound) return 'proxy';
+
+  // Los bytes no son vídeo hasta que les quitamos el envoltorio, así que tienen que pasar por
+  // aquí. Va ANTES incluso de `caps.setsHeaders`: no es cuestión de qué cabeceras sepa poner el
+  // cliente, es que ningún reproductor —nativo o no— sabe desenvolverlos.
+  if (policy.segmentosDisfrazados) return 'proxy';
 
   // Un cliente nativo pone las cabeceras que haga falta, así que a partir de aquí puede todo.
   if (caps.setsHeaders) return 'redirect';
