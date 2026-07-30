@@ -794,11 +794,36 @@ export function mereceRepasoDeExtraccion(embedUrl: string): boolean {
 
   try {
     const host = new URL(embedUrl).hostname.toLowerCase();
-    return ['unlimplay', 'ahvsh', 'streamlare'].some(h => host.includes(h));
+    return HOSTS_CON_EXTRACTOR.some(h => host.includes(h));
   } catch {
     return false;
   }
 }
+
+/**
+ * TODOS los hosts de los que hoy se sabe sacar el vídeo. Es la lista que decide qué fichas vale
+ * la pena volver a mirar cuando se añade o se arregla un extractor.
+ *
+ * Estaba incompleta y costaba caro: solo nombraba unlimplay, ahvsh y streamlare, así que el
+ * repaso saltaba las fichas de emturbovid, de la familia upns, de gscdn… — los hosts MÁS
+ * numerosos del catálogo. El resultado es que 2.343 servidores seguían guardados como simple
+ * embed teniendo su extractor escrito y funcionando, y el repaso contestaba "todas resueltas"
+ * porque ni las miraba.
+ *
+ * Al escribir un extractor nuevo hay que añadirlo AQUÍ. Es lo que separa arreglar el futuro de
+ * arreglar también las 14.000 fichas que ya están guardadas.
+ */
+const HOSTS_CON_EXTRACTOR = [
+  'emturbovid', 'turbovidhls',                       // HLS con segmentos disfrazados de PNG
+  'upns.', 'strp2p', '4meplayer', 'rpmstream',       // familia upns (API cifrada)
+  'blogspot', 'blogfc',                              // envoltorio de FuegoCine (`link=`)
+  'gscdn', 'goodstream',                             // `sources:[{file:…}]` a la vista
+  'dropload', 'streamwish', 'filelions', 'lulustream', // P.A.C.K.E.R.
+  'ok.ru', 'odnoklassniki',                          // `data-options` con la ficha entera
+  'unlimplay', 'vimeos',                             // agregador con `remux` propio
+  'drive.google',                                    // `get_video_info`
+  'ahvsh', 'streamlare',                             // alcanzables desde que se arregló el TLS
+];
 
 /** ¿Este host solo se puede resolver llamando a su API, y por tanto al reproducir? */
 export function isDeferredDirectHost(embedUrl: string): boolean {
