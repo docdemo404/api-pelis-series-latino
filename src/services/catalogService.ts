@@ -10,7 +10,20 @@ import { revisarServidores, aplicarVeredictosRecordados } from './playbackHealth
 
 // TTL del caché de catálogo/búsqueda. Con Redis (KV_REST_API_* / UPSTASH_*) las entradas
 // se comparten entre lambdas y sobreviven cold starts; sin Redis degrada a memoria local.
-const CACHE_TTL_SECONDS = 10 * 60;
+/**
+ * TTL del caché de catálogo/búsqueda/enlaces.
+ *
+ * Eran 10 minutos, y ese número venía de cuando `direct_stream` guardaba la URL firmada del CDN,
+ * que caduca. Hoy guarda `/api/v1/stream/direct?e=<embed>`, que es permanente y vuelve a acuñar la
+ * URL real en CADA reproducción, así que la lista de servidores no se echa a perder en diez
+ * minutos. Y esos diez minutos costaban caro: reconstruir la ficha de un capítulo son 5-9 s de
+ * scraping, así que cada cuarto de hora alguien se los comía.
+ *
+ * Lo que sí puede cambiar dentro de la hora es que un servidor se muera, y de eso no se encarga
+ * este TTL sino los veredictos de salud, que se aplican SIEMPRE al leer del caché
+ * (`aplicarVeredictosRecordados`). Caché largo con veredicto fresco encima.
+ */
+const CACHE_TTL_SECONDS = 60 * 60;
 
 // La METADATA (sinopsis, pósters, reparto…) apenas cambia: se cachea mucho más tiempo que
 // los enlaces, que sí caducan. Es lo que permite que la ficha emergente abra al instante.
@@ -1290,6 +1303,30 @@ export class CatalogService {
    * lo enseña como no disponible, que es la verdad, en vez de reproducir otra cosa.
    */
   static async getEpisode(id: string, season: number, episode: number): Promise<any | null> {
+    /**
+     * CACHÉ DEL EPISODIO. No tenía ninguna: cada vez que alguien abría un capítulo se volvía a
+     * scrapear su página y a sondear sus servidores, 9 segundos medidos. Con el mismo TTL que los
+     * enlaces de una película (10 min), porque es lo mismo que caduca: las URLs firmadas.
+     */
+    const cacheKey = `ep:${String(id).toLowerCase().trim()}:${season}:${episode}`;
+    const cacheado = await CacheStore.get<any>(cacheKey);
+    if (cacheado) {
+      // Veredicto fresco sobre lo cacheado: si alguno de estos servidores se ha demostrado muerto
+      // desde que se guardó —lo haya descubierto esta instancia u otra— se cae aquí, sin red.
+      const vivos = aplicarVeredictosRecordados(cacheado.servers || []).filter((x: any) => x.status !== 'offline');
+      if (vivos.length === (cacheado.servers || []).length) return cacheado;
+      return {
+        ...cacheado,
+        servers: vivos,
+        primary_stream: vivos.length > 0 ? getPrimaryStream(vivos) : undefined,
+        streams: {
+          status: vivos.length > 0 ? 'ready' : 'unavailable',
+          descartados_por_no_reproducir:
+            (cacheado.streams?.descartados_por_no_reproducir || 0) + ((cacheado.servers || []).length - vivos.length)
+        }
+      };
+    }
+
     const serie = await this.getMetadata(id, 'tvseries');
     if (!serie) return null;
 
@@ -1323,11 +1360,12 @@ export class CatalogService {
      */
     const revisados = await revisarServidores(
       sortServersBySourcePriority(aplicarVeredictosRecordados(propios)),
-      // Un episodio trae 4-6 servidores y a menudo la mitad están caídos: con tope de 3 sondas se
-      // gastaban todas en los muertos y el último se entregaba SIN comprobar, conservando su
-      // `online` viejo. Se sube el cupo para que quepa la lista entera; el que manda de verdad es
-      // el presupuesto de tiempo, y lo ya sabido sale del caché sin gastar sonda.
-      { presupuestoMs: 6000, maximo: 6 }
+      // Un episodio trae 4-6 servidores y a menudo la mitad están caídos, así que el cupo de sondas
+      // cubre la lista entera: con tope de 3 se gastaban en los muertos y el último se entregaba
+      // SIN comprobar, conservando su `online` viejo. Manda el presupuesto de TIEMPO, que se queda
+      // en 3 s para no castigar la apertura — y lo ya sabido sale del caché compartido sin gastar
+      // sonda, así que la segunda vez que alguien abre este capítulo no se sondea nada.
+      { presupuestoMs: 3000, maximo: 6 }
     );
 
     /**
@@ -1345,7 +1383,7 @@ export class CatalogService {
     const servers = todos.filter(s => s.status !== 'offline');
     const descartados = todos.length - servers.length;
 
-    return {
+    const resultado = {
       id: `${serie.tmdb_id || serie.id}-${season}-${episode}`,
       series_id: serie.id,
       series_title: serie.title,
@@ -1369,6 +1407,13 @@ export class CatalogService {
         descartados_por_no_reproducir: descartados
       }
     };
+
+    // Solo se cachea lo que aporta algo. Un `pending` —no se encontró la página— se deja sin
+    // cachear para que el siguiente intento vuelva a probar.
+    if (servers.length > 0 || descartados > 0) {
+      await CacheStore.set(cacheKey, resultado, CACHE_TTL_SECONDS);
+    }
+    return resultado;
   }
 
   /** scrapeDetail con techo de latencia: una fuente lenta no puede bloquear la respuesta. */

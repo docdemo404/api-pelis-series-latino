@@ -185,6 +185,11 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
    */
   const directScore = (s: ServerOption): number => {
     if (!s.direct_stream) return 0;
+    // `public` es el más rápido que hay y estaba puntuando como `proxy`: su URL no caduca ni va
+    // atada a una IP, así que se entrega tal cual y el reproductor habla DIRECTAMENTE con el CDN —
+    // cero saltos, cero bytes nuestros, y adelantar cuesta lo que el CDN tarde. Empatarlo con el
+    // modo que reenvía cada byte por nuestra función era lo contrario de lo que se quiere.
+    if (s.direct_mode === 'public') return 4;
     if (s.direct_mode === 'redirect') return 3;
     if (s.direct_mode === 'manifest') return 2;
     return 1;

@@ -675,12 +675,25 @@ export class RealScraperService {
     const porId = ['serie', 'anime', 'dorama']
       .map(cat => `${BASE_URL}/${cat}/${seriesSlug}/season/${season}/episode/${episode}`);
 
-    const candidatas = Array.from(new Set([...desdeFuente, ...porId]));
+    /**
+     * POR TANDAS, no todas a la vez.
+     *
+     * Antes se lanzaban las 4-6 candidatas en paralelo y se esperaba a TODAS (`allSettled`), así
+     * que la respuesta costaba lo que la más lenta aunque la primera ya fuera la buena: 4,5 s
+     * medidos cuando una sola página tarda 2. Las que salen de `source_urls` son la página de esta
+     * serie, así que aciertan casi siempre; las del id son el respaldo para cuando el id ES el
+     * slug. Se prueba la primera tanda y solo si no sale nada se paga la segunda.
+     */
+    const tandas = [desdeFuente, porId.filter(u => !desdeFuente.includes(u))].filter(t => t.length > 0);
 
-    const settled = await Promise.allSettled(candidatas.map(u => this.scrapeDetail(u)));
-    const detail = settled
-      .map(r => (r.status === 'fulfilled' ? r.value : null))
-      .find(d => d && d.servers && d.servers.length > 0 && esDelEpisodio(d.title, season, episode));
+    let detail = null as Awaited<ReturnType<typeof this.scrapeDetail>>;
+    for (const tanda of tandas) {
+      const settled = await Promise.allSettled(tanda.map(u => this.scrapeDetail(u)));
+      detail = settled
+        .map(r => (r.status === 'fulfilled' ? r.value : null))
+        .find(d => d && d.servers && d.servers.length > 0 && esDelEpisodio(d.title, season, episode)) || null;
+      if (detail) break;
+    }
 
     if (!detail) return null;
 

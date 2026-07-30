@@ -3,7 +3,13 @@ import { CatalogService } from './catalogService';
 import { TmdbService } from './tmdbService';
 import { CacheStore } from '../cache/store';
 
-const HOME_TTL_SECONDS = 10 * 60;
+/**
+ * TTL del home. Eran 10 minutos y reconstruirlo cuesta 8,5 s medidos, así que cada cuarto de hora
+ * un usuario cualquiera pagaba ese tiempo entero al abrir la app — el peor sitio donde ponerlo.
+ * El home es el MISMO para todos los de un país y su contenido lo cambia el crawl diario, así que
+ * no hay ninguna razón para rehacerlo cada diez minutos.
+ */
+const HOME_TTL_SECONDS = 2 * 60 * 60;
 
 /** Ítems mínimos para que una fila se muestre: por debajo, el carrusel se ve incompleto. */
 const MIN_ROW_ITEMS = 8;
