@@ -529,7 +529,15 @@ export class RealScraperService {
           const { embedUrl, status, direct, label } = res.value;
           // Los campos de vídeo directo se resuelven ANTES del nombre porque el nombre los
           // describe: son ellos los que deciden si esto es un vídeo directo o un embed.
-          const directo = direct ? describeDirect(embedUrl, direct) : deferredDirectFields(embedUrl);
+          //
+          // Y no se le ponen a un embed que ACABAMOS de declarar muerto. Parece obvio y no lo era:
+          // el envoltorio de FuegoCine lleva el fichero en su `link=`, así que la extracción sale
+          // adelante aunque ese fichero esté borrado, y se guardaba un `direct_stream` que no
+          // reproduce. Publicar un vídeo directo muerto es PEOR que no publicar ninguno — el
+          // cliente lo prueba primero, pierde el tiempo y solo entonces cae al embed.
+          const directo = status === 'offline'
+            ? {}
+            : direct ? describeDirect(embedUrl, direct) : deferredDirectFields(embedUrl);
           servers.push({
             id: `srv_tio_${slug}_${i + 1}`,
             name: nombreConTipo(`${getServerName(embedUrl, '')} - ${label}`, Boolean(directo.direct_stream)),
@@ -886,7 +894,12 @@ export class RealScraperService {
           if (embedUrl) {
             const { status, html: embedHtml } = await inspectEmbed(embedUrl, 'https://www.fuegocine.com');
             const direct = await extractDirect(embedUrl, embedHtml);
-            const directo = direct ? describeDirect(embedUrl, direct) : deferredDirectFields(embedUrl);
+            // Un embed declarado muerto no se anuncia con vídeo directo, por el mismo motivo que
+            // en el camino de tioplus: aquí el `link=` es justo el que puede apuntar a un fichero
+            // de pixeldrain borrado y la extracción saldría adelante igualmente.
+            const directo = status === 'offline'
+              ? {}
+              : direct ? describeDirect(embedUrl, direct) : deferredDirectFields(embedUrl);
             servers.push({
               id: `srv_fc_${slug}_${idx++}`,
               name: nombreConTipo(`FuegoCine - ${rawName}`, Boolean(directo.direct_stream)),

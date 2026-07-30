@@ -1878,6 +1878,41 @@ async function purgeDeadServers(apply: boolean, limitArg?: number, soloHost?: st
    */
   const CONCURRENCIA = 10;
   const porMotivo = new Map<string, number>();
+
+  let fichasTocadas = 0;
+  let servidoresRetirados = 0;
+  let fichasQueSeQuedanSinNada = 0;
+
+  /**
+   * Escribe lo decidido HASTA AHORA. Se llama por tandas, no una vez al final.
+   *
+   * La primera versión comprobaba los 18.732 embeds y solo entonces escribía: dos horas de
+   * trabajo que se perdían ENTERAS si el proceso se cortaba, y en un runner de CI con límite de
+   * tiempo eso no es una hipótesis. Escribir por tandas es además idempotente — quitar servidores
+   * ya quitados no hace nada — así que una corrida interrumpida deja el catálogo mejor que como
+   * lo encontró, no igual.
+   */
+  async function escribirLoDecidido(): Promise<void> {
+    for (const row of rows) {
+      const antes: any[] = row.servers || [];
+      const despues = antes.filter(s => !(s?.embed_url && veredictos.get(s.embed_url) === true));
+      if (despues.length === antes.length) continue;
+
+      fichasTocadas++;
+      servidoresRetirados += antes.length - despues.length;
+      if (despues.length === 0) fichasQueSeQuedanSinNada++;
+      row.servers = despues; // para que la siguiente tanda no vuelva a contarlos
+
+      if (!apply) continue;
+      marcarTocada(row);
+      const { error } = await supabase
+        .from('media_items')
+        .update({ servers: despues, has_streams: despues.length > 0 })
+        .eq('id', row.id);
+      if (error) console.warn(`   ⚠ ${row.id}: ${error.message}`);
+    }
+  }
+
   let hechos = 0;
   for (let i = 0; i < lista.length; i += CONCURRENCIA) {
     await Promise.all(
@@ -1894,10 +1929,11 @@ async function purgeDeadServers(apply: boolean, limitArg?: number, soloHost?: st
     );
     hechos += Math.min(CONCURRENCIA, lista.length - i);
     if (hechos % 800 < CONCURRENCIA) {
-      const muertos = Array.from(veredictos.values()).filter(Boolean).length;
-      console.log(`   ${hechos}/${lista.length} comprobados · ${muertos} para retirar`);
+      await escribirLoDecidido();
+      console.log(`   ${hechos}/${lista.length} comprobados · ${servidoresRetirados} retirados en ${fichasTocadas} fichas`);
     }
   }
+  await escribirLoDecidido();
 
   const porHost = new Map<string, { muertos: number; total: number }>();
   for (const [url, muerto] of veredictos) {
@@ -1911,28 +1947,6 @@ async function purgeDeadServers(apply: boolean, limitArg?: number, soloHost?: st
   console.log('\n🔍 Motivos por los que un embed salió caído (no todos autorizan a borrarlo):');
   for (const [motivo, n] of Array.from(porMotivo).sort((a, b) => b[1] - a[1])) {
     console.log(`   ${String(n).padStart(5)}  ${motivo.padEnd(30)} ${motivoAutorizaBorrar(motivo) ? '→ se retira' : '→ se DEJA (no es prueba de borrado)'}`);
-  }
-
-  let fichasTocadas = 0;
-  let servidoresRetirados = 0;
-  let fichasQueSeQuedanSinNada = 0;
-
-  for (const row of rows) {
-    const antes: any[] = row.servers || [];
-    const despues = antes.filter(s => !(s?.embed_url && veredictos.get(s.embed_url) === true));
-    if (despues.length === antes.length) continue;
-
-    fichasTocadas++;
-    servidoresRetirados += antes.length - despues.length;
-    if (despues.length === 0) fichasQueSeQuedanSinNada++;
-
-    if (!apply) continue;
-    marcarTocada(row);
-    const { error } = await supabase
-      .from('media_items')
-      .update({ servers: despues, has_streams: despues.length > 0 })
-      .eq('id', row.id);
-    if (error) console.warn(`   ⚠ ${row.id}: ${error.message}`);
   }
 
   console.log(`\n📊 Por host (muertos / comprobados):`);
