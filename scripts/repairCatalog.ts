@@ -21,6 +21,9 @@
  *   npm run repair:catalog -- --purgar-cache --apply
  *                                                 # retira del caché las fichas cambiadas en 24 h
  *                                                 # (necesita las credenciales del caché)
+ *   npm run repair:catalog -- --purgar-cache --apply --fantasmas
+ *                                                 # busca en el CACHÉ fichas que ya no están en
+ *                                                 # la base y las retira (no depende de logs)
  *   npm run repair:catalog -- --purgar-cache --apply --ids=a,b
  *                                                 # por id: para fichas ya BORRADAS, cuya entrada
  *                                                 # de caché seguiría respondiendo 200
@@ -917,6 +920,67 @@ async function purgeRecentlyChanged(apply: boolean, horas: number, ids?: string[
   console.log(`   ✅ ${filas.length} fichas retiradas del caché (${claves.length} claves en ${Math.ceil(claves.length / TANDA)} peticiones)`);
 }
 
+/**
+ * PURGA DE ENTRADAS HUÉRFANAS (`--purgar-cache --fantasmas`).
+ *
+ * Una reparación que funde un duplicado BORRA su fila, pero su entrada de caché sigue viva: ese id
+ * responde 200 con la metadata de la obra equivocada hasta que caduque (6 h), y al no estar en la
+ * tabla no hay consulta a la base que la encuentre. Tirar de la lista del log tampoco vale — basta
+ * con que una pasada no dejara log para que su ficha se quede fuera, que es justo lo que pasó con
+ * `2026-01-eric-2024-html`.
+ *
+ * Así que se le pregunta al CACHÉ qué tiene guardado y se comprueba contra la base. Lo que ya no
+ * existe, fuera. Es la comprobación que no depende de acordarse de nada.
+ */
+async function purgeGhostCacheEntries(apply: boolean): Promise<void> {
+  console.log(`👻 Buscando entradas de caché de fichas que ya no existen${apply ? '' : ' (dry-run)'}...`);
+
+  if (!CacheStore.isShared()) {
+    console.warn('   ⚠ Sin credenciales de caché: esto no alcanza al Redis de producción.');
+    return;
+  }
+
+  const claves = await CacheStore.keys('*');
+  console.log(`   ${claves.length} claves en el caché`);
+
+  // Solo las de ficha (`meta:<id>` / `byid:<id>`), quitando el sufijo de tipo.
+  const porId = new Map<string, string[]>();
+  for (const k of claves) {
+    const m = k.match(/^(?:meta|byid):(.+)$/);
+    if (!m) continue;
+    const id = m[1].replace(/:(movie|tvseries)$/, '');
+    if (!id || /^-?\d+$/.test(id)) continue;   // las numéricas son por tmdb_id, no por slug
+    porId.set(id, [...(porId.get(id) || []), k]);
+  }
+  console.log(`   ${porId.size} fichas distintas cacheadas por su id`);
+  if (porId.size === 0) return;
+
+  const ids = Array.from(porId.keys());
+  const vivos = new Set<string>();
+  const TANDA = 200;
+  for (let i = 0; i < ids.length; i += TANDA) {
+    const { data } = await db.from('media_items').select('id').in('id', ids.slice(i, i + TANDA));
+    for (const r of (data || []) as any[]) vivos.add(String(r.id));
+  }
+
+  const fantasmas = ids.filter(id => !vivos.has(id));
+  if (fantasmas.length === 0) {
+    console.log('   ✅ ninguna entrada huérfana');
+    return;
+  }
+
+  console.log(`   ${fantasmas.length} ficha(s) cacheadas que ya NO están en la base:`);
+  for (const id of fantasmas) console.log(`      ␡ ${id}`);
+  if (!apply) {
+    console.log('   (dry-run: repite con --apply)');
+    return;
+  }
+
+  const aBorrar = fantasmas.flatMap(id => porId.get(id) || []);
+  await CacheStore.del(...aBorrar);
+  console.log(`   ✅ ${aBorrar.length} claves borradas`);
+}
+
 const verifyCheckpointFile = (apply: boolean) =>
   apply ? 'repair_verify_progress.json' : 'repair_verify_progress.dry.json';
 
@@ -1747,6 +1811,10 @@ async function main() {
   }
 
   if (process.argv.includes('--purgar-cache')) {
+    if (process.argv.includes('--fantasmas')) {
+      await purgeGhostCacheEntries(apply);
+      return;
+    }
     const h = parseInt((process.argv.find(a => a.startsWith('--desde=')) || '').split('=')[1] || '', 10);
     const idsArg = (process.argv.find(a => a.startsWith('--ids=')) || '').split('=')[1];
     await purgeRecentlyChanged(

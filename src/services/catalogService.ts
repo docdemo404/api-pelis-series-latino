@@ -1108,6 +1108,23 @@ export class CatalogService {
       }
     }
 
+    /**
+     * 1-bis. ¿HAY UNA FICHA QUE YA SEA DUEÑA DE ESTA PÁGINA?
+     *
+     * El slug pedido puede ser el de una fila que se FUNDIÓ en otra y se borró (así se unifican los
+     * duplicados entre fuentes). Su página, en cambio, quedó apuntada en la ficha que la absorbió,
+     * de modo que hay a quién preguntar: quien tenga esa url en `source_urls` es la ficha buena.
+     *
+     * Sin esto la petición caía al camino de abajo y se RESUCITABA la ficha scrapeando su página en
+     * vivo — volviendo a emparejarla con TMDB desde cero y, si el emparejado no sale igual, con la
+     * obra equivocada. Y encima se cacheaba: pedir `2026-01-eric-2024-html` devolvía un especial de
+     * monólogos en vez de la miniserie "Eric", que es la ficha que absorbió esa página.
+     */
+    if (!result) {
+      const dueña = await this.fichaQuePoseeLaPagina(q);
+      if (dueña) result = dueña;
+    }
+
     // 1-2. Resolver el slug contra las fuentes reales (FuegoCine y TioPlus).
     if (!result) {
       const fromSource = await this.resolveFromSource(q);
@@ -1200,6 +1217,44 @@ export class CatalogService {
     } catch {}
 
     return ajenas;
+  }
+
+  /**
+   * La ficha que tiene apuntada como propia la página de este slug, si existe.
+   *
+   * Es la contrapartida de `candidateIdsForUrl`: en vez de preguntar "¿de quién es esta url?", se
+   * pregunta "¿quién guarda una url que se llame así?". Sirve para que un slug ya fundido devuelva
+   * la ficha que lo absorbió en lugar de resucitarse solo. Una consulta con `LIKE` sobre
+   * `source_urls`, acotada: si no hay dueña clara no se devuelve nada y sigue el camino normal.
+   */
+  private static async fichaQuePoseeLaPagina(slug: string): Promise<MediaItem | null> {
+    const s = String(slug || '').trim();
+    if (s.length < 4) return null;
+
+    // De `2026-01-eric-2024-html` (molde FuegoCine) se saca el trozo que aparece en la url real:
+    // `2026/01/eric-2024.html`. Del molde TioPlus, el slug entero ya es el último tramo.
+    const comoRuta = s.replace(/-html$/, '.html').replace(/^(\d{4})-(\d{2})-/, '$1/$2/');
+    const patrones = Array.from(new Set([comoRuta, s]));
+
+    try {
+      for (const p of patrones) {
+        const { data } = await supabase
+          .from('media_items')
+          .select('*')
+          .or(`source_urls.cs.{https://www.fuegocine.com/${p}},source_url.ilike.%/${p}`)
+          .limit(2);
+        const filas = data || [];
+        // Si hay más de una candidata no se adivina: que decidan los caminos de abajo.
+        if (filas.length === 1) {
+          const item = this.mapDbItemToMediaItem(filas[0]);
+          // Y tiene que ser suya de verdad, con los mismos moldes que usa todo lo demás.
+          const urls = [...(item._source_urls || []), item._source_url].filter(Boolean) as string[];
+          if (urls.some(u => candidateIdsForUrl(u).includes(s))) return item;
+        }
+      }
+    } catch {}
+
+    return null;
   }
 
   /** scrapeDetail con techo de latencia: una fuente lenta no puede bloquear la respuesta. */

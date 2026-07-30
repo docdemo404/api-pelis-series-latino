@@ -117,6 +117,35 @@ export class CacheStore {
   }
 
   /**
+   * Lista las claves guardadas que casan con un patrón (sin el prefijo del proyecto).
+   *
+   * Sirve para encontrar entradas HUÉRFANAS: cuando una reparación funde un duplicado borra su
+   * fila, pero su entrada de caché sigue viva y ese id responde 200 con la metadata de la obra
+   * equivocada. Al no estar en la tabla, ninguna consulta a la base la encuentra — hay que
+   * preguntarle al caché qué tiene guardado.
+   *
+   * Recorre con SCAN, no con KEYS, para no bloquear el servidor. Devuelve [] sin Redis.
+   */
+  static async keys(pattern: string): Promise<string[]> {
+    if (!this.isShared()) {
+      return Array.from(memoryCache.keys())
+        .filter(k => k.startsWith(NAMESPACE))
+        .map(k => k.slice(NAMESPACE.length));
+    }
+
+    const encontradas: string[] = [];
+    let cursor = '0';
+    do {
+      const res = await kvCommand<[string, string[]]>(['SCAN', cursor, 'MATCH', NAMESPACE + pattern, 'COUNT', '500']);
+      if (!res || !Array.isArray(res)) break;
+      cursor = String(res[0]);
+      for (const k of res[1] || []) encontradas.push(String(k).slice(NAMESPACE.length));
+    } while (cursor !== '0');
+
+    return encontradas;
+  }
+
+  /**
    * Limpia el caché en memoria del proceso. En Redis las claves expiran por TTL;
    * no se hace FLUSH global para no arrasar claves ajenas al proyecto (para borrar las de una
    * ficha concreta, `del`).
