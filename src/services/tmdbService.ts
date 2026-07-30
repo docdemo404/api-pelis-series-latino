@@ -210,20 +210,6 @@ function pickCreators(tmdbData: any): string[] | undefined {
   return names.length > 0 ? names : undefined;
 }
 
-/**
- * Número de entrega de una saga: el que cierra el título ANTES del subtítulo.
- * "Solo en casa 4" → 4 · "Die Hart 2: Die Harter" → 2 · "Avengers 2: Era de Ultrón" → 2.
- *
- * Se corta en los dos puntos porque ahí es donde suele ir el número en castellano, y se piden
- * como mucho DOS dígitos a propósito: un año dentro del título no es una entrega
- * ("Blade Runner 2049", "Madrid 1987", "Cherry 2000").
- */
-function sequelNumber(title: string): number | null {
-  const main = normalizeTitle(title).split(/[:–—]| - /)[0];
-  const m = main.trim().match(/(?:^|\s)(\d{1,2})\s*$/);
-  return m ? Number(m[1]) : null;
-}
-
 /** Similitud 0..1 entre dos títulos: exacto > prefijo > substring > solapamiento de palabras. */
 function similarity(a: string, b: string): number {
   const ca = canonicalTitle(a);
@@ -231,13 +217,12 @@ function similarity(a: string, b: string): number {
   if (!ca || !cb) return 0;
   if (ca === cb) return 1;
 
-  // Números de secuela DISCORDANTES: no es el mismo título, aunque uno contenga al otro.
-  // "Die Hart 2: Die Harter" no es "Die Hart", ni "Solo en casa 4" es "Solo en casa": la
-  // coincidencia de prefijo puntúa 0.85 y, si además cuadra el año, se daba por respaldada y
-  // la ficha se quedaba con la carátula de la otra entrega.
-  const sa = sequelNumber(a);
-  const sb = sequelNumber(b);
-  if ((sa ?? 1) !== (sb ?? 1)) return 0;
+  // NO se penaliza aquí el número de entrega discordante ("Die Hart 2: Die Harter" frente a
+  // "Die Hart"). Se probó y sale más caro que el problema: las fuentes numeran entregas que TMDB
+  // deja sin numerar, así que "Rápidos y Furiosos 4" (2009) se quedaba sin emparejar con su
+  // propia ficha. A las entregas de una saga las separan AÑOS, y de eso ya se encarga el año en
+  // `scoreResult`; lo que confundía a las dos "Die Hart" era otra cosa —el rescate por título
+  // alternativo daba por respaldado un desfase de 5 años—, y eso está arreglado donde tocaba.
 
   /**
    * Prefijo y substring se miden por PALABRAS COMPLETAS, no por caracteres.
