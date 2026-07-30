@@ -54,7 +54,7 @@
  */
 import 'dotenv/config';
 import * as fs from 'fs';
-import { TmdbService, tmdbImagePath } from '../src/services/tmdbService';
+import { TmdbService, tmdbImagePath, OTRO_ALFABETO } from '../src/services/tmdbService';
 import { RealScraperService, SourceSignals } from '../src/services/realScraperService';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
 import { canonicalTitle, normalizeTitle, searchIndexKey, dedupeTitles, sourceTitleFromSlug } from '../src/utils/text';
@@ -943,6 +943,18 @@ async function verifyAgainstSource(
         continue;
       }
       if (confirmedByImage) {
+        // Ni que esté ROTULADA de forma legible: TMDB devuelve el título original cuando no tiene
+        // traducción al español, así que la ficha puede quedar escrita en coreano, japonés o
+        // cirílico. La página de origen publica un nombre que sí se puede leer, y el id no cambia.
+        if (OTRO_ALFABETO.test(row.title || '') && !OTRO_ALFABETO.test(signals.title)) {
+          const rerotulada = await rewriteRowFromMatch(row, type, row.tmdb_id, signals, { apply, withMetadataSource });
+          if (rerotulada.title) {
+            console.log(`   ✓ ${row.id}\n     "${row.title}" estaba rotulada en otro alfabeto → "${rerotulada.title}" (confirmada por imagen, mismo tmdb ${row.tmdb_id})`);
+            fixed++;
+            continue;
+          }
+        }
+
         // Confirmar que la ficha es la correcta no dice que esté RELLENA: si TMDB falló al pedir
         // los detalles en su día, la fila conserva el id bueno con la metadata del sitio de
         // origen. Se rellena aquí también, o esta vía la daría por buena para siempre.
@@ -979,6 +991,22 @@ async function verifyAgainstSource(
           }
           continue;
         }
+        /**
+         * El id es el bueno, pero el RÓTULO puede no serlo: cuando TMDB no tiene traducción al
+         * español devuelve el título original, y la ficha queda escrita en coreano, japonés o
+         * cirílico en una API que sirve en español. La página de origen sí publica un nombre
+         * legible, así que se reescribe desde ella conservando el mismo tmdb_id.
+         */
+        if (OTRO_ALFABETO.test(row.title || '') && !OTRO_ALFABETO.test(signals.title)) {
+          const rerotulada = await rewriteRowFromMatch(row, type, row.tmdb_id, signals, { apply, withMetadataSource });
+          if (rerotulada.title) {
+            fixed++;
+            console.log(`   ✓ ${row.id}
+     "${row.title}" estaba rotulada en otro alfabeto → "${rerotulada.title}" (mismo tmdb ${row.tmdb_id})`);
+            continue;
+          }
+        }
+
         okRematch++;
         continue;
       }

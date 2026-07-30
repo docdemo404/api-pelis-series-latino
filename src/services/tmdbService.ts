@@ -197,6 +197,12 @@ function pickContentRating(tmdbData: any): string | undefined {
 }
 
 /**
+ * Alfabetos distintos del latino: cirílico, hebreo, árabe, devanagari, tailandés, hangul, kana y
+ * CJK. Sirve para reconocer un título que la audiencia hispanohablante no puede ni leer.
+ */
+export const OTRO_ALFABETO = /[Ѐ-ӿ֐-׿؀-ۿऀ-ॿ฀-๿ᄀ-ᇿ぀-ヿ㄰-㆏一-鿿가-힯]/;
+
+/**
  * Con qué nombre se muestra la ficha.
  *
  * Normalmente el de TMDB en es-MX, que es el que busca la audiencia. Pero cuando TMDB no tiene
@@ -204,18 +210,19 @@ function pickContentRating(tmdbData: any): string | undefined {
  * una API que sirve en español: la ficha `submundo` pasó a llamarse "파인: 촌뜨기들". Si la fuente
  * publicó un nombre en alfabeto latino y TMDB no aporta traducción, manda el de la fuente.
  *
- * La condición es estrecha a propósito —que el título de TMDB no tenga NI UNA letra latina—, para
- * no pisar los títulos en inglés, que sí son legibles y con los que mucha gente busca. El nombre
- * de TMDB no se pierde: `collectAliases` lo deja como alias, así que la ficha se encuentra igual
- * por los dos.
+ * La condición es estrecha a propósito: se exige que el título de TMDB esté escrito en OTRO
+ * ALFABETO, no simplemente que no tenga letras. Preguntar por las letras confundía los títulos
+ * numéricos, que son legibles y correctos y hay unos cuantos: "1917", "1883", "9-1-1", "3%". Y los
+ * títulos en inglés no se tocan nunca: son legibles y mucha gente busca por ellos. El nombre de
+ * TMDB tampoco se pierde —`collectAliases` lo deja como alias—, así que la ficha se encuentra
+ * igual por los dos.
  */
 function pickDisplayTitle(tmdbData: any, sourceTitle: string): string {
   const tmdbTitle: string = tmdbData.title || tmdbData.name || '';
   const original: string = tmdbData.original_title || tmdbData.original_name || '';
-  const tieneLatinas = (t: string) => /[a-z]/i.test(normalizeTitle(t));
 
-  const sinTraducir = !!tmdbTitle && tmdbTitle === original && !tieneLatinas(tmdbTitle);
-  if (sinTraducir && sourceTitle && tieneLatinas(sourceTitle)) return sourceTitle;
+  const sinTraducir = !!tmdbTitle && tmdbTitle === original && OTRO_ALFABETO.test(tmdbTitle);
+  if (sinTraducir && sourceTitle && !OTRO_ALFABETO.test(sourceTitle)) return sourceTitle;
 
   return tmdbTitle || sourceTitle;
 }
