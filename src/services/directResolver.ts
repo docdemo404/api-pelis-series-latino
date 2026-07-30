@@ -1,4 +1,5 @@
 import { CacheStore } from '../cache/store';
+import { policyFor } from '../scrapers/hostPolicy';
 import { inspectEmbed } from '../scrapers/embedHealth';
 import { extractDirect, extractDirectFast, tokenExpirySeconds, unwrapRedirector, DirectStream } from '../scrapers/directStream';
 
@@ -45,6 +46,15 @@ function mintTtlFor(url: string): number {
  */
 const MISS_TTL_SECONDS = 2 * 60;
 
+/**
+ * Acuñados que NO se comparten: los de hosts que atan la URL a la IP que la pidió.
+ *
+ * Vive en la memoria del proceso a propósito. Es lo contrario de lo que se hace con todo lo
+ * demás —donde compartir es la optimización— porque aquí compartir es el fallo: una URL que solo
+ * vale desde una IP no le sirve a otra instancia, y prestársela es garantizarle un 403.
+ */
+const acunadosPropios = new Map<string, { minted: MintedStream; expira: number }>();
+
 export interface MintedStream extends DirectStream {
   /** Referer que espera el CDN: el del embed, no el suyo propio (dropload da 403 sin él). */
   referer: string;
@@ -73,10 +83,36 @@ export async function mintDirect(embedUrl: string, opts: { fresh?: boolean } = {
   embedUrl = unwrapRedirector(embedUrl);
   const cacheKey = `mint:${embedUrl}`;
 
+  /**
+   * UNA URL ATADA A UNA IP NO SE PUEDE COMPARTIR. Parece obvio dicho así, y era exactamente lo
+   * que hacíamos.
+   *
+   * El acuñado se guardaba en Redis, que es compartido por TODAS las instancias. Para casi todos
+   * los hosts es la decisión correcta —ahorra una petición por reproducción—, pero vidhideplus
+   * valida la IP que acuñó, y en Vercel cada segmento es una invocación distinta que puede salir
+   * por otra IP. Resultado: una instancia acuñaba, las demás reutilizaban su URL, y el CDN les
+   * contestaba 403… o peor, las dejaba colgadas.
+   *
+   * Medido sobre "4Ever" T1E1, cuatro segmentos seguidos por el proxy: el primero 2,2 MB en
+   * 0,65 s, el segundo 52 KB en 90 s, el tercero un 502 y el cuarto colgado otra vez. En el
+   * reproductor eso es un `fragLoadError` a los diez segundos — un servidor rotulado "Vídeo
+   * directo" que arranca, enseña la duración y se cae.
+   *
+   * Para estos hosts el acuñado se guarda SOLO en la memoria de esta instancia: quien lo usa es
+   * quien lo acuñó, que es la única forma de que la URL valga. Cuesta un acuñado por instancia
+   * en vez de uno global, y es el precio de que reproduzca.
+   */
+  const atadoAsuIp = policyFor(embedUrl).ipBound;
+
   if (!opts.fresh) {
-    const cached = await CacheStore.get<MintedStream | { miss: true }>(cacheKey);
-    if (cached && 'miss' in cached) return null;
-    if (cached && 'url' in cached && cached.url) return cached;
+    if (atadoAsuIp) {
+      const propio = acunadosPropios.get(cacheKey);
+      if (propio && Date.now() < propio.expira) return propio.minted;
+    } else {
+      const cached = await CacheStore.get<MintedStream | { miss: true }>(cacheKey);
+      if (cached && 'miss' in cached) return null;
+      if (cached && 'url' in cached && cached.url) return cached;
+    }
   }
 
   // Primero lo que se resuelve solo con la URL. Para la familia upns y para los embeds que
@@ -100,6 +136,17 @@ export async function mintDirect(embedUrl: string, opts: { fresh?: boolean } = {
   }
 
   const minted: MintedStream = { ...direct, ...refererFor(embedUrl) };
-  await CacheStore.set(cacheKey, minted, mintTtlFor(direct.url));
+  const vida = mintTtlFor(direct.url);
+  if (atadoAsuIp) {
+    acunadosPropios.set(cacheKey, { minted, expira: Date.now() + vida * 1000 });
+    if (acunadosPropios.size > 400) {
+      // Una instancia de Vercel vive poco, pero no se le deja crecer sin tope: se tira lo más
+      // viejo, que además es lo que más cerca está de caducar.
+      const masViejo = acunadosPropios.keys().next();
+      if (!masViejo.done) acunadosPropios.delete(masViejo.value);
+    }
+  } else {
+    await CacheStore.set(cacheKey, minted, vida);
+  }
   return minted;
 }

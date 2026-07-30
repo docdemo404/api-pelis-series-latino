@@ -2,7 +2,7 @@ import * as cheerio from 'cheerio';
 import * as crypto from 'crypto';
 import { DirectMode, ServerOption } from '../types';
 import { httpClient, USER_AGENT } from '../utils/httpClient';
-import { bestMode, requiredHeaders } from './hostPolicy';
+import { bestMode, policyFor, requiredHeaders } from './hostPolicy';
 
 /**
  * Extracción del vídeo REAL que hay detrás de un embed (el .m3u8 o .mp4 que reproduce
@@ -832,6 +832,7 @@ export type DirectFields = Pick<ServerOption, 'direct_stream' | 'direct_kind' | 
 export function deferredDirectFields(embedUrl: string): DirectFields {
   const familia = hostDiferido(embedUrl);
   if (!familia) return {};
+  if (policyFor(embedUrl).noSePuedeServirDirecto) return {};
   let host = '';
   try {
     host = new URL(embedUrl).hostname;
@@ -862,6 +863,10 @@ export function deferredDirectFields(embedUrl: string): DirectFields {
  * nada — como mucho desactualiza lo que se muestra.
  */
 export function describeDirect(embedUrl: string, direct: DirectStream): DirectFields {
+  // Hay hosts cuyo vídeo no se puede servir desde aquí por ninguna vía (ver
+  // `noSePuedeServirDirecto`). Extraerlo salió bien, pero entregarlo no, así que no se anuncia:
+  // el servidor se queda con su embed, que es lo que de verdad reproduce.
+  if (policyFor(embedUrl).noSePuedeServirDirecto) return {};
   // YA NO SE PUBLICA NINGUNA URL CRUDA DE CDN, aunque parezca permanente.
   //
   // Existía el modo `public` para los mp4 sin firma ni caducidad: se entregaba la URL del CDN tal

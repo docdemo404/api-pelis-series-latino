@@ -2166,6 +2166,25 @@ async function repairStaleModes(apply: boolean, limitArg?: number): Promise<void
        * recalculan siempre.
        */
       const politica = policyFor(s.embed_url);
+
+      /**
+       * Hay hosts cuyo vídeo NO se puede servir desde nuestra red por ninguna vía. Ahí no vale
+       * corregir el modo: hay que retirar el anuncio entero y dejar el embed, que sí reproduce.
+       *
+       * vidhideplus ata la URL a la IP que la acuñó (un 302 al cliente da 403) y a la vez
+       * estrangula a las IP de datacenter (el proxy va a ~10 KB/s, cuando no devuelve 502). Se
+       * anunciaba como "Vídeo directo", el reproductor lo elegía PRIMERO por estar mejor rotulado
+       * y se caía con `fragLoadError` a los diez segundos. Retirarlo no quita ninguna opción: el
+       * servidor sigue ahí como embed, que es como funciona.
+       */
+      if (politica.noSePuedeServirDirecto && s.direct_stream) {
+        const { direct_stream, direct_kind, direct_mode, direct_host, headers, ...limpio } = s;
+        cambios.set(`${s.direct_mode} → sin vídeo directo`, (cambios.get(`${s.direct_mode} → sin vídeo directo`) || 0) + 1);
+        servidoresCambiados++;
+        cambio = true;
+        return { ...limpio, name: String(s.name || '').replace(/\[Vídeo directo\]/gi, '[Embed]') };
+      }
+
       const obligaProxy = politica.ipBound || politica.segmentosDisfrazados === true;
       const esLegado = s.direct_mode === 'public';
       const anunciaEntregaDirecta = s.direct_mode === 'redirect' || s.direct_mode === 'manifest';

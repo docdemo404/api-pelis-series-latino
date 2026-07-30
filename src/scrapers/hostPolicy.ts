@@ -94,6 +94,24 @@ export interface HostPolicy {
    * Ver `QuitarDisfraz` en src/routes/stream.routes.ts.
    */
   segmentosDisfrazados?: boolean;
+  /**
+   * Su vídeo NO se puede servir desde nuestra red por ninguna vía, así que no se ofrece como
+   * vídeo directo: el servidor se queda con su embed, que en un navegador funciona.
+   *
+   * Es distinto de todo lo demás de esta tabla, que describe QUÉ hace falta para servirlo. Esto
+   * dice que no hay nada que hacer, y solo se pone con medición delante.
+   *
+   * vidhideplus es el caso: ata la URL a la IP que la acuñó —así que un 302 al cliente da 403— y
+   * a la vez ESTRANGULA a las IP de datacenter, así que el proxy tampoco vale. Medido sobre
+   * "4Ever" T1E1 con el mismo proxy y en la misma pasada: emturbovid entregó 519 KB en 1,2 s
+   * (441 KB/s) y vidhideplus, 507 KB en 60 s —unos 10 KB/s—, cuando no devolvía 502 directamente.
+   * A esa velocidad, diez segundos de vídeo tardan casi cuatro minutos en llegar.
+   *
+   * Anunciarlo como "Vídeo directo" era la peor de las opciones: el reproductor lo elige PRIMERO
+   * por estar mejor rotulado, carga el manifiesto, enseña la duración y se cae con
+   * `fragLoadError` a los diez segundos. El embed, en cambio, reproduce.
+   */
+  noSePuedeServirDirecto?: boolean;
   /** Vida observada de la firma, en segundos. `null` = no la declara en la URL. */
   tokenTtlSeconds: number | null;
   measuredAt: string;
@@ -128,6 +146,7 @@ const POLICIES: HostPolicy[] = [
     // Segmentos sin medir: da igual, `ipBound` corta la cascada antes de llegar a ellos.
     match: ['vidhideplus', 'vidhide'],
     ipBound: true,
+    noSePuedeServirDirecto: true,
     refererRequired: false,
     refererChecked: false,
     cors: true,
