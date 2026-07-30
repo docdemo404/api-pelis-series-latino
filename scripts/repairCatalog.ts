@@ -686,7 +686,7 @@ async function fuseRowInto(
   row: any,
   twin: any,
   extraAliases: string[],
-  opts: { apply: boolean; withMultiSource: boolean; sourceYear?: string }
+  opts: { apply: boolean; withMultiSource: boolean; sourceYear?: string; pruebaDeImagen?: boolean }
 ): Promise<{ ok: boolean; urls: [number, number]; aliases: [number, number]; rechazada?: string }> {
   // El año de la fila se toma de su PÁGINA de origen, no de `release_date`.
   //
@@ -695,11 +695,32 @@ async function fuseRowInto(
   // la película equivocada. Comparando eso, la reja rechazaba dedupes legítimos —el pack
   // "One Piece Todas Las Temporadas" estaba guardado como "ONE PIECE BONUS CONTENT" (2026) y no
   // se dejaba fundir con "ONE PIECE" (2023), que es lo que es—.
+  /**
+   * Y si la página tampoco publica año, manda el del EMPAREJAMIENTO que acaba de confirmarse,
+   * no el guardado.
+   *
+   * Sin esto la reja se volvía circular y bloqueaba justo las correcciones que más falta hacen.
+   * `fc-merlina` estaba emparejada con "Merlina" (1983), una serie homónima de 4 votos; su página
+   * es la de un episodio (`merlina-2x8`) y no lleva año, así que `sourceYear` venía vacío y se
+   * caía al `release_date` guardado — que ES el error— para decidir: «"Merlina" (1983) y
+   * "Merlina" (2022) no son de la misma época». O sea, el año de la ficha equivocada impidiendo
+   * arreglar esa ficha equivocada.
+   *
+   * Aquí solo se llega cuando el re-emparejamiento vino RESPALDADO (en este caso por el hash del
+   * fotograma del episodio, que no admite parecidos). Contra esa prueba, un año guardado que
+   * procede del emparejamiento en duda no puede tener voto.
+   */
   const yearA = Number(opts.sourceYear)
     || Number(String(row.release_date || '').slice(0, 4))
     || Number(sourceTitleFromId(row.id).year) || 0;
   const yearB = Number(String(twin.release_date || '').slice(0, 4)) || Number(sourceTitleFromId(twin.id).year) || 0;
-  if (yearA && yearB && Math.abs(yearA - yearB) > 1) {
+
+  // Sin año en la página y con la identidad probada por el HASH de una imagen, el año guardado
+  // no tiene voto: procede del emparejamiento que estamos corrigiendo.
+  const sinAnoPropio = !Number(opts.sourceYear);
+  const mandaLaImagen = sinAnoPropio && opts.pruebaDeImagen === true;
+
+  if (!mandaLaImagen && yearA && yearB && Math.abs(yearA - yearB) > 1) {
     return {
       ok: false,
       urls: [0, 0],
@@ -1286,7 +1307,12 @@ async function verifyAgainstSource(
       // DUPLICADO. Lo único que aporta son su página de origen (sus servidores, a menudo de otra
       // fuente) y su nombre: se vuelcan en la canónica ANTES de borrarla o se perderían enlaces.
       if (twin) {
-        const merged = await fuseRowInto(row, twin, [signals.title], { apply, withMultiSource, sourceYear: signals.year });
+        const merged = await fuseRowInto(row, twin, [signals.title], {
+          apply, withMultiSource, sourceYear: signals.year,
+          // La página no publica año pero sí una imagen de TMDB que casó por hash: esa prueba
+          // manda sobre el `release_date` guardado, que es justo el dato en duda.
+          pruebaDeImagen: Boolean(signals.imageHint) && match.verified,
+        });
         if (merged.rechazada) {
           blocked++;
           console.log(`   ! ${row.id}\n     comparte tmdb ${match.id} con ${twin.id} pero NO se funde: ${merged.rechazada}`);
