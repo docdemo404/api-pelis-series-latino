@@ -196,27 +196,18 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
   };
 
   /**
-   * SI HAY VÍDEO DIRECTO, LOS EMBED SOBRAN.
+   * AQUÍ NO SE FILTRA NADA. Ordenar y esconder no son la misma operación y no pueden vivir juntas.
    *
-   * Un embed no es una opción equivalente peor colocada: es un iframe de un tercero que no se
-   * puede comprobar, ni ordenar por calidad, ni medir, y que trae su propia publicidad. Mientras
-   * había pocos vídeos directos tenía sentido ofrecerlos todos y dejar elegir; con la mayoría de
-   * los hosts extraídos, lo único que hacen es alargar la lista y dar a elegir entre algo que
-   * reproduce y algo que quizá no.
+   * Hubo aquí un filtro que quitaba los embed cuando la ficha tenía vídeo directo vivo, y estaba
+   * mal puesto: esta lista no es solo lo que se entrega, es también LO QUE SE GUARDA
+   * —`catalogService` hace `result.servers = sortServersBySourcePriority(...)` y acto seguido
+   * `persistStreams` lo escribe en Supabase—, así que cada ficha que pasaba por la resolución
+   * completa perdía sus embed de la base de datos para siempre. No se ocultaban: se borraban.
    *
-   * Se aplica SOLO cuando queda alguno vivo con vídeo directo, y ese "vivo" es la mitad de la
-   * regla: un directo marcado `offline` no puede tapar a los embed, porque entonces la ficha se
-   * quedaría con una única opción ya demostrada muerta. En ese caso salen todos, como antes.
-   *
-   * Es un filtro de SALIDA, no de la base: los embed siguen guardados. Si mañana un extractor
-   * deja de funcionar y esos servidores pierden su `direct_stream`, vuelven a aparecer solos.
+   * Esconderlos es una decisión de PRESENTACIÓN y vive en `paraElCliente`, al borde de la
+   * respuesta, donde no puede tocar nada persistido.
    */
-  const hayDirectoVivo = withEffectiveMode.some(s => s.direct_stream && s.status !== 'offline');
-  const visibles = hayDirectoVivo
-    ? withEffectiveMode.filter(s => s.direct_stream)
-    : withEffectiveMode;
-
-  return [...visibles].sort((a, b) => {
+  return [...withEffectiveMode].sort((a, b) => {
     // 1. Status online primero
     if (a.status === 'online' && b.status !== 'online') return -1;
     if (b.status === 'online' && a.status !== 'online') return 1;
@@ -242,6 +233,40 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
 
     return 0;
   });
+}
+
+/**
+ * LO ÚNICO QUE SALE HACIA LA APP: vídeo directo, y sin la URL del embed al lado.
+ *
+ * Son dos recortes, y el segundo es el que faltaba. Ocultar los servidores que solo tienen embed
+ * no basta, porque un servidor CON vídeo directo seguía viajando con su `embed_url` puesta, y un
+ * cliente que encuentre ese campo lo usa: lo reportó el usuario con «31 Minutos: Calurosa Navidad»,
+ * cuyo único servidor está correctamente extraído —el endpoint contesta 302 a un mp4 de 886 MB en
+ * rumble.cloud, comprobado— y aun así no se reproducía, porque la app cogía el `embed_url`, que
+ * apunta a `repfuegocinefree.blogspot.com/?player=fluidplayer`: una página con su propio
+ * reproductor dentro. «Viene con todo y reproductor», exactamente.
+ *
+ * Así que el campo no se entrega. No se pierde nada recuperable: `direct_stream` lleva la URL del
+ * embed codificada en su parámetro `e=`, que es de donde `/api/v1/stream/direct` la vuelve a sacar
+ * en cada petición para acuñar el enlace. Y en la base de datos sigue intacta —esto es un filtro de
+ * SALIDA—, así que los repasos, las re-extracciones y el sondeo de salud siguen teniéndola.
+ *
+ * Un servidor `offline` no cuenta como vídeo directo: está demostrado muerto.
+ *
+ * Cuando no queda ninguno, la respuesta va VACÍA en vez de caer al embed. Es deliberado: la app de
+ * este catálogo no sabe incrustar iframes, así que ofrecerle uno no es una alternativa peor, es
+ * un botón de reproducir que no hace nada. Que la ficha conteste «no hay» es información; darle
+ * algo irreproducible, no. Las fichas que se quedan sin nada se marcan `has_streams = false` con
+ * `repairCatalog --sin-directo` y dejan de aparecer en los listados.
+ */
+export function paraElCliente<T extends ServerOption>(servers: T[] | undefined | null): T[] {
+  if (!servers?.length) return [];
+  return servers
+    .filter(s => s?.direct_stream && s.status !== 'offline')
+    .map(s => {
+      const { embed_url, ...resto } = s as ServerOption;
+      return resto as T;
+    });
 }
 
 /**

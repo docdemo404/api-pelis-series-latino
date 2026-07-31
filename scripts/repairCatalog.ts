@@ -2285,6 +2285,73 @@ async function hideOrphanRows(apply: boolean): Promise<void> {
 }
 
 /**
+ * FICHAS QUE SOLO PUEDEN OFRECER UN IFRAME (`--sin-directo`).
+ *
+ * La API dejó de entregar embed: la app cliente no sabe incrustar iframes —lo comprobó el usuario
+ * con «31 Minutos: Calurosa Navidad», donde el `embed_url` que viajaba al lado del vídeo directo
+ * era una página de blogspot con su propio reproductor dentro— así que ahora sale vídeo directo o
+ * no sale nada (`streamSorter.paraElCliente`).
+ *
+ * Consecuencia: una ficha cuyos servidores son TODOS embed ya no entrega nada, y seguir
+ * anunciándola en el home y en la búsqueda es prometer un botón de reproducir que no hace nada.
+ * Es el mismo criterio que se aplicó a las huérfanas, con otro motivo.
+ *
+ * VA EN LOS DOS SENTIDOS, y esa es la mitad importante: también DEVUELVE a los listados las que
+ * tienen `has_streams = false` y hoy sí traen vídeo directo. Sin eso, cada pasada escondería un
+ * poco más de catálogo y lo que arregla el extractor no volvería nunca — una trampa de un solo
+ * sentido. Como el repaso de extracción corre a diario, la recuperación tiene que ser automática.
+ *
+ * Solo mira fichas que TIENEN servidores guardados. Una sin ninguno no es asunto de este modo: no
+ * se sabe si es que no se ha resuelto todavía, y esconderla sería adelantarse al veredicto.
+ *
+ *   npm run repair:catalog -- --sin-directo
+ *   npm run repair:catalog -- --sin-directo --apply
+ */
+async function hideRowsWithoutDirect(apply: boolean): Promise<void> {
+  console.log(`🚫 Buscando fichas cuyos servidores son todos embed${apply ? '' : ' (dry-run)'}...`);
+  const rows = await fetchAllRows(['servers', 'seasons', 'has_streams']);
+
+  /** Todo lo reproducible de la ficha: sus servidores y los de cada episodio. */
+  const todosLosServidores = (r: any): any[] => [
+    ...(r.servers || []),
+    ...(r.seasons || []).flatMap((t: any) => (t.episodes || []).flatMap((e: any) => e.servers || [])),
+  ];
+  const hayDirecto = (r: any) => todosLosServidores(r).some(s => s?.direct_stream && s.status !== 'offline');
+
+  const conServidores = rows.filter(r => todosLosServidores(r).length > 0);
+  const aEsconder = conServidores.filter(r => !hayDirecto(r) && r.has_streams !== false);
+  const aDevolver = conServidores.filter(r => hayDirecto(r) && r.has_streams === false);
+
+  console.log(`   ${conServidores.length} fichas con servidores guardados`);
+  console.log(`   ${aEsconder.length} solo tienen embed → se retiran`);
+  console.log(`   ${aDevolver.length} ya tienen vídeo directo y estaban escondidas → vuelven\n`);
+
+  for (const row of aEsconder.slice(0, 10)) {
+    const hosts = Array.from(new Set(todosLosServidores(row).map(s => {
+      try { return new URL(s.embed_url).hostname.replace(/^www\./, ''); } catch { return '?'; }
+    }))).slice(0, 3).join(', ');
+    console.log(`   − "${String(row.title).slice(0, 34).padEnd(35)}" ${hosts}`);
+  }
+  for (const row of aDevolver.slice(0, 6)) {
+    console.log(`   + "${String(row.title).slice(0, 34).padEnd(35)}" recupera vídeo directo`);
+  }
+
+  if (apply) {
+    for (const [valor, lote] of [[false, aEsconder], [true, aDevolver]] as [boolean, any[]][]) {
+      for (const row of lote) {
+        marcarTocada(row);
+        const { error } = await db.from('media_items').update({ has_streams: valor }).eq('id', row.id);
+        if (error) console.warn(`   ⚠ ${row.id}: ${error.message}`);
+      }
+    }
+  }
+
+  console.log(`\n🚫 ${aEsconder.length} retiradas · ${aDevolver.length} devueltas ${apply ? '' : '(se harían)'}`);
+  console.log(apply ? '   ✅ aplicado' : '   (dry-run: repite con --apply)');
+  await purgarCacheDeTocadas(apply);
+}
+
+/**
  * VÍDEOS DIRECTOS QUE NO LO SON (`--directos-falsos`).
  *
  * Un servidor rotulado "Vídeo directo" cuyo endpoint contesta 502 es la peor opción que puede
@@ -2458,6 +2525,11 @@ async function main() {
 
   if (process.argv.includes('--huerfanas')) {
     await hideOrphanRows(apply);
+    return;
+  }
+
+  if (process.argv.includes('--sin-directo')) {
+    await hideRowsWithoutDirect(apply);
     return;
   }
 

@@ -52,10 +52,14 @@ async function resolveDetail(req: Request, typeHint?: ContentType): Promise<Medi
  * no existen.
  */
 function withStreamsBlock(item: MediaItem, basePath: 'media' | 'series') {
-  const ready = Boolean(item.servers && item.servers.length > 0);
+  // El estado se lee de la copia PÚBLICA, no del ítem crudo: `toPublicItem` deja fuera los
+  // servidores que solo son embed, así que una ficha con cinco iframes y ningún vídeo directo
+  // entrega la lista vacía. Mirando el crudo se anunciaba `ready` sobre esa lista vacía.
+  const publico = CatalogService.toPublicItem(item);
+  const ready = Boolean(publico.servers && publico.servers.length > 0);
   const status = ready ? 'ready' : (item.has_streams === false ? 'unavailable' : 'pending');
   return {
-    ...CatalogService.toPublicItem(item),
+    ...publico,
     streams: {
       status,
       url: `/api/v1/${basePath}/${item.id}/streams`,
@@ -74,6 +78,9 @@ async function respondWithStreams(req: Request, res: Response, typeHint?: Conten
     return sendErrorResponse(res, 404, 'RESOURCE_NOT_FOUND', 'El contenido solicitado no existe o no está disponible.');
   }
 
+  // Misma regla que en el detalle: sale vídeo directo, sin `embed_url`. Ver `paraElCliente`.
+  const publico = CatalogService.toPublicItem(item);
+
   res.json({
     status: 'success',
     data: {
@@ -81,9 +88,9 @@ async function respondWithStreams(req: Request, res: Response, typeHint?: Conten
       tmdb_id: item.tmdb_id,
       type: item.type,
       title: item.title,
-      primary_stream: item.primary_stream || null,
-      servers: item.servers || [],
-      seasons: item.seasons || undefined,
+      primary_stream: publico.primary_stream || null,
+      servers: publico.servers || [],
+      seasons: publico.seasons || undefined,
       updated_at: item.streams_updated_at || null
     }
   });

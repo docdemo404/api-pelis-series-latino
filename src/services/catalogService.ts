@@ -2,7 +2,7 @@ import { MediaItem, ServerOption, ContentType } from '../types';
 import { supabase, getSupabaseAdmin } from './supabaseService';
 import { RealScraperService } from './realScraperService';
 import { TmdbService } from './tmdbService';
-import { sortServersBySourcePriority, getPrimaryStream } from './streamSorter';
+import { sortServersBySourcePriority, getPrimaryStream, paraElCliente } from './streamSorter';
 import { normalizeTitle, slugify, yearFromSlug } from '../utils/text';
 import { CacheStore } from '../cache/store';
 import { unwrapRedirector } from '../scrapers/directStream';
@@ -984,9 +984,27 @@ export class CatalogService {
     );
   }
 
-  /** Copia pública de un ítem: elimina los campos internos (`_source_url`, `_tioplus_url`). */
+  /**
+   * Copia pública de un ítem: elimina los campos internos (`_source_url`, `_tioplus_url`) y deja
+   * los servidores en lo único que la app sabe reproducir — vídeo directo, sin `embed_url`.
+   *
+   * Se hace en la COPIA, nunca sobre `item`: el caché devuelve la misma referencia en cada acierto
+   * y `persistStreams` escribe `item.servers` en Supabase, así que mutar aquí sería borrar los
+   * embed de la base de datos por la puerta de atrás. Ver `paraElCliente`.
+   *
+   * Cubre también los episodios, que llevan su propia lista de servidores dentro de las temporadas.
+   */
   static toPublicItem<T extends Record<string, any>>(item: T): T {
     const { _source_url, _source_urls, _tioplus_url, ...rest } = item as any;
+    if (Array.isArray(rest.servers)) rest.servers = paraElCliente(rest.servers);
+    if (rest.primary_stream) rest.primary_stream = paraElCliente([rest.primary_stream])[0] || null;
+    if (Array.isArray(rest.seasons)) {
+      rest.seasons = rest.seasons.map((s: any) => (
+        Array.isArray(s?.episodes)
+          ? { ...s, episodes: s.episodes.map((e: any) => (Array.isArray(e?.servers) ? { ...e, servers: paraElCliente(e.servers) } : e)) }
+          : s
+      ));
+    }
     return rest as T;
   }
 
@@ -1430,8 +1448,13 @@ export class CatalogService {
      * Se informa de cuántos se descartaron, para que esto no sea nunca una pérdida silenciosa.
      */
     const todos = sortServersBySourcePriority(revisados);
-    const servers = todos.filter(s => s.status !== 'offline');
-    const descartados = todos.length - servers.length;
+    const vivos = todos.filter(s => s.status !== 'offline');
+    const descartados = todos.length - vivos.length;
+    // Y de los vivos, solo lo que la app puede reproducir: vídeo directo. Un capítulo cuyos
+    // servidores son todos embed no está `pending` —no es que falte buscarlo—, está
+    // `unavailable`: se encontró y no hay nada que este cliente pueda abrir.
+    const servers = paraElCliente(vivos);
+    const sinVideoDirecto = vivos.length - servers.length;
 
     const resultado = {
       id: `${serie.tmdb_id || serie.id}-${season}-${episode}`,
@@ -1453,14 +1476,15 @@ export class CatalogService {
        * responde · `pending` no se encontró ninguna fuente para este capítulo.
        */
       streams: {
-        status: servers.length > 0 ? 'ready' : (descartados > 0 ? 'unavailable' : 'pending'),
-        descartados_por_no_reproducir: descartados
+        status: servers.length > 0 ? 'ready' : (todos.length > 0 ? 'unavailable' : 'pending'),
+        descartados_por_no_reproducir: descartados,
+        sin_video_directo: sinVideoDirecto
       }
     };
 
     // Solo se cachea lo que aporta algo. Un `pending` —no se encontró la página— se deja sin
     // cachear para que el siguiente intento vuelva a probar.
-    if (servers.length > 0 || descartados > 0) {
+    if (todos.length > 0) {
       await CacheStore.set(cacheKey, resultado, CACHE_TTL_SECONDS);
     }
     return resultado;
