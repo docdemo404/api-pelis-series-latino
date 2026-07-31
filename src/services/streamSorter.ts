@@ -195,7 +195,28 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
     return 1;
   };
 
-  return [...withEffectiveMode].sort((a, b) => {
+  /**
+   * SI HAY VÍDEO DIRECTO, LOS EMBED SOBRAN.
+   *
+   * Un embed no es una opción equivalente peor colocada: es un iframe de un tercero que no se
+   * puede comprobar, ni ordenar por calidad, ni medir, y que trae su propia publicidad. Mientras
+   * había pocos vídeos directos tenía sentido ofrecerlos todos y dejar elegir; con la mayoría de
+   * los hosts extraídos, lo único que hacen es alargar la lista y dar a elegir entre algo que
+   * reproduce y algo que quizá no.
+   *
+   * Se aplica SOLO cuando queda alguno vivo con vídeo directo, y ese "vivo" es la mitad de la
+   * regla: un directo marcado `offline` no puede tapar a los embed, porque entonces la ficha se
+   * quedaría con una única opción ya demostrada muerta. En ese caso salen todos, como antes.
+   *
+   * Es un filtro de SALIDA, no de la base: los embed siguen guardados. Si mañana un extractor
+   * deja de funcionar y esos servidores pierden su `direct_stream`, vuelven a aparecer solos.
+   */
+  const hayDirectoVivo = withEffectiveMode.some(s => s.direct_stream && s.status !== 'offline');
+  const visibles = hayDirectoVivo
+    ? withEffectiveMode.filter(s => s.direct_stream)
+    : withEffectiveMode;
+
+  return [...visibles].sort((a, b) => {
     // 1. Status online primero
     if (a.status === 'online' && b.status !== 'online') return -1;
     if (b.status === 'online' && a.status !== 'online') return 1;
