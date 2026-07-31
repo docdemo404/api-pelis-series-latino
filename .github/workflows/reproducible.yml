@@ -22,6 +22,11 @@ on:
     # Cada 8 h, desfasado de las 04:00 UTC del crawl para no competir por las mismas fuentes.
     - cron: '0 1,9,17 * * *'
   workflow_dispatch:
+    inputs:
+      fichas:
+        description: 'Cuántas fichas extraer en esta corrida (900 es la tanda diaria; súbelo para vaciar un atraso de golpe)'
+        required: false
+        default: '900'
 
 # Dos corridas a la vez se pisarían: escriben las mismas filas y se doblarían las peticiones a
 # los hosts, que responden 429 mucho antes de lo que se cree. La nueva espera a que acabe la
@@ -66,7 +71,7 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
-        run: npx ts-node scripts/refreshCatalog.ts --direct-only --direct=900
+        run: npx ts-node scripts/refreshCatalog.ts --direct-only --direct=${{ github.event.inputs.fichas || 900 }}
 
       # 2. Y de lo que dice tener vídeo directo, comprobar que su endpoint contesta. Un servidor
       #    rotulado "Vídeo directo" que da 502 es peor que un embed: el reproductor lo elige
