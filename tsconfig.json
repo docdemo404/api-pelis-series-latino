@@ -10,5 +10,6 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/**/*", "api/**/*", "scripts/refreshCatalog.ts"]
+  "//": "TODOS los scripts entran en el typecheck. Antes solo entraba refreshCatalog.ts, y el resto compilaba por primera vez EN EL RUNNER: repairCatalog.ts llevaba un `Cannot find name 'year'` que en local no salía nunca (npx ts-node --transpile-only no comprueba tipos) y en CI tumbaba los cuatro pasos de reparación, que llevaban días sin ejecutarse. scripts/dev queda fuera a propósito: son sondas de usar y tirar, no las corre nadie automáticamente.",
+  "include": ["src/**/*", "api/**/*", "scripts/*.ts"]
 }

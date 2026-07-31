@@ -507,7 +507,10 @@ async function fuseSyntheticDuplicates(apply: boolean, limitArg?: number): Promi
       // —los confirma la llave anterior sin pestañear— y aun así es otra película con otros
       // servidores. Con el año en la mano no hay que suponer nada.
       const twinYear = Number(String(twin.release_date || '').slice(0, 4)) || Number(sourceTitleFromId(twin.id).year) || 0;
-      const rowYear = Number(year) || 0;
+      // El año de la fila se vuelve a calcular aquí: el `year` de arriba vive dentro del `map`
+      // que resolvió el lote y no llega a este bucle. Escribirlo tal cual compilaba en local
+      // —`tsconfig.json` no incluía este fichero— y reventaba en CI, que sí lo compila.
+      const rowYear = Number(String(row.release_date || '').slice(0, 4) || sourceTitleFromId(row.id).year) || 0;
       if (rowYear && twinYear && Math.abs(rowYear - twinYear) > 1) {
         skipped++;
         console.log(`   ! ${row.id}\n     "${row.title}" (${rowYear}) ~ ${twin.id} = "${twin.title}" (${twinYear}): mismo nombre, otra época — no se funde`);
