@@ -10,9 +10,10 @@
  */
 import 'dotenv/config';
 import { getSupabaseAdmin } from '../../src/services/supabaseService';
-import { mintDirect } from '../../src/services/directResolver';
-import { bestMode } from '../../src/scrapers/hostPolicy';
 import { streamClient } from '../../src/utils/httpClient';
+
+/** Se prueba contra PRODUCCIÓN, que es lo que recibe el cliente, no contra el extractor local. */
+const API = 'https://api-pelis-series-latino-gilt.vercel.app';
 
 const db = getSupabaseAdmin();
 const arg = (n: string, d = '') => (process.argv.find(a => a.startsWith(`--${n}=`)) || '').split('=')[1] || d;
@@ -77,17 +78,10 @@ async function queEs(url: string, referer: string): Promise<string> {
   for (const [host, urls] of Array.from(porHost).sort((a, b) => b[1].length - a[1].length)) {
     const paso = Math.max(1, Math.floor(urls.length / MUESTRAS));
     const muestra = Array.from({ length: Math.min(MUESTRAS, urls.length) }, (_, i) => urls[i * paso]).filter(Boolean);
-    const resultados: string[] = [];
-    for (const u of muestra) {
-      const m = await mintDirect(u, { fresh: true });
-      if (!m) { resultados.push('no se acuña'); continue; }
-      // Si lo acuñado ES el propio embed, ya está: se estaría anunciando el embed como vídeo.
-      if (hostDe(m.url) === hostDe(u) && !/\.(m3u8|mp4|ts)(\?|$)/i.test(m.url)) {
-        resultados.push('❌ apunta al PROPIO EMBED');
-        continue;
-      }
-      resultados.push(`${bestMode(u, m.kind)}: ${await queEs(m.url, m.referer)}`);
-    }
+    const resultados = await Promise.all(muestra.map(async u => {
+      const enlace = `${API}/api/v1/stream/direct?e=${Buffer.from(u, 'utf8').toString('base64url')}`;
+      return queEs(enlace, '');
+    }));
     const malos = resultados.filter(r => r.startsWith('❌')).length;
     console.log(`${host.padEnd(32)} ${malos ? '⚠ ' : '  '}${resultados.join('  |  ')}`);
   }

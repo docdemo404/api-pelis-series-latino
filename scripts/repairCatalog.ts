@@ -71,6 +71,7 @@ import { canonicalTitle, normalizeTitle, searchIndexKey, dedupeTitles, sourceTit
 // decidir lo MISMO sobre qué página pertenece a qué ficha.
 import { CatalogService, esPaginaPropia, candidateIdsForUrl, tipoDeLaRuta } from '../src/services/catalogService';
 import { CacheStore } from '../src/cache/store';
+import { streamClient } from '../src/utils/httpClient';
 import { inspectEmbed } from '../src/scrapers/embedHealth';
 import { bestMode, policyFor } from '../src/scrapers/hostPolicy';
 import { MediaItem, ContentType } from '../src/types';
@@ -2283,6 +2284,102 @@ async function hideOrphanRows(apply: boolean): Promise<void> {
   await purgarCacheDeTocadas(apply);
 }
 
+/**
+ * VÍDEOS DIRECTOS QUE NO LO SON (`--directos-falsos`).
+ *
+ * Un servidor rotulado "Vídeo directo" cuyo endpoint contesta 502 es la peor opción que puede
+ * haber en una ficha: el reproductor lo elige PRIMERO justo por estar mejor rotulado, se come el
+ * fallo, y solo entonces cae al embed. Desde fuera se ve como "el directo redirige al embed".
+ *
+ * Auditados los hosts uno a uno contra producción (scripts/dev/probe_directos_falsos.ts), ninguno
+ * devuelve una página HTML —o sea que no se está anunciando un embed como vídeo— pero varios dan
+ * 502 al acuñar: `vidnest.io` y `vidnest.live` fallan 3 de 3, `barmonrey` 3 de 3, y hay fallos
+ * sueltos en hosts grandes.
+ *
+ * SE PRUEBA DOS VECES antes de retirar nada, y esa es la parte que importa. Un 502 puede ser un
+ * 429 pasajero del host o un timeout, y quitarle el vídeo directo a un servidor bueno por una
+ * mala racha es cambiar un problema por otro. Solo se retira lo que falla las dos veces.
+ *
+ * No se borra el servidor: se le quitan los campos de vídeo directo y se queda como embed, que es
+ * lo que de verdad es. Si mañana su extractor vuelve a funcionar, el repaso se los devuelve.
+ *
+ *   npm run repair:catalog -- --directos-falsos [--host=vidnest] [--limit=N]
+ *   npm run repair:catalog -- --directos-falsos --apply
+ */
+async function repairFakeDirects(apply: boolean, limitArg?: number, soloHost?: string): Promise<void> {
+  const API = process.env.API_BASE || 'https://api-pelis-series-latino-gilt.vercel.app';
+  console.log(`🎭 Comprobando los que se anuncian como vídeo directo${apply ? '' : ' (dry-run)'}...`);
+
+  const rows = (await fetchAllRows(['servers'])).filter(r => (r.servers || []).length > 0);
+  const hostDe = (u: string) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return '(?)'; } };
+
+  const objetivo = new Set<string>();
+  for (const row of rows) {
+    for (const s of row.servers || []) {
+      if (!s?.embed_url || !s.direct_stream) continue;
+      if (soloHost && !hostDe(s.embed_url).includes(soloHost)) continue;
+      objetivo.add(s.embed_url);
+    }
+  }
+  const lista = Array.from(objetivo).sort().slice(0, Number.isFinite(limitArg as number) ? limitArg : undefined);
+  console.log(`   ${lista.length} embeds distintos que anuncian vídeo directo\n`);
+
+  /** ¿El endpoint entrega algo reproducible? Se le da una segunda oportunidad antes de condenar. */
+  const entrega = async (embedUrl: string): Promise<boolean> => {
+    const enlace = `${API}/api/v1/stream/direct?e=${Buffer.from(embedUrl, 'utf8').toString('base64url')}`;
+    for (let intento = 0; intento < 2; intento++) {
+      try {
+        const r = await streamClient.get(enlace, {
+          headers: { Range: 'bytes=0-2047' },
+          responseType: 'arraybuffer',
+          timeout: 25000,
+          validateStatus: () => true,
+          maxRedirects: 3,
+        });
+        if (r.status < 400) return true;
+      } catch { /* se reintenta */ }
+    }
+    return false;
+  };
+
+  const falsos = new Set<string>();
+  const CONC = 8;
+  for (let i = 0; i < lista.length; i += CONC) {
+    await Promise.all(lista.slice(i, i + CONC).map(async u => { if (!(await entrega(u))) falsos.add(u); }));
+    if ((i + CONC) % 400 < CONC) console.log(`   ${Math.min(i + CONC, lista.length)}/${lista.length} · ${falsos.size} falsos`);
+  }
+
+  const porHost = new Map<string, number>();
+  for (const u of falsos) porHost.set(hostDe(u), (porHost.get(hostDe(u)) || 0) + 1);
+
+  let servidoresLimpiados = 0;
+  let fichasTocadas = 0;
+  for (const row of rows) {
+    let cambio = false;
+    const servers = (row.servers || []).map((s: any) => {
+      if (!s?.embed_url || !s.direct_stream || !falsos.has(s.embed_url)) return s;
+      const { direct_stream, direct_kind, direct_mode, direct_host, headers, ...limpio } = s;
+      cambio = true;
+      servidoresLimpiados++;
+      return { ...limpio, name: String(s.name || '').replace(/\[Vídeo directo\]/gi, '[Embed]') };
+    });
+    if (!cambio) continue;
+    fichasTocadas++;
+    if (!apply) continue;
+    marcarTocada(row);
+    const { error } = await db.from('media_items').update({ servers }).eq('id', row.id);
+    if (error) console.warn(`   ⚠ ${row.id}: ${error.message}`);
+  }
+
+  console.log('\n🎭 Por host:');
+  for (const [h, n] of Array.from(porHost).sort((a, b) => b[1] - a[1]).slice(0, 12)) {
+    console.log(`   ${h.padEnd(30)} ${String(n).padStart(5)} embeds que no entregan vídeo`);
+  }
+  console.log(`\n🎭 ${servidoresLimpiados} servidores dejan de anunciar vídeo directo, en ${fichasTocadas} fichas`);
+  console.log(apply ? '   ✅ aplicado' : '   (dry-run: repite con --apply)');
+  await purgarCacheDeTocadas(apply);
+}
+
 async function main() {
   const apply = process.argv.includes('--apply');
   // Elimina las filas duplicadas cuya versión correcta ya existe en el catálogo.
@@ -2347,6 +2444,15 @@ async function main() {
 
   if (process.argv.includes('--fuentes')) {
     await purgeIntruderSources(apply, Number.isFinite(limitArg) ? limitArg : undefined);
+    return;
+  }
+
+  if (process.argv.includes('--directos-falsos')) {
+    await repairFakeDirects(
+      apply,
+      Number.isFinite(limitArg) ? limitArg : undefined,
+      (process.argv.find(a => a.startsWith('--host=')) || '').split('=')[1]
+    );
     return;
   }
 
