@@ -3,7 +3,7 @@ import { Transform, TransformCallback } from 'stream';
 import { ResolverService } from '../services/resolverService';
 import { BandwidthService } from '../services/bandwidthService';
 import { mintDirect, MintedStream } from '../services/directResolver';
-import { decodeEmbedParam, tokenExpirySeconds } from '../scrapers/directStream';
+import { decodeEmbedParam, tokenExpirySeconds, hasVolatileToken } from '../scrapers/directStream';
 import { bestMode, policyFor } from '../scrapers/hostPolicy';
 import { DirectMode } from '../types';
 import { sendErrorResponse } from '../utils/apiHelpers';
@@ -520,7 +520,29 @@ function resolveMode(
  * siguiera la redirección mandaría el Referer de nuestra propia página y el CDN lo rechazaría.
  */
 function sendRedirect(res: Response, url: string): void {
-  res.setHeader('Cache-Control', 'no-store');
+  /**
+   * UN 302 A UNA URL SIN FIRMA SÍ SE PUEDE CACHEAR, y es lo que más se nota en los mp4.
+   *
+   * El `no-store` de siempre está puesto para el caso general: casi todos estos CDN firman la URL
+   * y le ponen caducidad, así que compartir el 302 sería darle a otro un enlace que quizá ya no
+   * vale. Pero los mp4 que FuegoCine sirve por `1a-1791.com`, `rumble.cloud` o `pixeldrain` NO
+   * llevan query ninguna: son direcciones fijas de un fichero.
+   *
+   * Y ahí el `no-store` costaba caro. Medido en uno de ellos: 2,27 s antes de emitir el 302, casi
+   * todos gastados en verificar el destino —una petición al CDN que tarda ~2,8 s en dar el primer
+   * byte—, y después el cliente vuelve a pagar ese arranque por su cuenta. El espectador espera
+   * dos veces lo mismo.
+   *
+   * Con la URL fija en el borde, la segunda persona que abre esa película se lleva el 302 en
+   * milisegundos. Cinco minutos es margen de sobra para una sesión y poco para que un fichero
+   * retirado siga anunciándose.
+   */
+  const fija = !hasVolatileToken(url);
+  res.setHeader('Cache-Control', fija ? 'public, max-age=0, s-maxage=300' : 'no-store');
+  if (fija) {
+    res.setHeader('CDN-Cache-Control', 'public, s-maxage=300');
+    res.setHeader('Vercel-CDN-Cache-Control', 'public, s-maxage=300');
+  }
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.redirect(302, url);
 }
