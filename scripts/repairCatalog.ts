@@ -1678,9 +1678,20 @@ async function purgeIntruderSources(apply: boolean, limitArg?: number): Promise<
         updated_at: new Date().toISOString()
       };
       if (withAvailability) {
-        // El veredicto de disponibilidad se apoyaba en servidores ajenos: vuelve a "sin comprobar".
-        patch.has_streams = null;
-        patch.streams_checked_at = null;
+        /**
+         * Y si la intrusa era su ÚNICA página, la ficha se queda huérfana: sin servidores y sin
+         * nadie a quien pedírselos. Eso no es "sin comprobar", es que no hay nada que comprobar,
+         * y dejarla en `null` la mantenía visible en el home y en la búsqueda para siempre — una
+         * ficha que al abrirla no ofrece nada. Es lo que pasó con "Ronaldinho": se le retiró la
+         * página de otra película, que era la suya, y se quedó ahí.
+         *
+         * Se marca fantasma, no se borra: el crawl puede volver a encontrarle su página y
+         * entonces esto se recalcula solo. Borrarla tiraría su metadata para nada.
+         */
+        const sinFuente = kept.length === 0;
+        patch.has_streams = sinFuente ? false : null;
+        patch.streams_checked_at = sinFuente ? new Date().toISOString() : null;
+        if (sinFuente) console.log(`       ↳ se queda sin ninguna página: se retira de los listados`);
       }
 
       if (apply) {
@@ -2224,6 +2235,54 @@ async function repairStaleModes(apply: boolean, limitArg?: number): Promise<void
   await purgarCacheDeTocadas(apply);
 }
 
+/**
+ * FICHAS HUÉRFANAS (`--huerfanas`).
+ *
+ * Una ficha sin servidores Y SIN NINGUNA PÁGINA DE ORIGEN no es una ficha pendiente de resolver:
+ * es una que no puede resolverse nunca. No hay a quién preguntarle por sus enlaces. Aun así salía
+ * en el home y en la búsqueda, porque el filtro de fantasmas solo esconde `has_streams = false` y
+ * estas lo tienen a `null` — nunca se comprobaron, porque no hay nada que comprobar.
+ *
+ * Y la mayoría las creé yo: `--fuentes` retira las páginas que pertenecen a OTRA película, y
+ * cuando la intrusa era la única que tenía, la ficha se queda vacía. Es correcto quitar la fuente
+ * ajena —servir el vídeo de otra película es peor— pero dejar la ficha visible y muerta no.
+ *
+ * Se marcan como fantasma en vez de borrarlas: el crawl puede volver a encontrarles su página, y
+ * entonces `has_streams` se recalcula solo y vuelven a aparecer. Borrarlas perdería su metadata
+ * (póster, sinopsis, alias) para nada.
+ *
+ *   npm run repair:catalog -- --huerfanas
+ *   npm run repair:catalog -- --huerfanas --apply
+ */
+async function hideOrphanRows(apply: boolean): Promise<void> {
+  console.log(`👻 Buscando fichas sin servidores y sin ninguna página de origen${apply ? '' : ' (dry-run)'}...`);
+  const rows = await fetchAllRows(['servers', 'seasons', 'has_streams']);
+
+  const conServidores = (r: any) =>
+    (r.servers || []).length > 0 ||
+    (r.seasons || []).some((t: any) => (t.episodes || []).some((e: any) => (e.servers || []).length > 0));
+  const conFuente = (r: any) => Boolean(r.source_url) || (r.source_urls || []).length > 0;
+
+  const huerfanas = rows.filter(r => !conServidores(r) && !conFuente(r) && r.has_streams !== false);
+  console.log(`   ${huerfanas.length} fichas que no pueden conseguir servidores y aun así se muestran\n`);
+
+  for (const row of huerfanas.slice(0, 12)) {
+    console.log(`   ${String(row.id).slice(0, 44).padEnd(45)} "${String(row.title).slice(0, 32)}" [${row.type}]`);
+  }
+
+  if (apply) {
+    for (const row of huerfanas) {
+      marcarTocada(row);
+      const { error } = await db.from('media_items').update({ has_streams: false }).eq('id', row.id);
+      if (error) console.warn(`   ⚠ ${row.id}: ${error.message}`);
+    }
+  }
+
+  console.log(`\n👻 ${huerfanas.length} fichas ${apply ? 'retiradas de los listados' : 'se retirarían'}`);
+  console.log(apply ? '   ✅ marcadas' : '   (dry-run: repite con --apply)');
+  await purgarCacheDeTocadas(apply);
+}
+
 async function main() {
   const apply = process.argv.includes('--apply');
   // Elimina las filas duplicadas cuya versión correcta ya existe en el catálogo.
@@ -2288,6 +2347,11 @@ async function main() {
 
   if (process.argv.includes('--fuentes')) {
     await purgeIntruderSources(apply, Number.isFinite(limitArg) ? limitArg : undefined);
+    return;
+  }
+
+  if (process.argv.includes('--huerfanas')) {
+    await hideOrphanRows(apply);
     return;
   }
 

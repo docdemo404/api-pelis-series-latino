@@ -723,6 +723,28 @@ export class RealScraperService {
       .filter((m): m is RegExpMatchArray => Boolean(m))
       .map(m => `${BASE_URL}/${m[1].toLowerCase()}/${m[2]}/season/${season}/episode/${episode}`);
 
+    /**
+     * Y LAS DE FUEGOCINE, que no tienen esa forma en absoluto.
+     *
+     * Sus páginas de episodio son `/2026/04/ronaldinho-1x3.html`: ni `/serie/`, ni `/season/`, ni
+     * `/episode/`. El filtro de arriba no casaba ninguna, así que `desdeFuente` salía VACÍO y solo
+     * quedaba probar a ciegas con el id contra tioplus — URLs que no existen. Resultado: toda serie
+     * agrupada de FuegoCine devolvía sus capítulos sin un solo servidor, y desde fuera se ve como
+     * "la serie aparece y no tiene nada que reproducir".
+     *
+     * La página guardada ya trae el número de UN capítulo, así que la del capítulo pedido se saca
+     * sustituyéndolo: de `…ronaldinho-1x3.html` a `…ronaldinho-2x7.html`. Se conserva el mes y el
+     * año del post porque son parte de la ruta de Blogger, y si el capítulo pedido se publicó en
+     * otro mes esta candidata fallará — pero `esDelEpisodio` comprueba después que la página sea la
+     * del capítulo correcto, así que fallar aquí nunca sirve el capítulo equivocado.
+     */
+    const deFuegocine = (opts.sourceUrls || [])
+      .map(u => String(u).match(/^(https?:\/\/[^/]*fuegocine[^/]*\/\d{4}\/\d{2}\/.+?)-\d{1,2}x\d{1,3}(\.html)$/i))
+      .filter((m): m is RegExpMatchArray => Boolean(m))
+      .map(m => `${m[1]}-${season}x${episode}${m[2]}`);
+
+    desdeFuente.push(...deFuegocine);
+
     // Y después, a ciegas por categoría con el id, que es lo que sirve cuando el id SÍ es el slug.
     const porId = ['serie', 'anime', 'dorama']
       .map(cat => `${BASE_URL}/${cat}/${seriesSlug}/season/${season}/episode/${episode}`);
