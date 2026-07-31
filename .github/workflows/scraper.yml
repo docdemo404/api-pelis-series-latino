@@ -132,6 +132,57 @@ jobs:
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
         run: npx ts-node scripts/repairCatalog.ts --sinopsis --apply
 
+      # EXTRAER EL VÍDEO DE LOS EMBED. Es el paso que decide cuánto catálogo se puede reproducir.
+      #
+      # La API ya no entrega iframes —la app cliente no sabe incrustarlos— así que un servidor sin
+      # `direct_stream` no llega al espectador: o se le extrae el vídeo o esa ficha no se ve. Este
+      # paso es, literalmente, de dónde sale el catálogo reproducible.
+      #
+      # No estaba en el workflow. `fillDirectStreams` solo corre si se le pasa `--direct`, y el
+      # paso de refresco no lo llevaba, así que la extracción no se ejecutaba NUNCA sola: las
+      # 1.743 fichas con algo pendiente lo estaban desde que se añadió cada extractor nuevo.
+      #
+      # Va aparte del crawl (`--direct-only`) para que no dependa de que el crawl termine, y con
+      # tope para que quepa en el runner: recorre el catálogo entero, ordena por antigüedad y se
+      # lleva las 900 más atrasadas, así que en pocos días pasa por todo y vuelve a empezar.
+      - name: Extraer el vídeo directo de los embed
+        if: always()
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+        run: npx ts-node scripts/refreshCatalog.ts --direct-only --direct=900
+
+      # Y de lo que dice tener vídeo directo, comprobar que su endpoint contesta de verdad. Un
+      # servidor rotulado "Vídeo directo" que da 502 es peor que un embed: el reproductor lo elige
+      # PRIMERO por estar mejor rotulado. Prueba dos veces antes de retirar nada.
+      - name: Retirar los "vídeo directo" cuyo endpoint no responde
+        if: always()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+        run: npx ts-node scripts/repairCatalog.ts --directos-falsos --apply --limit=2500
+
+      # ÚLTIMO, y el orden importa: esconde las fichas que se quedaron sin nada reproducible y
+      # devuelve las que hoy sí tienen vídeo directo. Tiene que ir DESPUÉS de la extracción (que
+      # rescata fichas) y de los directos falsos (que dejan otras mudas), o escondería lo que el
+      # mismo workflow acaba de arreglar.
+      - name: Ajustar qué fichas se anuncian según lo que puedan reproducir
+        if: always()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+        run: npx ts-node scripts/repairCatalog.ts --sin-directo --apply
+
       - name: Comprobar que cada ficha sirve su propio contenido
         if: always()
         env:

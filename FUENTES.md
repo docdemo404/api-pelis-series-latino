@@ -264,8 +264,39 @@ Y uno que se queda por tamaño, no por muro: **vidsonic.net** (38 servidores, 0,
 tienen vídeo directo) monta un video.js que pide su fuente aparte. Se puede, simplemente no ha
 tocado todavía — si algún día crece, ahí está.
 
-Publicar un `direct_stream` muerto es **peor** que no publicar ninguno: el cliente pierde el tiempo
-antes de caer al embed. Cuando no se puede extraer, se deja el embed y ya está.
+Publicar un `direct_stream` muerto es **peor** que no publicar ninguno: el cliente lo elige primero
+justo por estar mejor rotulado, y solo entonces falla.
+
+### 5.6 La API no entrega embeds. Ninguno, nunca
+
+La app cliente **no sabe incrustar iframes**. Así que un embed no es una alternativa peor: es un
+botón de reproducir que no hace nada. La regla de salida, en `streamSorter.paraElCliente`:
+
+- sale **solo** lo que tiene `direct_stream` y no está `offline`;
+- y sale **sin `embed_url`**. Aunque el servidor sea bueno.
+
+Lo segundo cuesta creerlo hasta que pasa: «31 Minutos: Calurosa Navidad» tenía su único servidor
+perfectamente extraído —302 a un mp4 de 886 MB en rumble.cloud, con rangos y CORS— y no se
+reproducía, porque al lado viajaba su `embed_url`, que es `repfuegocinefree.blogspot.com/?player=
+fluidplayer`: una página con su propio reproductor dentro. El cliente cogía esa. **Si le das las
+dos, no controlas cuál usa.** No se pierde nada: `direct_stream` lleva la URL del embed codificada
+en su `e=`, que es de donde `/api/v1/stream/direct` la saca para acuñar en cada petición.
+
+Tres cosas que se derivan de esto y hay que respetar:
+
+1. **Filtrar es de SALIDA, y `sortServersBySourcePriority` NO es la salida.** Su resultado se
+   escribe en Supabase (`result.servers = sortServers…` → `persistStreams`), así que un filtro
+   puesto ahí no oculta: **borra**. Pasó, y estuvo un día borrando embeds de la base de datos.
+   Ordenar y esconder son operaciones distintas y no comparten función.
+2. **Una ficha sin ningún vídeo directo deja de anunciarse** (`--sin-directo` le pone
+   `has_streams = false`), y **vuelve sola** en cuanto recupere uno. El modo va en los dos
+   sentidos a propósito: si solo escondiera, cada corrida diaria encogería el catálogo y lo que
+   arreglan los extractores no volvería nunca.
+3. **Un capítulo sin directo contesta `unavailable`, no `pending`.** `pending` significa "todavía
+   no lo he buscado" y hace que el cliente reintente para siempre.
+
+Corolario para el que añada una fuente: el valor de una fuente ya no es cuántos servidores trae,
+es **de cuántos se puede extraer el vídeo**. Una fuente entera de embeds irreproducibles suma cero.
 
 ---
 
@@ -294,7 +325,16 @@ npm run repair:catalog -- --verify --ids=a,b # solo esas fichas
 
 Y lo que corre **solo** todos los días (`.github/workflows/scraper.yml`), en este orden: crawl →
 purga de fuentes intrusas → repaso de 700 fichas con ventana rotatoria (da la vuelta al catálogo
-cada ~21 días y vuelve a empezar) → auditoría que falla en rojo si algo se cuela.
+cada ~21 días y vuelve a empezar) → servidores muertos → sinopsis → **extracción de vídeo directo
+(900 fichas) → retirada de directos que dan 502 → ajuste de qué fichas se anuncian** → auditoría
+que falla en rojo si algo se cuela.
+
+> Los tres pasos en negrita van **en ese orden y al final**, y no es casual: la extracción rescata
+> fichas, la retirada de falsos deja otras mudas, y solo cuando ambas han terminado tiene sentido
+> decidir cuáles se anuncian. Al revés, se escondería lo que la misma corrida acaba de arreglar.
+>
+> La extracción **no estaba en el workflow**: `fillDirectStreams` solo corre con `--direct`, y el
+> paso de crawl no lo llevaba, así que no se ejecutaba nunca sin que alguien la lanzara a mano.
 
 > La ventana es **rotatoria** porque el punto de guardado es un archivo local y en un runner de CI se
 > pierde en cada corrida: sin `--rotar` se repasaban eternamente las mismas primeras fichas y el
@@ -323,3 +363,8 @@ cada ~21 días y vuelve a empezar) → auditoría que falla en rojo si algo se c
     cuatro cruces de metadata que han aparecido eran datos que estaban ahí y no se miraban.
 14. **Un detector mal escrito es peor que ninguno**: te hace perseguir fantasmas y desconfiar de
     los avisos buenos. Lee las páginas como las lee el scraper.
+15. **Si entregas dos formas de reproducir, no controlas cuál usa el cliente.** Entrega una.
+16. **No filtres donde se persiste.** Si la lista que recortas se escribe en la base, no estás
+    ocultando: estás borrando. Comprueba a dónde va lo que devuelve la función antes de tocarla.
+17. **Todo lo que esconde catálogo tiene que saber devolverlo.** Un modo de un solo sentido va
+    comiéndose el catálogo corrida a corrida y no se nota hasta que es tarde.
