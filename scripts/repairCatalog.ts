@@ -2422,6 +2422,47 @@ async function repairFakeDirects(apply: boolean, limitArg?: number, soloHost?: s
   const porHost = new Map<string, number>();
   for (const u of falsos) porHost.set(hostDe(u), (porHost.get(hostDe(u)) || 0) + 1);
 
+  /**
+   * FRENO DE EMERGENCIA: un apagón total de un host no son mil vídeos borrados a la vez.
+   *
+   * El umbral está en 95 % con 50 muestras mínimo, y esa cifra tan alta es a propósito. La
+   * tentación es ponerlo en el 70 %, y sería un error: emturbovid falla ~75 % y en su caso está
+   * BIEN retirarlo, porque se comprobó uno a uno y su contenido está muerto de verdad —manifiestos
+   * de 25 bytes sin una sola variante, variantes que dan 404, subdominios de CDN que ya no
+   * resuelven—. Un host puede tener tres cuartas partes de su catálogo borrado y seguir siendo un
+   * host sano; lo que no puede es fallar el 100 % y que sea casualidad.
+   *
+   * Cuidado con la trampa que casi me hace poner el umbral bajo: comprobé esos embeds "desde
+   * fuera", vi que `extractDirect` devolvía una URL, y concluí que estaban vivos y que el 502 era
+   * un bloqueo por IP. Extraer una URL no es encontrar un vídeo. Hay que BAJAR hasta los segmentos
+   * —`scripts/dev/probe_emturbovid.ts` lo hace— o se acaba defendiendo un catálogo de fantasmas.
+   *
+   * Y aunque no frene, la tabla por host se imprime siempre: es lo que convierte "he retirado
+   * 2.000 servidores" en "este host se ha caído entero", que es una noticia distinta.
+   */
+  const muestrasPorHost = new Map<string, number>();
+  for (const u of lista) muestrasPorHost.set(hostDe(u), (muestrasPorHost.get(hostDe(u)) || 0) + 1);
+
+  const APAGON = 0.95;
+  const MUESTRAS_MINIMAS = 50;
+  const hostsApagados = new Set<string>();
+  for (const [host, fallos] of porHost) {
+    const total = muestrasPorHost.get(host) || 0;
+    if (total >= MUESTRAS_MINIMAS && fallos / total >= APAGON) hostsApagados.add(host);
+  }
+
+  if (hostsApagados.size) {
+    console.log('\n⛔ HOSTS CAÍDOS AL COMPLETO — no se toca ni uno de sus servidores:');
+    for (const host of hostsApagados) {
+      const total = muestrasPorHost.get(host) || 0;
+      console.log(`   ${host.padEnd(30)} ${porHost.get(host)}/${total} fallan (${Math.round((porHost.get(host)! / total) * 100)} %)`);
+    }
+    console.log('   Fallar el 100 % no es contenido borrado: es el host, o somos nosotros.');
+    console.log('   Compruébalo con scripts/dev/probe_emturbovid.ts --host=<host>, que baja hasta');
+    console.log('   los segmentos, y vuelve a lanzarlo cuando el host reviva.');
+    for (const u of Array.from(falsos)) if (hostsApagados.has(hostDe(u))) falsos.delete(u);
+  }
+
   let servidoresLimpiados = 0;
   let fichasTocadas = 0;
   for (const row of rows) {

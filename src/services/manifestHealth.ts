@@ -74,8 +74,15 @@ export function destinoSirveCors(url: string): boolean | undefined {
   } catch {
     return undefined;
   }
+  // CORS es una propiedad del HOST, pero desde que las playlists se cachean por URL
+  // (`url:https://…`) su veredicto ya no empieza por el nombre del dominio. Se acepta cualquier
+  // clave que lo contenga; sin esto, un destino ya sondeado contestaba "no se sabe" y el 302 a un
+  // CDN con CORS bueno se convertía en un proxy innecesario.
   for (const [clave, entrada] of hostCache) {
-    if (clave.startsWith(host + '|') && Date.now() < entrada.expira) return entrada.sondeo.cors;
+    if (Date.now() >= entrada.expira) continue;
+    if (clave.startsWith(`${host}|`) || clave.includes(`//${host}/`) || clave.includes(`//${host}:`)) {
+      return entrada.sondeo.cors;
+    }
   }
   return undefined;
 }
@@ -122,7 +129,24 @@ export async function sondearDestino(
     return { vivo: false, motivo: 'no-responde', cors: false };
   }
 
-  const clave = `${host}|${esperaManifiesto}|${entregaLiteral}`;
+  /**
+   * UNA PLAYLIST SE CACHEA POR SU URL; UN SEGMENTO, POR SU HOST.
+   *
+   * Compartir el veredicto entre todas las URLs de un dominio era el ahorro que tenía sentido
+   * cuando la pregunta era "¿existe este CDN?". Pero las variantes de un maestro comparten
+   * dominio y NO comparten destino: emturbovid publica un maestro cuyas dos variantes viven en
+   * `g245.turboviplay.com`, una responde y la otra da 404, y con la clave por host bastaba con
+   * que la primera contestara para dar por buenas las dos. Resultado: la API entregaba 200 con un
+   * manifiesto cuya única calidad estaba muerta — el cliente recibe algo, lo abre, y se queda
+   * cargando para siempre. Es el peor de los desenlaces: ni reproduce ni falla.
+   *
+   * Para los segmentos se mantiene por host, que ahí sí es la pregunta correcta —son cientos por
+   * variante y lo que se comprueba es que el dominio siga sirviendo— y es lo que evita pagar una
+   * sonda por segmento.
+   */
+  const clave = esperaManifiesto
+    ? `url:${url}|${entregaLiteral}`
+    : `${host}|${esperaManifiesto}|${entregaLiteral}`;
   const cacheado = hostCache.get(clave);
   if (cacheado && Date.now() < cacheado.expira) return cacheado.sondeo;
 
@@ -244,6 +268,31 @@ export async function revisarManifiesto(
   referer: string
 ): Promise<EstadoManifiesto> {
   const lineas = manifiesto.split(/\r?\n/);
+
+  /**
+   * Las sondas van TODAS A LA VEZ. Antes se comprobaba variante por variante esperando a cada
+   * una, y con el veredicto cacheado por host daba igual porque la segunda y la tercera salían
+   * del caché sin pedir nada. Desde que cada playlist se comprueba por su URL —lo exige la
+   * corrección: dos variantes del mismo dominio pueden estar una viva y otra muerta— eso serían
+   * tres viajes seguidos en el camino entre pulsar Play y el primer fotograma. En paralelo, un
+   * maestro de tres calidades cuesta lo que costaba una.
+   */
+  const aSondear = lineas
+    .map((linea, i) => ({ linea, i, limpia: linea.trim() }))
+    .filter(x => x.limpia && !x.limpia.startsWith('#'));
+
+  const veredictos = new Map<number, { absoluta: string; host: string; viva: boolean }>();
+  await Promise.all(aSondear.map(async ({ limpia, i }) => {
+    let absoluta = limpia;
+    try {
+      absoluta = new URL(limpia, urlBase).toString();
+    } catch {}
+    const host = hostDe(limpia, urlBase);
+    const esPlaylist = /\.m3u8(\?|$)/i.test(absoluta);
+    const viva = !host || (await hostAlcanzable(absoluta, referer, esPlaylist));
+    veredictos.set(i, { absoluta, host, viva });
+  }));
+
   const salida: string[] = [];
   const muertos = new Set<string>();
   let vivas = 0;
@@ -262,21 +311,16 @@ export async function revisarManifiesto(
     }
 
     total++;
-    let absolutaCruda = limpia;
-    try {
-      absolutaCruda = new URL(limpia, urlBase).toString();
-    } catch {}
-    const host = hostDe(limpia, urlBase);
-    const esPlaylist = /\.m3u8(\?|$)/i.test(absolutaCruda);
-    if (host && !(await hostAlcanzable(absolutaCruda, referer, esPlaylist))) {
-      muertos.add(host);
+    const v = veredictos.get(i)!;
+    if (!v.viva) {
+      muertos.add(v.host);
       // Quitar también la etiqueta de cabecera que acabábamos de escribir, si la había.
       if (salida.length && /^#EXT-X-STREAM-INF/i.test(salida[salida.length - 1].trim())) salida.pop();
       continue;
     }
 
     vivas++;
-    salida.push(absolutaCruda);
+    salida.push(v.absoluta);
   }
 
   return {
