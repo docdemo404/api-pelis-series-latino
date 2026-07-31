@@ -278,20 +278,35 @@ export async function revisarManifiesto(
    * maestro de tres calidades cuesta lo que costaba una.
    */
   const aSondear = lineas
-    .map((linea, i) => ({ linea, i, limpia: linea.trim() }))
-    .filter(x => x.limpia && !x.limpia.startsWith('#'));
+    .map((linea, i) => ({ i, limpia: linea.trim() }))
+    .filter(x => x.limpia && !x.limpia.startsWith('#'))
+    .map(({ i, limpia }) => {
+      let absoluta = limpia;
+      try {
+        absoluta = new URL(limpia, urlBase).toString();
+      } catch {}
+      return { i, limpia, absoluta, host: hostDe(limpia, urlBase), esPlaylist: /\.m3u8(\?|$)/i.test(absoluta) };
+    });
 
   const veredictos = new Map<number, { absoluta: string; host: string; viva: boolean }>();
-  await Promise.all(aSondear.map(async ({ limpia, i }) => {
-    let absoluta = limpia;
-    try {
-      absoluta = new URL(limpia, urlBase).toString();
-    } catch {}
-    const host = hostDe(limpia, urlBase);
-    const esPlaylist = /\.m3u8(\?|$)/i.test(absoluta);
-    const viva = !host || (await hostAlcanzable(absoluta, referer, esPlaylist));
-    veredictos.set(i, { absoluta, host, viva });
-  }));
+  const sondear = async (x: typeof aSondear[number]) => {
+    const viva = !x.host || (await hostAlcanzable(x.absoluta, referer, x.esPlaylist));
+    veredictos.set(x.i, { absoluta: x.absoluta, host: x.host, viva });
+  };
+
+  // En paralelo SOLO las playlists. Son las pocas (2-5 calidades) y las únicas que se comprueban
+  // una a una, así que lanzarlas juntas es lo que evita pagar tres viajes seguidos.
+  await Promise.all(aSondear.filter(x => x.esPlaylist).map(sondear));
+
+  /**
+   * Los segmentos, EN SERIE, y no por prudencia genérica: `minted.url` no siempre es un maestro.
+   * Hay hosts que acuñan directamente la playlist de medios, y entonces esta función recibe un
+   * fichero con cientos de líneas de segmento. En serie, la primera sonda deja el veredicto del
+   * dominio en caché y las demás salen de ahí sin pedir nada —que es como se comportaba antes—;
+   * en paralelo saldrían TODAS a la vez, antes de que exista la primera entrada de caché, y una
+   * reproducción se convertiría en una ráfaga de cientos de peticiones al CDN.
+   */
+  for (const x of aSondear) if (!x.esPlaylist) await sondear(x);
 
   const salida: string[] = [];
   const muertos = new Set<string>();
