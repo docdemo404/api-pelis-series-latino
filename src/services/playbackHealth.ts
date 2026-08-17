@@ -524,7 +524,7 @@ export function aplicarVeredictosRecordados(servers: ServerOption[]): ServerOpti
  * vuelve a sellar el nombre como `[Embed]` y el servidor cae al fondo de la lista, que es
  * exactamente donde debe estar un último recurso.
  */
-function sinVideoDirecto(servidor: ServerOption): ServerOption {
+export function sinVideoDirecto(servidor: ServerOption): ServerOption {
   const { direct_stream, direct_kind, direct_mode, direct_host, ...resto } = servidor;
   return { ...resto, last_checked: new Date().toISOString() };
 }

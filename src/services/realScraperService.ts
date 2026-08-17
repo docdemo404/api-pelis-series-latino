@@ -30,7 +30,7 @@ function httpGet(url: string) {
  * Resuelve un token data-server en la URL real del iframe embed.
  * Flujo: data-server -> btoa(token) -> /player/ENCODED -> HTML con iframe src
  */
-async function resolvePlayerUrl(dataServerToken: string, referer: string): Promise<string | null> {
+export async function resolvePlayerUrl(dataServerToken: string, referer: string): Promise<string | null> {
   try {
     // El JS del sitio hace: /player/ + btoa(dataServerToken)
     const encodedForUrl = Buffer.from(dataServerToken).toString('base64');

@@ -74,6 +74,8 @@ import { CacheStore } from '../src/cache/store';
 import { streamClient } from '../src/utils/httpClient';
 import { inspectEmbed } from '../src/scrapers/embedHealth';
 import { bestMode, policyFor } from '../src/scrapers/hostPolicy';
+import { sinVideoDirecto } from '../src/services/playbackHealth';
+import { nombreConTipo } from '../src/services/streamSorter';
 import { MediaItem, ContentType } from '../src/types';
 
 const db = getSupabaseAdmin();
@@ -2355,6 +2357,103 @@ async function hideRowsWithoutDirect(apply: boolean): Promise<void> {
 }
 
 /**
+ * RECONCILIAR LO GUARDADO CON LA POLÍTICA DE HOSTS (`--politica`).
+ *
+ * `noSePuedeServirDirecto` solo actúa en el momento de scrapear: `describeDirect` y
+ * `deferredDirectFields` devuelven `{}` y el servidor nace sin vídeo directo. Pero las filas que YA
+ * están en la base de datos conservan su `direct_stream` de cuando el host sí se anunciaba, y de
+ * ahí sale `has_streams`, el orden de la lista y el `primary_stream`. O sea que marcar un host en
+ * `hostPolicy` no arregla nada de lo ya escrito hasta que a esa ficha le toque un re-scrapeo.
+ *
+ * Esta pasada cierra ese hueco: recorre lo guardado y le quita los campos de vídeo directo a todo
+ * servidor cuyo host ya no se puede servir. No sale a la red ni una vez — el veredicto es la tabla
+ * de políticas, que es determinista— así que repasar el catálogo entero cuesta lo que leerlo.
+ *
+ * Y MIRA TAMBIÉN DENTRO DE LOS EPISODIOS, que es donde está el problema: `--directos-falsos` solo
+ * recorre `servers`, y los enlaces de una serie viven en `seasons[].episodes[].servers`.
+ *
+ * NO toca `has_streams`: la visibilidad la decide `--sin-directo`, que sabe devolver fichas
+ * además de esconderlas, y que conviene pasar después de un refresco.
+ *
+ *   npm run repair:catalog -- --politica            # solo mide
+ *   npm run repair:catalog -- --politica --apply    # y los limpia
+ */
+async function reconcilePolicyDirects(apply: boolean): Promise<void> {
+  console.log(`🧭 Reconciliando lo guardado con hostPolicy${apply ? '' : ' (dry-run)'}...`);
+  const rows = await fetchAllRows(['servers', 'seasons', 'has_streams']);
+
+  const hostDe = (u: string) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return '(?)'; } };
+  /** Se anuncia como vídeo directo pero su host ya no se puede servir desde aquí. */
+  const sobra = (s: any) => Boolean(s?.direct_stream) && policyFor(s.embed_url || '').noSePuedeServirDirecto;
+  const limpiar = (s: any) => ({ ...sinVideoDirecto(s), name: nombreConTipo(s.name, false) });
+
+  const porHost = new Map<string, number>();
+  let filasTocadas = 0, servidoresLimpiados = 0, episodiosTocados = 0;
+  let seEsconden = 0;
+
+  for (const row of rows) {
+    let cambio = false;
+
+    const servers = (row.servers || []).map((s: any) => {
+      if (!sobra(s)) return s;
+      cambio = true; servidoresLimpiados++;
+      porHost.set(hostDe(s.embed_url), (porHost.get(hostDe(s.embed_url)) || 0) + 1);
+      return limpiar(s);
+    });
+
+    const seasons = (row.seasons || []).map((t: any) => ({
+      ...t,
+      episodes: (t.episodes || []).map((e: any) => {
+        if (!(e.servers || []).some(sobra)) return e;
+        cambio = true; episodiosTocados++;
+        return {
+          ...e,
+          servers: (e.servers || []).map((s: any) => {
+            if (!sobra(s)) return s;
+            servidoresLimpiados++;
+            porHost.set(hostDe(s.embed_url), (porHost.get(hostDe(s.embed_url)) || 0) + 1);
+            return limpiar(s);
+          }),
+        };
+      }),
+    }));
+
+    if (!cambio) continue;
+    filasTocadas++;
+
+    // Mismo criterio que `CatalogService.hasPlayableDirectStream`, pero SOLO PARA INFORMAR.
+    const reproducible = [
+      ...servers,
+      ...seasons.flatMap((t: any) => (t.episodes || []).flatMap((e: any) => e.servers || [])),
+    ].some((s: any) => s?.direct_stream && s.status !== 'offline');
+    if (!reproducible && row.has_streams !== false) seEsconden++;
+
+    if (apply) {
+      marcarTocada(row);
+      const { error } = await db
+        .from('media_items')
+        .update({ servers, seasons })
+        .eq('id', row.id);
+      if (error) console.warn(`   ⚠ ${row.id}: ${error.message}`);
+    }
+  }
+
+  console.log(`\n   ${filasTocadas} fichas con algo que limpiar · ${servidoresLimpiados} servidores · ${episodiosTocados} episodios`);
+  console.log('   por host:');
+  for (const [h, n] of [...porHost].sort((a, b) => b[1] - a[1]).slice(0, 12)) {
+    console.log(`      ${h.padEnd(32)} ${String(n).padStart(6)}`);
+  }
+  console.log(`\n   ${seEsconden} de ellas se quedarían sin nada reproducible EN LO GUARDADO.`);
+  console.log('   NO se les toca `has_streams` aquí, y es deliberado: este recuento sale de lo que');
+  console.log('   hay escrito, y una serie resuelve sus episodios EN VIVO al abrirla —puede sacar de');
+  console.log('   la fuente un servidor que sí se sirve—. Esconderlas por lo guardado enterraría');
+  console.log('   títulos que se ven. Quien decide visibilidad es `--sin-directo`, que además sabe');
+  console.log('   devolverlas, y conviene pasarlo DESPUÉS de un refresco con `--deep`.');
+  console.log(apply ? '\n   ✅ aplicado' : '\n   (dry-run: repite con --apply)');
+  await purgarCacheDeTocadas(apply);
+}
+
+/**
  * VÍDEOS DIRECTOS QUE NO LO SON (`--directos-falsos`).
  *
  * Un servidor rotulado "Vídeo directo" cuyo endpoint contesta 502 es la peor opción que puede
@@ -2574,6 +2673,11 @@ async function main() {
 
   if (process.argv.includes('--sin-directo')) {
     await hideRowsWithoutDirect(apply);
+    return;
+  }
+
+  if (process.argv.includes('--politica')) {
+    await reconcilePolicyDirects(apply);
     return;
   }
 

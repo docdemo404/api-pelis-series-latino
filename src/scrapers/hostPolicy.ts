@@ -184,8 +184,27 @@ const POLICIES: HostPolicy[] = [
     // de su página, mueren las playlists; si no manda ninguno, mueren los segmentos. La salida es
     // servir las playlists desde aquí —con el Referer bueno— y dejar que los segmentos, que se
     // conforman con el de la página del reproductor, vayan del CDN al cliente.
+    //
+    // Y DESDE EL 2026-08-17 NO SIRVE NINGÚN VÍDEO. Su API contesta, pero sin vídeo detrás: sobre
+    // los embeds del catálogo, `/api/v1/video` devuelve 404, 429, o un 200 cuyo payload descifrado
+    // trae `listo=false` y CERO campos de CDN. No es nuestro extractor —el descifrado AES sigue
+    // funcionando y el JSON se lee entero—, es que el host ya no publica el vídeo.
+    //
+    // Por qué se marca en vez de dejarlo fallar solo: estos hosts entran por `deferredDirectFields`,
+    // que anuncia `direct_stream` SIN resolverlo. Así que la ficha salía con dos o tres upns
+    // rotulados «[Vídeo directo]» y `status: online` que el ordenador ponía los PRIMEROS —incluido
+    // `primary_stream`—, y el único servidor bueno de la lista, un turboviplay en modo `proxy`,
+    // caía al tercer puesto. Medido sobre 12 episodios del catálogo: 20 enlaces upns publicados,
+    // 20 errores, 0 aciertos; los 12 turboviplay, 12 aciertos. El cliente se comía dos 502 antes
+    // de llegar al que reproduce, y como la API no entrega embeds, muchos se quedaban en «se
+    // probaron todas las fuentes».
+    //
+    // Es exactamente el pecado que FUENTES.md §5 llama el peor: publicar un vídeo directo muerto es
+    // PEOR que no publicar ninguno, porque el cliente lo elige primero justo por estar mejor
+    // rotulado. Mientras la familia no vuelva a servir vídeo, no se anuncia.
     match: ['upns.', 'strp2p', '4meplayer', 'rpmstream'],
     ipBound: false,
+    noSePuedeServirDirecto: true,
     refererRequired: false,
     refererChecked: true,
     cors: true,
@@ -194,7 +213,7 @@ const POLICIES: HostPolicy[] = [
     segmentRefererChecked: false,
     segmentCors: true,
     tokenTtlSeconds: 4 * 60 * 60,
-    measuredAt: MEASURED_AT,
+    measuredAt: '2026-08-17',
   },
 
   // ── Exigen el Referer del embed: solo redirigibles a clientes que fijen cabeceras ──
