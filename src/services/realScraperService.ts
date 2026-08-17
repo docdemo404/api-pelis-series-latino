@@ -133,21 +133,72 @@ function extractCardTitle($el: cheerio.Cheerio<any>): string {
 const TRAILING_YEAR_RANGE = /\((\d{4})(?:\s*[-–—/]\s*(?:\d{4}|presente|actualidad))?\)\s*$/i;
 
 /**
+ * Los formatos con los que las fuentes rotulan temporada y capítulo en el título.
+ *
+ * ESTO ANTES BUSCABA SOLO `S01E01`, Y ERA CIEGO JUSTO DONDE HACÍA FALTA. Los títulos que devuelve
+ * `scrapeDetail` (el `h1`, no el `<title>`), medidos el 2026-08-17:
+ *
+ *   TioPlus    "Nadie quiere esto S01 E01 - Piloto"   ← sí casaba: la comprobación funcionaba
+ *   FuegoCine  "Nadie quiere esto 1x1"                ← no casaba: se aceptaba SIEMPRE
+ *
+ * Y la fuente ciega es precisamente la de riesgo. Las URLs de TioPlus se derivan del slug que la
+ * fuente publica y su esquema `/season/N/episode/M` es canónico: si el capítulo no existe, hay
+ * 404. Las de FuegoCine se ADIVINAN —se reescribe el número dentro de `…-1x10.html` conservando el
+ * mes de Blogger—, que es el único caso en el que una página puede contestar sin ser la pedida. O
+ * sea que el guardarraíl cubría el camino seguro y dejaba suelto el camino inventado.
+ *
+ * Se añade también "Temporada N Capítulo M", que es como lo rotula el `<title>` de TioPlus: hoy no
+ * se usa porque leemos el `h1`, y es seguro de balde si algún día cambian esa plantilla.
+ */
+const ROTULOS_DE_EPISODIO: RegExp[] = [
+  // "S01 E01", "s1e3"
+  /\bS\s*(\d{1,3})\s*E\s*(\d{1,3})\b/i,
+  // "Temporada 1 Capítulo 1", "Season 2 Episode 7". El hueco se acota para que no empareje la
+  // temporada de un título con el capítulo de otra frase tres líneas más allá.
+  /\b(?:Temporada|Season)\s*(\d{1,3})[^\d]{0,40}?(?:Cap[ií]tulo|Episodio|Episode)\s*(\d{1,4})\b/i,
+  // "1x1", "4x8". Al FINAL del título, que es donde lo pone FuegoCine; anclarlo evita comerse
+  // una resolución ("1920x960") o un año suelto que aparezca a media frase.
+  /(?:^|\s)(\d{1,2})\s*x\s*(\d{1,3})\s*$/i,
+];
+
+/** Temporada y capítulo que DECLARA el título, o null si no lo declara en ningún formato conocido. */
+export function rotuloDelEpisodio(titulo: string | undefined): { season: number; episode: number } | null {
+  const t = String(titulo || '');
+  for (const re of ROTULOS_DE_EPISODIO) {
+    const m = t.match(re);
+    if (m) return { season: Number(m[1]), episode: Number(m[2]) };
+  }
+  return null;
+}
+
+/**
  * ¿La página que ha contestado es la del episodio que se pidió?
  *
- * Las páginas de episodio de TioPlus se rotulan con la temporada y el capítulo dentro del título
- * ("ONE PIECE S01 E01 - Amanecer de una aventura"), así que se puede COMPROBAR en vez de suponer.
  * Hace falta porque probar varias URLs y quedarse con la primera que traiga servidores es una
  * apuesta: si el sitio redirige, pagina distinto o cambia el orden de las temporadas, se sirve el
  * vídeo de otro capítulo — y eso el reproductor no lo nota, lo nota quien lo está viendo.
  *
- * Si la página NO declara ningún S/E, se acepta: hay plantillas que no lo rotulan y rechazarlas
- * dejaría sin enlaces a series que funcionan. Lo que no se acepta es que declare OTRO.
+ * Cuando la página NO declara nada, la respuesta depende de CÓMO se llegó a ella, y esa distinción
+ * es la que faltaba:
+ *
+ *   · URL derivada de una `source_url` real (el slug lo publica la fuente y la ruta es su esquema
+ *     canónico): si no existe, contesta 404. Que no rotule no es sospechoso — se acepta.
+ *   · URL ADIVINADA (`exigeRotulo`): se ha inventado el número del capítulo dentro de una ruta
+ *     —el mes de Blogger en `…-1x10.html` → `…-2x7.html`, o la categoría a ciegas con el id de la
+ *     fila—. Ahí una página que responde y no se identifica no prueba nada, y aceptarla es
+ *     exactamente cómo se sirve el capítulo equivocado. Sin rótulo, no se adopta.
+ *
+ * Un rótulo que dice OTRO capítulo se rechaza siempre, venga de donde venga.
  */
-function esDelEpisodio(titulo: string | undefined, season: number, episode: number): boolean {
-  const m = String(titulo || '').match(/\bS\s*(\d{1,3})\s*E\s*(\d{1,3})\b/i);
-  if (!m) return true;
-  return Number(m[1]) === season && Number(m[2]) === episode;
+export function esDelEpisodio(
+  titulo: string | undefined,
+  season: number,
+  episode: number,
+  opts: { exigeRotulo?: boolean } = {}
+): boolean {
+  const rotulo = rotuloDelEpisodio(titulo);
+  if (!rotulo) return !opts.exigeRotulo;
+  return rotulo.season === season && rotulo.episode === episode;
 }
 
 /** Señales de una página de origen que el emparejado con TMDB necesita para no fallar. */
@@ -718,10 +769,19 @@ export class RealScraperService {
      * las tres URLs que se probaban daban 404 y el episodio no se resolvía nunca. Toda serie cuyo id
      * no calque el slug —todas las de FuegoCine, para empezar— estaba en ese caso.
      */
-    const desdeFuente = (opts.sourceUrls || [])
+    /**
+     * Cada candidata viaja con si su ruta se ha ADIVINADO o se ha derivado de algo que la fuente
+     * publica. Lo consume `esDelEpisodio`: a una ruta inventada se le exige que la página diga qué
+     * capítulo es; a una derivada de `source_urls`, no. Ver el comentario de esa función.
+     */
+    type Candidata = { url: string; adivinada: boolean };
+
+    const desdeFuente: Candidata[] = (opts.sourceUrls || [])
       .map(u => String(u).match(/\/(serie|anime|dorama)\/([^/?#]+)/i))
       .filter((m): m is RegExpMatchArray => Boolean(m))
-      .map(m => `${BASE_URL}/${m[1].toLowerCase()}/${m[2]}/season/${season}/episode/${episode}`);
+      // El slug lo publica la fuente y `/season/N/episode/M` es el esquema canónico de TioPlus:
+      // si el capítulo no existe, contesta 404. No se está inventando nada.
+      .map(m => ({ url: `${BASE_URL}/${m[1].toLowerCase()}/${m[2]}/season/${season}/episode/${episode}`, adivinada: false }));
 
     /**
      * Y LAS DE FUEGOCINE, que no tienen esa forma en absoluto.
@@ -737,17 +797,22 @@ export class RealScraperService {
      * año del post porque son parte de la ruta de Blogger, y si el capítulo pedido se publicó en
      * otro mes esta candidata fallará — pero `esDelEpisodio` comprueba después que la página sea la
      * del capítulo correcto, así que fallar aquí nunca sirve el capítulo equivocado.
+     *
+     * Va marcada como ADIVINADA justamente por el mes: la ruta se inventa a partir de la de otro
+     * capítulo, y Blogger es capaz de contestar algo a una URL que no es la que se pidió.
      */
-    const deFuegocine = (opts.sourceUrls || [])
+    const deFuegocine: Candidata[] = (opts.sourceUrls || [])
       .map(u => String(u).match(/^(https?:\/\/[^/]*fuegocine[^/]*\/\d{4}\/\d{2}\/.+?)-\d{1,2}x\d{1,3}(\.html)$/i))
       .filter((m): m is RegExpMatchArray => Boolean(m))
-      .map(m => `${m[1]}-${season}x${episode}${m[2]}`);
+      .map(m => ({ url: `${m[1]}-${season}x${episode}${m[2]}`, adivinada: true }));
 
     desdeFuente.push(...deFuegocine);
 
     // Y después, a ciegas por categoría con el id, que es lo que sirve cuando el id SÍ es el slug.
-    const porId = ['serie', 'anime', 'dorama']
-      .map(cat => `${BASE_URL}/${cat}/${seriesSlug}/season/${season}/episode/${episode}`);
+    // A ciegas de verdad: el id de la fila puede no ser el slug de ninguna serie de TioPlus, así
+    // que lo que conteste tiene que identificarse.
+    const porId: Candidata[] = ['serie', 'anime', 'dorama']
+      .map(cat => ({ url: `${BASE_URL}/${cat}/${seriesSlug}/season/${season}/episode/${episode}`, adivinada: true }));
 
     /**
      * POR TANDAS, no todas a la vez.
@@ -758,14 +823,18 @@ export class RealScraperService {
      * serie, así que aciertan casi siempre; las del id son el respaldo para cuando el id ES el
      * slug. Se prueba la primera tanda y solo si no sale nada se paga la segunda.
      */
-    const tandas = [desdeFuente, porId.filter(u => !desdeFuente.includes(u))].filter(t => t.length > 0);
+    const yaEsta = new Set(desdeFuente.map(c => c.url));
+    const tandas = [desdeFuente, porId.filter(c => !yaEsta.has(c.url))].filter(t => t.length > 0);
 
     let detail = null as Awaited<ReturnType<typeof this.scrapeDetail>>;
     for (const tanda of tandas) {
-      const settled = await Promise.allSettled(tanda.map(u => this.scrapeDetail(u)));
+      const settled = await Promise.allSettled(tanda.map(c => this.scrapeDetail(c.url)));
       detail = settled
-        .map(r => (r.status === 'fulfilled' ? r.value : null))
-        .find(d => d && d.servers && d.servers.length > 0 && esDelEpisodio(d.title, season, episode)) || null;
+        .map((r, i) => ({ d: r.status === 'fulfilled' ? r.value : null, cand: tanda[i] }))
+        .find(({ d, cand }) =>
+          d && d.servers && d.servers.length > 0 &&
+          esDelEpisodio(d.title, season, episode, { exigeRotulo: cand.adivinada })
+        )?.d || null;
       if (detail) break;
     }
 
