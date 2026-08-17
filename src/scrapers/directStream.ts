@@ -370,9 +370,75 @@ function decryptUpns(hex: string): string | null {
 }
 
 /**
+ * Los cuatro CDN entre los que reparte upns, con el campo del payload donde viaja cada uno.
+ * El nombre de la izquierda es el que usan ellos en `streamingConfig.order`.
+ */
+const UPNS_CDN: Record<string, string[]> = {
+  Cloudflare: ['cf', 'cfNative'],
+  Tiktok: ['hlsVideoTiktok'],
+  Google: ['hlsVideoGoogle'],
+  'In-House': ['source'],
+};
+
+/** Orden por defecto del reproductor cuando `streamingConfig` no trae uno válido. */
+const UPNS_ORDEN_POR_DEFECTO = ['Cloudflare', 'In-House'];
+
+interface UpnsAjuste {
+  disabled?: boolean;
+  domain?: string;
+  params?: Record<string, string>;
+}
+
+/**
+ * Aplica a una URL el mismo ajuste que el reproductor, que son tres cosas y en este orden:
+ * saltarse el CDN si viene `disabled`, escribir los `params` en la query, y —si la ruta pasa
+ * por `/hls/`— desviarla al proxy `/hlsmod/<dominio>/` que ellos anteponen.
+ */
+function ajustarUpns(url: string, ajuste: UpnsAjuste | undefined): string | null {
+  if (ajuste?.disabled || !url) return null;
+  let u: URL;
+  try {
+    u = new URL(url.trim().startsWith('//') ? `https:${url.trim()}` : url.trim());
+  } catch {
+    return null;
+  }
+  if (ajuste?.params && typeof ajuste.params === 'object') {
+    for (const [k, v] of Object.entries(ajuste.params)) u.searchParams.set(k, String(v));
+  }
+  if (ajuste?.domain && u.pathname.includes('/hls/')) {
+    u.pathname = u.pathname.replace('/hls/', `/hlsmod/${ajuste.domain}/`);
+  }
+  return u.toString();
+}
+
+/**
+ * El token de reproducción: su loader de hls.js añade `k`/`kx` a TODA url que pase por `/v4/`,
+ * y sin él esas rutas contestan 403. Va aquí y no en el proxy porque `hasVolatileToken` ya
+ * reconoce `kx=<marca de tiempo>` y obliga a acuñar la URL en cada reproducción.
+ */
+function firmarUpns(url: string, pk: { k?: string; kx?: number } | undefined): string {
+  if (!pk?.k || !url.includes('/v4/') || url.includes(`k=${pk.k}`)) return url;
+  return `${url}${url.includes('?') ? '&' : '?'}k=${pk.k}&kx=${pk.kx}`;
+}
+
+/**
  * upns.pro y clones (`https://…/#<videoId>`): el id viaja en el hash y el vídeo se pide a
  * `/api/v1/video`, que responde cifrado. Requiere una petición extra, la única de todos los
  * extractores.
+ *
+ * El payload NO trae una url y ya está: trae hasta cuatro, una por CDN, y un `streamingConfig`
+ * que dice en qué orden probarlas y cómo retocar cada una. Leer solo `cfNative || source` —lo
+ * que se hacía antes— era quedarse con dos campos de cinco, y encima con el de Safari primero:
+ * `cfNative` es el manifiesto para navegadores con HLS nativo, no el principal.
+ *
+ * Y un aviso para quien venga a depurar esto: que devuelva null NO significa que el extractor
+ * esté roto. Cuando el vídeo no está listo, su API responde 200 con el payload completo —título,
+ * póster, `player`, `pk`— y SIN ninguno de los cinco campos de stream; su propio reproductor
+ * enseña entonces "Video is not ready yet". Es la misma señal que da el sitio, no un fallo
+ * nuestro. Medido en agosto de 2026: de 25 embeds del catálogo repartidos por los cinco dominios
+ * de la familia, los que contestaban 200 traían todos `campos=[]`, y el resto daba 404
+ * «Video not found or deleted». Antes de tocar este código, comprueba con
+ * `scripts/dev/probe_extraccion.ts` si lo que falta es el extractor o el vídeo.
  */
 async function extractUpns(embedUrl: string): Promise<DirectStream | null> {
   const videoId = embedUrl.split('#')[1];
@@ -405,10 +471,29 @@ async function extractUpns(embedUrl: string): Promise<DirectStream | null> {
 
   try {
     const payload = JSON.parse(plain);
-    // `cfNative` es el manifiesto que usa su propio reproductor; `source` es el origen directo.
-    const url = payload.cfNative || payload.source;
-    if (typeof url !== 'string' || !url) return null;
-    return { url: normalizeUrl(url), kind: kindOf(url) };
+
+    // `streamingConfig` viaja como CADENA JSON dentro del payload ya descifrado.
+    let orden: string[] = UPNS_ORDEN_POR_DEFECTO;
+    let ajustes: Record<string, UpnsAjuste> = {};
+    try {
+      const sc = typeof payload.streamingConfig === 'string'
+        ? JSON.parse(payload.streamingConfig)
+        : payload.streamingConfig;
+      if (Array.isArray(sc?.order) && sc.order.length) orden = sc.order;
+      if (sc?.adjust && typeof sc.adjust === 'object') ajustes = sc.adjust;
+    } catch { /* con el orden por defecto se sigue igual */ }
+
+    for (const cdn of orden) {
+      for (const campo of UPNS_CDN[cdn] || []) {
+        const bruto = payload[campo];
+        if (typeof bruto !== 'string' || !bruto) continue;
+        const ajustada = ajustarUpns(bruto, ajustes[cdn]);
+        if (!ajustada) continue;
+        const url = firmarUpns(ajustada, payload.pk);
+        return { url: normalizeUrl(url), kind: kindOf(url) };
+      }
+    }
+    return null;
   } catch {
     return null;
   }
