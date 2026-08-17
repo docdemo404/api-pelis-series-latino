@@ -16,8 +16,8 @@
  */
 import 'dotenv/config';
 import { getSupabaseAdmin } from '../../src/services/supabaseService';
-import { httpGetHtml, USER_AGENT } from '../../src/utils/httpClient';
 import { extractDirect, unwrapRedirector } from '../../src/scrapers/directStream';
+import { inspectEmbed } from '../../src/scrapers/embedHealth';
 
 const db = getSupabaseAdmin();
 const arg = (n: string, d = '') => (process.argv.find(a => a.startsWith(`--${n}=`)) || '').split('=')[1] || d;
@@ -26,17 +26,6 @@ const HOSTS = Number(arg('hosts', '20'));
 
 type Motivo = 'MUERTO' | 'EXTRAÍDO' | 'SIN EXTRACTOR' | 'RED';
 
-/** Lo que dicen estos hosts cuando el fichero ya no está. */
-const SENALES_DE_MUERTO = [
-  /no longer available/i,
-  /has been deleted/i,
-  /file (was )?(not found|deleted|removed)/i,
-  /video (was )?(not found|removed|deleted|unavailable)/i,
-  /404\s*[-–]\s*(no encontrado|not found)/i,
-  /this (file|video) (is|was) (gone|removed)/i,
-  /(fichero|archivo) no (existe|disponible)/i,
-  /expired/i,
-];
 
 function hostDe(url: string): string {
   try {
@@ -46,39 +35,37 @@ function hostDe(url: string): string {
   }
 }
 
+/**
+ * Clasifica un embed usando EL MISMO JUEZ QUE PRODUCCIÓN (`inspectEmbed`), no una lógica propia.
+ *
+ * Antes esto hacía su propio fetch y decidía con cuatro reglas escritas aquí, y por eso mentía en
+ * el host más numeroso del catálogo: vudeo.co responde 200 con un shim de FingerprintJS que
+ * redirige POR JAVASCRIPT a `ww38.vudeo.co` —un aparcador—, así que mirar solo el destino de los
+ * saltos HTTP daba "la página vive, falta extractor" para 5.377 servidores muertos. `inspectEmbed`
+ * ya seguía ese salto y ya tenía el motivo `vudeo-aparcado`; el que no lo miraba era este sondeo.
+ *
+ * La regla que queda: si dos sitios deciden lo mismo con criterios distintos, uno de los dos está
+ * mintiendo, y el que manda es el que retira servidores de verdad.
+ */
 async function clasificar(embedUrl: string, referer?: string): Promise<{ motivo: Motivo; nota: string }> {
   const url = unwrapRedirector(embedUrl);
-  let html = '';
-  let status = 0;
-  let finalUrl = url;
+  let inspeccion;
   try {
-    const res = await httpGetHtml(url, {
-      headers: { Referer: referer || 'https://tioplus.app/', 'User-Agent': USER_AGENT },
-      timeout: 15000,
-      maxRedirects: 5,
-      validateStatus: () => true,
-      responseType: 'text',
-      transformResponse: [(d: unknown) => d],
-    });
-    status = res.status;
-    html = String(res.data || '');
-    finalUrl = res.request?.res?.responseUrl || url;
+    inspeccion = await inspectEmbed(url, referer || 'https://tioplus.app');
   } catch (e: any) {
     return { motivo: 'RED', nota: e.code || String(e.message).slice(0, 40) };
   }
+  const { status, html, motivo } = inspeccion;
 
   // El vídeo manda: si sale, da igual lo que diga el resto de la página.
   const directo = await extractDirect(url, html, { allowNetwork: true });
   if (directo) return { motivo: 'EXTRAÍDO', nota: directo.kind };
 
-  if (status === 404 || status === 410 || status === 451) return { motivo: 'MUERTO', nota: `HTTP ${status}` };
-  // `wwN.host` es el aparcamiento de dominio típico: el host dejó de servir vídeo.
-  if (/^ww\d+\./i.test(hostDe(finalUrl))) return { motivo: 'MUERTO', nota: 'dominio aparcado' };
-  const senal = SENALES_DE_MUERTO.find(re => re.test(html));
-  if (senal) return { motivo: 'MUERTO', nota: (html.match(senal) || [''])[0].slice(0, 30) };
-  if (status >= 400) return { motivo: 'MUERTO', nota: `HTTP ${status}` };
+  if (status === 'offline') return { motivo: 'MUERTO', nota: motivo || 'sin motivo' };
+  // Sin cuerpo no se llegó a mirar: es problema de red, no del host.
+  if (!html) return { motivo: 'RED', nota: 'sin cuerpo' };
 
-  return { motivo: 'SIN EXTRACTOR', nota: `HTTP ${status} · ${html.length}B` };
+  return { motivo: 'SIN EXTRACTOR', nota: `${html.length}B` };
 }
 
 /** Ejecuta en paralelo con tope, para no tardar media hora ni tumbar a nadie. */
