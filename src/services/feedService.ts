@@ -269,7 +269,8 @@ export class FeedService {
     const detail = opts.detail === 'compact' ? 'compact' : 'card';
     const perRow = Math.max(5, Math.min(opts.limit || 20, 40));
 
-    const cacheKey = `home:${cc}:${detail}:${perRow}`;
+    // No reutilizar carruseles previos a la regla de catálogo solo-directo.
+    const cacheKey = `home:direct-only:v1:${cc}:${detail}:${perRow}`;
 
     /**
      * NADIE ESPERA A QUE SE RECONSTRUYA EL HOME.

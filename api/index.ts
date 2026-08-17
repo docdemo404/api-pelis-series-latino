@@ -39,7 +39,6 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 app.use((req: Request, res: Response, next: NextFunction) => {
   if (req.path.includes('/stream/direct')) return next();
   const origin = publicOrigin(req);
-  if (!origin) return next();
 
   const json = res.json.bind(res);
   res.json = (body: any) => json(withAbsoluteDirectStreams(body, origin));

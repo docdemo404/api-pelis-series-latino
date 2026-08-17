@@ -629,7 +629,7 @@ router.get([DIRECT_BASE, `${DIRECT_BASE}/v.mp4`, `${DIRECT_BASE}/v.m3u8`], async
       BandwidthService.isOverBudget(),
     ]);
     if (!minted) {
-      return sendErrorResponse(res, 502, 'DIRECT_UNAVAILABLE', 'No se pudo extraer el vídeo de este embed. Reproduce con embed_url.');
+      return sendErrorResponse(res, 502, 'DIRECT_UNAVAILABLE', 'No se pudo extraer un vídeo directo de este servidor.');
     }
 
     let mode = resolveMode(
@@ -667,7 +667,7 @@ router.get([DIRECT_BASE, `${DIRECT_BASE}/v.mp4`, `${DIRECT_BASE}/v.m3u8`], async
       console.warn(`[direct] ${veredicto.veredicto} (${veredicto.motivo}): ${minted.url.slice(0, 90)}`);
     }
     if (veredicto.veredicto === 'muerto') {
-      return sendErrorResponse(res, 502, 'DIRECT_UNAVAILABLE', 'El vídeo ya no existe en este host. Reproduce con embed_url u otro servidor.');
+      return sendErrorResponse(res, 502, 'DIRECT_UNAVAILABLE', 'El vídeo ya no existe en este host. Prueba otro servidor directo.');
     }
 
     /**
@@ -742,7 +742,7 @@ router.get([DIRECT_BASE, `${DIRECT_BASE}/v.mp4`, `${DIRECT_BASE}/v.m3u8`], async
      */
     if (overBudget && mode !== 'manifest') {
       if (!policyFor(embedUrl).ipBound) return sendRedirect(res, minted.url);
-      return sendErrorResponse(res, 502, 'DIRECT_UNAVAILABLE', 'Presupuesto de tránsito agotado este mes. Reproduce con embed_url.');
+      return sendErrorResponse(res, 502, 'DIRECT_UNAVAILABLE', 'Presupuesto de tránsito agotado este mes. Prueba otro servidor directo.');
     }
 
     // En `manifest` solo viajan por aquí las playlists; los segmentos van del CDN al reproductor.
@@ -770,7 +770,7 @@ router.get([DIRECT_BASE, `${DIRECT_BASE}/v.mp4`, `${DIRECT_BASE}/v.m3u8`], async
     // El token cacheado ya no vale: se fuerza uno nuevo y se reintenta UNA vez.
     const retry = await mintDirect(embedUrl, { fresh: true });
     if (!retry || (await serve(retry)) !== null) {
-      return sendErrorResponse(res, 502, 'DIRECT_UNAVAILABLE', 'El servidor de vídeo rechazó la petición. Reproduce con embed_url.');
+      return sendErrorResponse(res, 502, 'DIRECT_UNAVAILABLE', 'El servidor de vídeo rechazó la petición. Prueba otro servidor directo.');
     }
   } catch (err) {
     next(err);
@@ -813,7 +813,7 @@ router.get(`${DIRECT_BASE}/seg`, async (req: Request, res: Response, next: NextF
       const refreshed = await refreshTarget(target, embedUrl);
       if (refreshed && (await serve(refreshed)) === null) return;
     }
-    return sendErrorResponse(res, 502, 'DIRECT_UNAVAILABLE', 'El servidor de vídeo rechazó el segmento. Reproduce con embed_url.');
+    return sendErrorResponse(res, 502, 'DIRECT_UNAVAILABLE', 'El servidor de vídeo rechazó el segmento. Prueba otro servidor directo.');
   } catch (err) {
     next(err);
   }

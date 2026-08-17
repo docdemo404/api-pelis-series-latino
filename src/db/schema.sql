@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS media_items (
     source_urls TEXT[] DEFAULT '{}',
     -- Disponibilidad verificada: TRUE con enlaces, FALSE fantasma (se oculta de los
     -- feeds), NULL sin comprobar (se sigue mostrando). Ver migración 005.
+    -- TRUE solo cuando existe al menos un `direct_stream` reproducible.
     has_streams BOOLEAN,
     streams_checked_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -72,5 +73,5 @@ CREATE INDEX IF NOT EXISTS idx_media_genres ON media_items USING gin (genres);
 CREATE INDEX IF NOT EXISTS idx_media_streams_updated ON media_items (streams_updated_at DESC NULLS LAST);
 
 -- Feeds sin fichas fantasma. Ver src/db/migrations/005_multisource_and_availability.sql
-CREATE INDEX IF NOT EXISTS idx_media_playable ON media_items (updated_at DESC) WHERE has_streams IS DISTINCT FROM false;
+CREATE INDEX IF NOT EXISTS idx_media_playable ON media_items (updated_at DESC) WHERE has_streams = true;
 CREATE INDEX IF NOT EXISTS idx_media_streams_checked ON media_items (streams_checked_at DESC NULLS FIRST);

@@ -420,20 +420,22 @@ export class CatalogService {
    * Mapea un MediaItem a un payload compacto optimizado para listados y vistas rápidas
    */
   static toCompactItem(item: MediaItem): Partial<MediaItem> {
+    // `compact=true` también es una respuesta pública: no puede saltarse el filtro de embeds.
+    const playable = this.toPublicItem(item);
     return {
-      id: item.id,
-      tmdb_id: item.tmdb_id,
-      type: item.type,
-      title: item.title,
-      original_title: item.original_title,
-      poster: item.poster,
-      backdrop: item.backdrop,
-      rating: item.rating,
-      release_date: item.release_date,
-      genres: item.genres,
-      subcategories: item.subcategories,
-      primary_stream: item.primary_stream,
-      servers: item.servers
+      id: playable.id,
+      tmdb_id: playable.tmdb_id,
+      type: playable.type,
+      title: playable.title,
+      original_title: playable.original_title,
+      poster: playable.poster,
+      backdrop: playable.backdrop,
+      rating: playable.rating,
+      release_date: playable.release_date,
+      genres: playable.genres,
+      subcategories: playable.subcategories,
+      primary_stream: playable.primary_stream,
+      servers: playable.servers
     };
   }
 
@@ -551,9 +553,9 @@ export class CatalogService {
    * entonces un objeto de resultado en lugar del builder, los filtros siguientes se perdían
    * y el home se quedaba sin una sola fila.
    */
-  private static async ghostFilter(): Promise<string | null> {
+  private static async playableFilter(): Promise<string | null> {
     return (await this.hasAvailabilityColumn())
-      ? 'has_streams.is.null,has_streams.eq.true'
+      ? 'has_streams.eq.true'
       : null;
   }
 
@@ -606,8 +608,8 @@ export class CatalogService {
         .order('updated_at', { ascending: false })
         .limit(limit);
 
-      const ghosts = await this.ghostFilter();
-      if (ghosts) query = query.or(ghosts);
+      const playable = await this.playableFilter();
+      if (playable) query = query.or(playable);
 
       const { data } = await query;
 
@@ -680,8 +682,8 @@ export class CatalogService {
         .not('genres', 'eq', '{}');
 
       // Los carruseles del home no anuncian títulos que ya sabemos que no se reproducen.
-      const ghosts = await this.ghostFilter();
-      if (ghosts) query = query.or(ghosts);
+      const playable = await this.playableFilter();
+      if (playable) query = query.or(playable);
 
       if (spec.type) query = query.eq('type', spec.type);
       if (spec.genres && spec.genres.length > 0) query = query.overlaps('genres', spec.genres);
@@ -728,8 +730,8 @@ export class CatalogService {
         .range(from, from + safeLimit - 1);
 
       // El "ver todo" tampoco debe pasear fichas sin reproducción posible.
-      const ghosts = await this.ghostFilter();
-      if (ghosts) query = query.or(ghosts);
+      const playable = await this.playableFilter();
+      if (playable) query = query.or(playable);
 
       if (type) query = query.eq('type', type);
       if (genre) query = query.contains('genres', [genre]);
@@ -747,7 +749,8 @@ export class CatalogService {
    * Obtiene todos los títulos del homepage en vivo enriquecidos con TMDB
    */
   static async getAll(): Promise<MediaItem[]> {
-    const cacheKey = 'all_homepage';
+    // La versión evita reutilizar una lista anterior que todavía contenía títulos sin directo.
+    const cacheKey = 'all_homepage:direct-only:v1';
     const cached = await CacheStore.get<MediaItem[]>(cacheKey);
     if (cached) return cached;
 
@@ -755,16 +758,21 @@ export class CatalogService {
     //    Si Supabase tiene catálogo suficiente y fresco (< 24h), se sirve directo de la DB
     //    (1 query) en lugar de lanzar 4 scrapes en vivo por cold start.
     try {
-      const { data } = await supabase
+      let query = supabase
         .from('media_items')
         .select(this.COLUMNAS_DE_TARJETA)
         .order('updated_at', { ascending: false })
         .limit(200);
+      const playable = await this.playableFilter();
+      if (playable) query = query.or(playable);
+      const { data } = await query;
       const filas = (data || []) as any[];
       if (filas.length >= 30) {
         const newest = Date.parse(filas[0].updated_at || '') || 0;
         const isFresh = Date.now() - newest < 24 * 60 * 60 * 1000;
         if (isFresh) {
+          // La consulta ya trae solo `has_streams = true`; el filtro en memoria sobra y, sobre
+          // una proyección de tarjeta (sin `servers`), además vaciaría la lista. Ver esReproducible.
           const dbItems = filas.map(this.mapDbItemToMediaItem);
           await CacheStore.set(cacheKey, dbItems, CACHE_TTL_SECONDS);
           return dbItems;
@@ -785,7 +793,7 @@ export class CatalogService {
       ...latestMovies,
       ...latestSeries,
       ...latestAnimes
-    ]);
+    ]).filter(item => this.esReproducible(item));
 
     if (liveItems.length > 0) {
       const enrichedList: MediaItem[] = [];
@@ -947,7 +955,7 @@ export class CatalogService {
   private static async persistStreams(item: MediaItem, verified: boolean = false): Promise<void> {
     if (!item.id) return;
 
-    const hasServers = Boolean(item.servers && item.servers.length > 0);
+    const hasServers = this.hasPlayableDirectStream(item);
     const update: Record<string, unknown> = {
       servers: item.servers || [],
       seasons: item.seasons || [],
@@ -955,7 +963,7 @@ export class CatalogService {
       streams_updated_at: new Date().toISOString()
     };
     if (verified) {
-      update.has_streams = hasServers || this.hasEpisodeServers(item);
+      update.has_streams = hasServers;
       update.streams_checked_at = new Date().toISOString();
     }
     if (item._source_urls && item._source_urls.length > 0) {
@@ -980,8 +988,31 @@ export class CatalogService {
   /** ¿Algún episodio de la serie tiene enlaces propios? (una serie se reproduce por episodio). */
   private static hasEpisodeServers(item: MediaItem): boolean {
     return (item.seasons || []).some(season =>
-      (season.episodes || []).some(ep => (ep.servers || []).length > 0)
+      (season.episodes || []).some(ep => paraElCliente(ep.servers).length > 0)
     );
+  }
+
+  /** Una película necesita un directo propio; una serie, uno en cualquiera de sus episodios. */
+  private static hasPlayableDirectStream(item: Pick<MediaItem, 'servers' | 'seasons'>): boolean {
+    return paraElCliente(item.servers).length > 0 || this.hasEpisodeServers(item as MediaItem);
+  }
+
+  /**
+   * ¿Este ítem se puede reproducir? Igual que arriba, pero VÁLIDO TAMBIÉN cuando la fila no trae
+   * los servidores.
+   *
+   * Hace falta porque `COLUMNAS_DE_TARJETA` no selecciona `servers` ni `seasons` —es justo la
+   * optimización que evita traerse 23 MB para pintar el home—, así que sobre una fila de tarjeta
+   * `hasPlayableDirectStream` no puede dar true JAMÁS: mira unos campos que no se han pedido.
+   * Usarlo ahí de filtro vaciaba la lista entera y encima la cacheaba.
+   *
+   * Cuando los servidores están, mandan ellos. Cuando no, manda `has_streams`, que es ese mismo
+   * veredicto ya calculado y escrito por quien sí los tenía delante (`persistStreams`).
+   */
+  private static esReproducible(item: MediaItem): boolean {
+    const traeServidores = (item.servers && item.servers.length > 0)
+      || (item.seasons && item.seasons.length > 0);
+    return traeServidores ? this.hasPlayableDirectStream(item) : item.has_streams === true;
   }
 
   /**
@@ -996,12 +1027,23 @@ export class CatalogService {
    */
   static toPublicItem<T extends Record<string, any>>(item: T): T {
     const { _source_url, _source_urls, _tioplus_url, ...rest } = item as any;
-    if (Array.isArray(rest.servers)) rest.servers = paraElCliente(rest.servers);
-    if (rest.primary_stream) rest.primary_stream = paraElCliente([rest.primary_stream])[0] || null;
+    if (Array.isArray(rest.servers)) {
+      rest.servers = paraElCliente(rest.servers);
+      rest.primary_stream = getPrimaryStream(rest.servers) || null;
+    } else if (rest.primary_stream) {
+      rest.primary_stream = paraElCliente([rest.primary_stream])[0] || null;
+    }
     if (Array.isArray(rest.seasons)) {
       rest.seasons = rest.seasons.map((s: any) => (
         Array.isArray(s?.episodes)
-          ? { ...s, episodes: s.episodes.map((e: any) => (Array.isArray(e?.servers) ? { ...e, servers: paraElCliente(e.servers) } : e)) }
+          ? {
+              ...s,
+              episodes: s.episodes.map((e: any) => {
+                if (!Array.isArray(e?.servers)) return e;
+                const servers = paraElCliente(e.servers);
+                return { ...e, servers, primary_stream: getPrimaryStream(servers) || null };
+              })
+            }
           : s
       ));
     }
@@ -1772,7 +1814,7 @@ export class CatalogService {
     // siguiente pase (con más datos en la fuente) lo decidirá.
     const veredictoFiable = exhaustive && indecidibles === 0;
     if (veredictoFiable) {
-      result.has_streams = result.servers.length > 0 || this.hasEpisodeServers(result);
+      result.has_streams = this.hasPlayableDirectStream(result);
       result.streams_checked_at = new Date().toISOString();
     }
 
@@ -1857,7 +1899,7 @@ export class CatalogService {
     const safePage = Math.max(1, page);
     const offset = (safePage - 1) * safeLimit;
 
-    const cacheKey = `searchp:${nq}:${safePage}:${safeLimit}`;
+    const cacheKey = `searchp:direct-only:v1:${nq}:${safePage}:${safeLimit}`;
     const cached = await CacheStore.get<{ items: MediaItem[]; total: number }>(cacheKey);
     if (cached) return cached;
 
@@ -1917,7 +1959,8 @@ export class CatalogService {
       pool.push(...catalogMatches);
     }
 
-    return this.unifyForSearch(pool, normalizedMax);
+    return this.unifyForSearch(pool, normalizedMax)
+      .filter(item => this.esReproducible(item));
   }
   /**
    * Calcula el score de relevancia para cada resultado y ordena por puntaje descendente

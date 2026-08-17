@@ -793,7 +793,7 @@
     "/api/v1/stream/direct": {
       "get": {
         "summary": "Vídeo directo de un embed (lo que apunta `direct_stream`)",
-        "description": "Resuelve el vídeo real que hay detrás de un reproductor embebido y lo entrega. Es la URL a la que apunta el campo `direct_stream` de cada servidor: permanente y sin token de cara al cliente, aunque por dentro se acuñe una recién hecha en cada reproducción, porque los CDN firman la URL entera y le ponen caducidad.\n\nSegún lo que exija el host, responde de tres formas: **302** a la URL del CDN (lo más rápido), **200 con un manifiesto HLS reescrito** cuando las playlists del host no se pueden entregar crudas pero sus segmentos sí —solo viajan por aquí unos KB de texto, el vídeo sigue yendo del CDN al reproductor—, o **200/206 reenviando los bytes** cuando el host valida la IP que acuñó la URL o exige cabeceras en los segmentos que un navegador no puede poner. En los tres casos basta con seguir la respuesta: **el cliente no tiene que hacer nada distinto**.\n\nSi el embed no es extraíble responde 502 `DIRECT_UNAVAILABLE` y el cliente debe reproducir con `embed_url`.",
+        "description": "Resuelve y entrega el vídeo directo que apunta `direct_stream`: permanente y sin token de cara al cliente, aunque por dentro se acuñe una URL nueva en cada reproducción porque los CDN firman la URL entera y le ponen caducidad.\n\nSegún el host, responde con **302** al CDN, **200 con un manifiesto HLS reescrito**, o **200/206** reenviando bytes. El cliente solo debe seguir la respuesta.\n\nSi no se puede extraer el vídeo directo, responde 502 `DIRECT_UNAVAILABLE`; no se entrega un iframe como alternativa.",
         "parameters": [
           {
             "name": "e",
@@ -832,7 +832,7 @@
             "description": "Respuesta parcial de vídeo (Range Request / seek)"
           },
           "502": {
-            "description": "No se pudo extraer el vídeo de este embed. Reproduce con `embed_url`."
+            "description": "No se pudo extraer un vídeo directo de este servidor."
           }
         }
       }
@@ -1028,7 +1028,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Nombre del servidor, y termina SIEMPRE diciendo cómo se reproduce:\n\n- `[Vídeo directo]`: trae `direct_stream`, el vídeo real (HLS/MP4). Se le pasa al reproductor tal cual. Conserva además su `embed_url` como respaldo por si falla.\n- `[Embed]`: solo hay `embed_url`, un reproductor de terceros que hay que incrustar en un iframe.\n\nEs la misma información que se deduce de la presencia de `direct_stream`, escrita en el título para poder mostrar la lista de servidores sin inspeccionar campo por campo.",
+            "description": "Nombre del servidor. Todos los servidores publicados son `[Vídeo directo]` y traen `direct_stream`, listo para pasarlo al reproductor. La API no entrega iframes ni `embed_url`.",
             "example": "Streamwish - Latino [Vídeo directo]"
           },
           "quality": {
@@ -1039,14 +1039,9 @@
             "type": "string",
             "example": "latino"
           },
-          "embed_url": {
-            "type": "string",
-            "description": "Reproductor de terceros. Es el ÚLTIMO RECURSO: úsalo solo si `direct_stream` no existe o falla.",
-            "example": "https://vidhideplus.com/v/f1kgebbi5bly"
-          },
           "direct_stream": {
             "type": "string",
-            "description": "FUENTE PRIORITARIA: el vídeo real (HLS/MP4). Intenta SIEMPRE esta antes que `embed_url`. Ningún host permite publicar la URL cruda de su CDN —la firman entera y le ponen caducidad—, así que apunta a esta misma API, que la resuelve en el momento de reproducir. Para el cliente es una URL permanente y sin token: basta con dársela al reproductor y seguir la respuesta. Si devuelve error, cae a `embed_url`.\n\nSe entrega SIEMPRE como URL absoluta, sobre el mismo dominio por el que has pedido la ficha, para que se le pueda pasar a un reproductor tal cual. La única excepción es `direct_mode: public`, donde el valor es directamente la URL del CDN.",
+            "description": "Vídeo directo (HLS/MP4). Ningún host permite publicar la URL cruda de su CDN —la firman entera y le ponen caducidad—, así que apunta a esta misma API, que la resuelve en el momento de reproducir. Para el cliente es una URL permanente y sin token: basta con dársela al reproductor y seguir la respuesta.\n\nSe entrega SIEMPRE como URL absoluta, sobre el mismo dominio por el que has pedido la ficha, para que se le pueda pasar a un reproductor tal cual.",
             "example": "https://api-pelis-series-latino.vercel.app/api/v1/stream/direct?e=aHR0cHM6Ly92aWRoaWRlcGx1cy5jb20vdi8zMHdyMGd1Mzhxc2I"
           },
           "direct_kind": {

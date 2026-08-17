@@ -56,8 +56,6 @@ export function publicOrigin(req: Request): string {
  * metadatos, así que en la práctica se copian unos pocos objetos por respuesta.
  */
 export function withAbsoluteDirectStreams<T>(payload: T, origin: string): T {
-  if (!origin) return payload;
-
   const reescribir = (valor: any): any => {
     if (Array.isArray(valor)) {
       let cambio = false;
@@ -73,9 +71,15 @@ export function withAbsoluteDirectStreams<T>(payload: T, origin: string): T {
       let cambio = false;
       const salida: Record<string, any> = {};
       for (const clave of Object.keys(valor)) {
+        // Defensa final del contrato público: los scrapers y la persistencia conservan el
+        // embed para poder reextraer un directo, pero ningún payload de la API lo expone.
+        if (clave === 'embed_url') {
+          cambio = true;
+          continue;
+        }
         const actual = valor[clave];
         const nuevo =
-          clave === 'direct_stream' && typeof actual === 'string' && actual.startsWith('/')
+          origin && clave === 'direct_stream' && typeof actual === 'string' && actual.startsWith('/')
             ? origin + actual
             : reescribir(actual);
         if (nuevo !== actual) cambio = true;
