@@ -2357,6 +2357,99 @@ async function hideRowsWithoutDirect(apply: boolean): Promise<void> {
 }
 
 /**
+ * ENLACES PRESTADOS ENTRE CAPÍTULOS (`--episodios-prestados`).
+ *
+ * `inheritServersToEpisodes` rellenaba los episodios sin enlaces propios con los de nivel serie, y
+ * como `persistStreams` escribe `seasons`, esos enlaces quedaron GUARDADOS como si fueran del
+ * capítulo. El código ya no lo hace; esto limpia lo que dejó escrito.
+ *
+ * CÓMO SE RECONOCE UNO PRESTADO, sin adivinar: dos capítulos distintos no pueden tener el mismo
+ * `embed_url`, porque un embed es UN vídeo. Si el mismo aparece en más de un episodio de la misma
+ * serie, no es de ninguno de los dos — es el de la serie repartido a todos. Medido: 2.529 de 2.588
+ * series con enlaces de episodio guardados, 83.485 episodios afectados. «El Chapulín Colorado»
+ * servía el último capítulo en los 289.
+ *
+ * Se quitan de TODOS los episodios, no de todos menos uno: no hay forma de saber a cuál pertenecía
+ * de verdad, y dejarlo en el equivocado es exactamente el fallo que se está arreglando.
+ *
+ * NO SE TOCA `has_streams`, y es deliberado. El episodio se queda sin enlaces guardados, pero al
+ * abrirlo `getEpisode` scrapea SU página y `persistEpisodeServers` deja los correctos escritos. Si
+ * aquí se recalculara la visibilidad sobre lo que acabamos de vaciar, se escondería el catálogo de
+ * series entero para que volviera solo unas horas después — el mismo error de la migración 007.
+ *
+ *   npm run repair:catalog -- --episodios-prestados
+ *   npm run repair:catalog -- --episodios-prestados --apply
+ */
+async function purgeBorrowedEpisodeServers(apply: boolean): Promise<void> {
+  console.log(`🔗 Buscando enlaces repetidos entre capítulos${apply ? '' : ' (dry-run)'}...`);
+
+  // Páginas PEQUEÑAS: `seasons` es un JSONB grande y pedir 400 filas de golpe hace que Postgres
+  // aborte por `statement timeout`. Con 40 va sobrado y no se nota.
+  const PAGINA = 40;
+  let series = 0, tocadas = 0, episodiosLimpiados = 0, servidoresQuitados = 0;
+  const ejemplos: string[] = [];
+
+  for (let from = 0; ; from += PAGINA) {
+    const { data, error } = await db
+      .from('media_items')
+      .select('id,title,seasons')
+      .eq('type', 'tvseries')
+      .range(from, from + PAGINA - 1);
+    if (error) { console.warn(`   ⚠ ${error.message}`); break; }
+    if (!data || data.length === 0) break;
+
+    for (const row of data as any[]) {
+      const temporadas: any[] = row.seasons || [];
+      const episodios: any[] = temporadas.flatMap(t => t?.episodes || []);
+      if (!episodios.some(e => (e?.servers || []).length > 0)) continue;
+      series++;
+
+      const veces = new Map<string, number>();
+      for (const e of episodios) {
+        for (const sv of e?.servers || []) if (sv?.embed_url) veces.set(sv.embed_url, (veces.get(sv.embed_url) || 0) + 1);
+      }
+      const prestado = (sv: any) => sv?.embed_url && (veces.get(sv.embed_url) || 0) > 1;
+      if (![...veces.values()].some(n => n > 1)) continue;
+
+      let quitados = 0, epsTocados = 0;
+      const seasons = temporadas.map(t => ({
+        ...t,
+        episodes: (t?.episodes || []).map((e: any) => {
+          const antes: any[] = e?.servers || [];
+          const despues = antes.filter(sv => !prestado(sv));
+          if (despues.length === antes.length) return e;
+          quitados += antes.length - despues.length;
+          epsTocados++;
+          return { ...e, servers: despues, primary_stream: null };
+        }),
+      }));
+
+      tocadas++;
+      episodiosLimpiados += epsTocados;
+      servidoresQuitados += quitados;
+      if (ejemplos.length < 8) {
+        const peor = [...veces.entries()].sort((a, b) => b[1] - a[1])[0];
+        ejemplos.push(`${String(row.title).slice(0, 34).padEnd(36)} un enlace estaba en ${peor[1]} capítulos`);
+      }
+
+      if (!apply) continue;
+      marcarTocada(row);
+      const { error: err } = await db.from('media_items').update({ seasons }).eq('id', row.id);
+      if (err) console.warn(`   ⚠ ${row.id}: ${err.message}`);
+    }
+
+    if (from % 400 === 0) console.log(`   ${from + data.length} series revisadas · ${tocadas} con enlaces prestados`);
+    if (data.length < PAGINA) break;
+  }
+
+  console.log(`\n🔗 ${series} series con enlaces de episodio · ${tocadas} tenían prestados`);
+  console.log(`   ${episodiosLimpiados} episodios limpiados · ${servidoresQuitados} enlaces retirados\n`);
+  for (const e of ejemplos) console.log(`   · ${e}`);
+  console.log(apply ? '\n   ✅ aplicado' : '\n   (dry-run: repite con --apply)');
+  await purgarCacheDeTocadas(apply);
+}
+
+/**
  * VERIFICAR QUE LO PUBLICADO ENTREGA VÍDEO DE VERDAD (`--verificar`).
  *
  * `--servidores-muertos` usa `inspectEmbed`, que comprueba si la PÁGINA del reproductor carga. Una
@@ -2868,6 +2961,11 @@ async function main() {
 
   if (process.argv.includes('--politica')) {
     await reconcilePolicyDirects(apply);
+    return;
+  }
+
+  if (process.argv.includes('--episodios-prestados')) {
+    await purgeBorrowedEpisodeServers(apply);
     return;
   }
 
