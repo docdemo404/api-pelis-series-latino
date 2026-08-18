@@ -69,11 +69,14 @@ app.use((req: Request, res: Response, next: NextFunction) => {
       res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
     } else if (req.path.includes('/search')) {
       // Búsqueda: cacheable en borde (Vercel/Cloudflare) por variante de ?q=&page=&limit=.
-      // TTL medio + stale-while-revalidate: respuestas instantáneas y refresco en segundo
-      // plano, para que los títulos recién crawleados aparezcan pronto.
-      res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=600, stale-while-revalidate=86400');
-      res.setHeader('CDN-Cache-Control', 'public, max-age=600, stale-while-revalidate=86400');
-      res.setHeader('Vercel-CDN-Cache-Control', 'public, max-age=600, stale-while-revalidate=86400');
+      //
+      // La ventana de gracia era de UN DÍA. Es el mismo error que se corrigió en las fichas y por
+      // el mismo motivo: un título que deja de poder reproducirse desaparece del origen al
+      // instante y el borde lo seguía entregando hasta 24 h después. Buscarlo por su nombre era
+      // justamente por donde volvía a aparecer lo que ya se había retirado.
+      res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
+      res.setHeader('CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
+      res.setHeader('Vercel-CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
     } else if (req.path.includes('/media/') || req.path.includes('/series/')) {
       /**
        * Fichas y episodios.
@@ -100,9 +103,31 @@ app.use((req: Request, res: Response, next: NextFunction) => {
       res.setHeader('CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
       res.setHeader('Vercel-CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
     } else {
-      res.setHeader('Cache-Control', 'public, max-age=3600, s-maxage=86400, stale-while-revalidate=604800');
-      res.setHeader('CDN-Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
-      res.setHeader('Vercel-CDN-Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
+      /**
+       * PORTADA Y CATÁLOGO — y aquí estaba lo peor de todo.
+       *
+       * Esta rama recoge `/home`, `/feeds/home`, `/discover`, `/movies` y `/series`: o sea las
+       * TRES pantallas donde el usuario ve el catálogo. Y las servía el borde con un día de
+       * frescura y SIETE de gracia.
+       *
+       * O sea que todo el trabajo de no anunciar lo que no se puede ver —el veredicto que escribe
+       * la petición, el conjunto de retirados que descuentan los listados— se quedaba en el
+       * origen, sin llegar a nadie: la app pedía la portada y recibía una copia de hasta una
+       * semana. Se midió: el origen ya devolvía la lista corregida y la app seguía viendo los
+       * mismos títulos muertos. No era el filtro, era que nadie lo estaba ejecutando.
+       *
+       * Bajar esto no cuesta lo que parece, y por eso se puede bajar tanto: la portada NO se
+       * reconstruye en cada petición al origen. Tiene su propio caché en Redis con dos horas de
+       * frescura y doce de vida, y sirve la copia guardada al instante mientras se rehace por
+       * detrás (ver `FeedService.getHomeFeed`). Lo que el borde absorbía era una lectura de Redis,
+       * no los ocho segundos y medio de reconstruirla.
+       *
+       * Mismos números que las fichas: 5 min frescos y 10 de gracia. La peor demora entre retirar
+       * un título y dejar de enseñarlo pasa de una semana a un cuarto de hora.
+       */
+      res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
+      res.setHeader('CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
+      res.setHeader('Vercel-CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
     }
   }
   next();
