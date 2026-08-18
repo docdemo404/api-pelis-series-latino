@@ -82,6 +82,22 @@ const MARCADOR_TIPO = /\s*\[(?:v[íi]deo\s+directo|embed)\]\s*$/i;
  * Todo servidor con vídeo directo conserva además su `embed_url` como respaldo, así que la
  * etiqueta dice cuál es la fuente PRIORITARIA, no la única.
  */
+/**
+ * Cuánto vale un sello de verificación antes de dejar de ser una prueba.
+ *
+ * `--verificar` da una vuelta completa al catálogo en varias pasadas, así que la ventana tiene que
+ * ser más ancha que el tiempo que tarda esa vuelta; si no, lo verificado caducaría antes de que le
+ * tocara turno otra vez y el sello no ordenaría nada.
+ */
+const VERIFICADO_VIGENTE_MS = 48 * 60 * 60 * 1000;
+
+/** ¿A este servidor se le ha descargado vídeo de verdad hace poco? */
+function verificadoVigente(s: ServerOption): boolean {
+  if (!s?.verified_at) return false;
+  const t = Date.parse(s.verified_at);
+  return Number.isFinite(t) && Date.now() - t < VERIFICADO_VIGENTE_MS;
+}
+
 export function nombreConTipo(name: string, tieneVideoDirecto: boolean): string {
   const base = (name || 'Servidor').replace(MARCADOR_TIPO, '').trim();
   return `${base} [${tieneVideoDirecto ? 'Vídeo directo' : 'Embed'}]`;
@@ -217,16 +233,27 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
     const directB = directScore(b);
     if (directA !== directB) return directB - directA;
 
-    // 3. Prioridad de Fuente (1 primero, 2 después, 3 después...)
+    // 3. LO QUE SE HA DEMOSTRADO QUE REPRODUCE, ANTES QUE LO QUE SOLO LO PARECE.
+    //
+    // `status: 'online'` y tener `direct_stream` dicen que el servidor se veía bien cuando se
+    // scrapeó; no dicen que hoy haya vídeo al otro lado. `verified_at` sí: lo pone `--verificar`
+    // después de bajar el manifiesto y descargarse un segmento real. Poniendo delante lo sellado,
+    // el `primary_stream` —lo primero que intenta la app— es siempre algo probado, y lo no
+    // verificado queda de reserva en vez de desaparecer.
+    const verA = verificadoVigente(a);
+    const verB = verificadoVigente(b);
+    if (verA !== verB) return verA ? -1 : 1;
+
+    // 4. Prioridad de Fuente (1 primero, 2 después, 3 después...)
     const prioA = priorityMap[getSourceId(a)] ?? 99;
     const prioB = priorityMap[getSourceId(b)] ?? 99;
     if (prioA !== prioB) return prioA - prioB;
 
-    // 4. Idioma Latino preferido
+    // 5. Idioma Latino preferido
     if (a.language === 'latino' && b.language !== 'latino') return -1;
     if (b.language === 'latino' && a.language !== 'latino') return 1;
 
-    // 5. Calidad más alta
+    // 6. Calidad más alta
     const scoreA = qualityScore[a.quality] || 0;
     const scoreB = qualityScore[b.quality] || 0;
     if (scoreA !== scoreB) return scoreB - scoreA;
