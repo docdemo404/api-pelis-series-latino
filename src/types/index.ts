@@ -95,6 +95,17 @@ export interface Episode {
   air_date: string | null;
   primary_stream?: ServerOption;
   servers: ServerOption[];
+  /**
+   * ISO de la última vez que se BUSCARON los enlaces de este capítulo, haya salido algo o no.
+   *
+   * Es lo que separa «se comprobó y no hay nada» de «todavía no se ha mirado», y sin esa
+   * distinción no se puede esconder un capítulo vacío: los enlaces de un episodio se resuelven al
+   * abrirlo, así que casi todos están vacíos en la base de datos por no haberse pedido nunca.
+   * Ocultar por lista vacía dejaría las series sin un solo capítulo.
+   *
+   * Lo pone `persistEpisodeServers`. Ausente = sin comprobar: el capítulo se sigue anunciando.
+   */
+  checked_at?: string;
 }
 
 export interface Season {

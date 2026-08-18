@@ -2357,6 +2357,86 @@ async function hideRowsWithoutDirect(apply: boolean): Promise<void> {
 }
 
 /**
+ * COMPROBAR CAPÍTULOS UNO A UNO (`--episodios`).
+ *
+ * Un capítulo sin nada reproducible no debe anunciarse, y una temporada entera sin capítulos
+ * anunciables tampoco. Pero eso solo se puede decidir sobre capítulos COMPROBADOS: los enlaces de
+ * un episodio se resuelven al abrirlo, así que en la base de datos la mayoría están vacíos por no
+ * haberse pedido nunca, no por estar rotos. Esconder por lista vacía dejaría casi todas las series
+ * sin un solo capítulo.
+ *
+ * Esta pasada es la que convierte «sin comprobar» en un veredicto. Pide cada capítulo de verdad;
+ * `getEpisode` scrapea su página, `persistEpisodeServers` guarda lo que salga y sella `checked_at`
+ * —con enlaces o sin ellos—, y a partir de ahí `toPublicItem` ya puede esconder los vacíos.
+ *
+ * Se prioriza lo NUNCA comprobado, y después lo más viejo: así la primera vuelta cubre catálogo
+ * nuevo en vez de repasar lo mismo. Ventana acotada por `--limit` porque son decenas de miles de
+ * capítulos y esto no termina en una corrida — ni falta.
+ *
+ *   npm run repair:catalog -- --episodios --limit=200
+ *   npm run repair:catalog -- --episodios --apply --limit=200
+ */
+async function checkEpisodes(apply: boolean, limitArg?: number): Promise<void> {
+  const CADUCA_MS = 7 * 24 * 60 * 60 * 1000;
+  const tope = Number.isFinite(limitArg as number) && (limitArg as number) > 0 ? (limitArg as number) : 200;
+  console.log(`🎞  Comprobando capítulos uno a uno${apply ? '' : ' (dry-run)'} · tope ${tope}\n`);
+
+  type Pendiente = { id: string; title: string; season: number; episode: number; edad: number };
+  const pendientes: Pendiente[] = [];
+
+  const PAGINA = 40;
+  for (let from = 0; ; from += PAGINA) {
+    const { data, error } = await db
+      .from('media_items')
+      .select('id,title,seasons')
+      .eq('type', 'tvseries')
+      .range(from, from + PAGINA - 1);
+    if (error) { console.warn(`   ⚠ ${error.message}`); break; }
+    if (!data || data.length === 0) break;
+
+    for (const row of data as any[]) {
+      for (const t of row.seasons || []) {
+        for (const e of t?.episodes || []) {
+          const sello = e?.checked_at ? Date.parse(e.checked_at) : 0;
+          if (sello && Date.now() - sello < CADUCA_MS) continue;
+          pendientes.push({
+            id: row.id, title: row.title,
+            season: Number(t.season_number), episode: Number(e.episode_number),
+            edad: sello,   // 0 = nunca comprobado, va primero
+          });
+        }
+      }
+    }
+    if (data.length < PAGINA) break;
+  }
+
+  pendientes.sort((a, b) => a.edad - b.edad);
+  const lista = pendientes.slice(0, tope);
+  console.log(`   ${pendientes.length} capítulos sin comprobar o caducados · se hacen ${lista.length}\n`);
+
+  let conVideo = 0, vacios = 0;
+  // Seis a la vez: cada capítulo es una página de la fuente más el sondeo de sus servidores, y con
+  // 89.950 pendientes el ritmo decide si la vuelta completa son días o meses. Por encima de esto
+  // las fuentes empiezan a contestar 429 y la pasada mide humo (ver `--servidores-muertos`).
+  const CONC = 6;
+  for (let i = 0; i < lista.length; i += CONC) {
+    await Promise.all(lista.slice(i, i + CONC).map(async c => {
+      if (!apply) return;   // `getEpisode` escribe al resolver: en dry-run no se le llama
+      const ep = await CatalogService.getEpisode(c.id, c.season, c.episode).catch(() => null);
+      if (ep?.streams?.status === 'ready') conVideo++; else vacios++;
+    }));
+    if ((i + CONC) % 80 < CONC) console.log(`   ${Math.min(i + CONC, lista.length)}/${lista.length} · ${conVideo} con vídeo · ${vacios} vacíos`);
+  }
+
+  if (apply) {
+    console.log(`\n🎞  ${conVideo} capítulos con vídeo · ${vacios} comprobados y vacíos (dejan de anunciarse)`);
+    console.log('   ✅ aplicado');
+  } else {
+    console.log('   (dry-run: no se ha pedido ningún capítulo. Repite con --apply)');
+  }
+}
+
+/**
  * ENLACES PRESTADOS ENTRE CAPÍTULOS (`--episodios-prestados`).
  *
  * `inheritServersToEpisodes` rellenaba los episodios sin enlaces propios con los de nivel serie, y
@@ -2961,6 +3041,11 @@ async function main() {
 
   if (process.argv.includes('--politica')) {
     await reconcilePolicyDirects(apply);
+    return;
+  }
+
+  if (process.argv.includes('--episodios')) {
+    await checkEpisodes(apply, Number.isFinite(limitArg) ? limitArg : undefined);
     return;
   }
 

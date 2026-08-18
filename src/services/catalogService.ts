@@ -1042,19 +1042,35 @@ export class CatalogService {
     } else if (rest.primary_stream) {
       rest.primary_stream = paraElCliente([rest.primary_stream])[0] || null;
     }
+    /**
+     * Un capítulo que no se puede ver no se anuncia, y una temporada sin capítulos anunciables
+     * tampoco. Pero SOLO cuando consta que se comprobó (`checked_at`).
+     *
+     * La distinción no es un matiz: los enlaces de un episodio se resuelven al abrirlo, así que en
+     * la base de datos la inmensa mayoría están vacíos por no haberse pedido nunca. Esconder por
+     * lista vacía dejaría casi todas las series sin un solo capítulo — el mismo error que cometió
+     * la migración 007 con las fichas, ahora a escala de episodio. Sin sello, el capítulo se
+     * anuncia y al abrirlo se resuelve.
+     */
     if (Array.isArray(rest.seasons)) {
-      rest.seasons = rest.seasons.map((s: any) => (
-        Array.isArray(s?.episodes)
-          ? {
-              ...s,
-              episodes: s.episodes.map((e: any) => {
-                if (!Array.isArray(e?.servers)) return e;
-                const servers = paraElCliente(e.servers);
-                return { ...e, servers, primary_stream: getPrimaryStream(servers) || null };
-              })
-            }
-          : s
-      ));
+      const anunciable = (e: any) => {
+        if (!Array.isArray(e?.servers)) return true;          // sin resolver: se anuncia
+        if (paraElCliente(e.servers).length > 0) return true; // hay algo que reproducir
+        return !e.checked_at;                                 // vacío: solo se esconde si se miró
+      };
+      rest.seasons = rest.seasons
+        .map((s: any) => {
+          if (!Array.isArray(s?.episodes)) return s;
+          const episodes = s.episodes
+            .filter(anunciable)
+            .map((e: any) => {
+              if (!Array.isArray(e?.servers)) return e;
+              const servers = paraElCliente(e.servers);
+              return { ...e, servers, primary_stream: getPrimaryStream(servers) || null };
+            });
+          return { ...s, episodes, episodes_count: episodes.length };
+        })
+        .filter((s: any) => !Array.isArray(s?.episodes) || s.episodes.length > 0);
     }
     return rest as T;
   }
@@ -1582,6 +1598,9 @@ export class CatalogService {
       temporada.episodes.push(cap);
     }
     cap.servers = servers;
+    // El sello va SIEMPRE, con enlaces o sin ellos: «comprobado y vacío» es justo lo que
+    // autoriza a dejar de anunciar el capítulo, y sin él no se distingue de «aún no mirado».
+    cap.checked_at = new Date().toISOString();
 
     // El veredicto de disponibilidad se recalcula con el árbol ya actualizado: es justo lo que
     // devuelve al catálogo una serie que estaba escondida por no tener nada guardado.

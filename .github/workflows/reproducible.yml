@@ -123,7 +123,28 @@ jobs:
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
         run: npx ts-node scripts/repairCatalog.ts --series-ocultas --apply --limit=300
 
-      # 5. Y recién ahora, qué se anuncia. Va en los DOS sentidos: esconde las fichas que se
+      # 5. COMPROBAR CAPÍTULOS UNO A UNO. Un capítulo sin nada reproducible no debe anunciarse, y
+      #    una temporada sin capítulos anunciables tampoco — pero eso solo se puede decidir sobre
+      #    capítulos COMPROBADOS. Los enlaces de un episodio se resuelven al abrirlo, así que la
+      #    mayoría están vacíos por no haberse pedido nunca, no por estar rotos: esconder por lista
+      #    vacía dejaría casi todas las series sin un solo capítulo. Esto es lo que convierte «sin
+      #    comprobar» en un veredicto, sellando `checked_at` con enlaces o sin ellos.
+      #
+      #    Son ~90.000 capítulos, así que no termina en una corrida: prioriza lo nunca comprobado y
+      #    la vuelta completa llega en unos días. Los capítulos que la gente abre se comprueban
+      #    solos por el camino normal.
+      - name: Comprobar capítulos uno a uno
+        if: always()
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+        run: npx ts-node scripts/repairCatalog.ts --episodios --apply --limit=1500
+
+      # 6. Y recién ahora, qué se anuncia. Va en los DOS sentidos: esconde las fichas que se
       #    quedaron sin nada reproducible y devuelve las que han recuperado vídeo directo. Sin
       #    esa segunda mitad, cada corrida encogería el catálogo un poco más y lo que arreglan
       #    los extractores no volvería nunca.
