@@ -1650,6 +1650,21 @@ export class CatalogService {
           streams_checked_at: new Date().toISOString(),
         })
         .eq('id', serie.id);
+
+      /**
+       * Y SE TIRA EL DETALLE CACHEADO DE LA SERIE, porque acaba de cambiar su árbol de temporadas.
+       *
+       * Sin esto el arreglo tarda hasta 6 h en verse y parece que no funciona: la ficha sigue
+       * saliendo del caché con el capítulo vacío que se acaba de comprobar, así que se anuncia
+       * algo que ya sabemos que no se puede ver. Ya pasó al retirar los vidhideplus —la ficha
+       * salía corregida y el episodio seguía entregando el servidor viejo— y se persiguió como si
+       * fuera un despliegue que no subía.
+       *
+       * Invalidar en la escritura es además lo único que funciona sin credenciales de Redis a
+       * mano: lo hace el proceso que ya las tiene, en el momento en que el dato deja de ser
+       * cierto, en vez de depender de acordarse de purgar después.
+       */
+      await this.invalidateItem(serie).catch(() => {});
     } catch {}
   }
 
