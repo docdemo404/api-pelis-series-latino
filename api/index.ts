@@ -76,21 +76,29 @@ app.use((req: Request, res: Response, next: NextFunction) => {
       res.setHeader('Vercel-CDN-Cache-Control', 'public, max-age=600, stale-while-revalidate=86400');
     } else if (req.path.includes('/media/') || req.path.includes('/series/')) {
       /**
-       * Fichas y episodios: lo que más se pide y lo más caro de reconstruir.
+       * Fichas y episodios.
        *
-       * La ventana de `stale-while-revalidate` era de 1 h, y ahí estaba el coste escondido: pasada
-       * esa hora sin que nadie pidiera una ficha, su entrada desaparece del borde y el siguiente
-       * paga la reconstrucción entera — 3-7 s en un episodio, porque hay que scrapear su página y
-       * sondear sus servidores. Con un día de ventana, ese golpe deja de tocarle a un usuario.
+       * La ventana de `stale-while-revalidate` era de UN DÍA, y se puso por una razón que ya no se
+       * sostiene: pasada la ventana, el siguiente en pedir una ficha pagaba la reconstrucción
+       * entera —3-7 s en un episodio, porque había que scrapear su página y sondear sus
+       * servidores—. Desde que los capítulos se resuelven por adelantado y se guardan, esa
+       * reconstrucción cuesta 0,33 s: leer la base de datos. El golpe que justificaba el día de
+       * ventana ya no existe.
        *
-       * `stale-while-revalidate` no sirve nada viejo a nadie a cambio de nada: entrega al instante
-       * lo que tiene y refresca por detrás, así que el que llega tarde recibe rápido y el siguiente
-       * ya tiene lo nuevo. Los 15 min de `s-maxage` son el margen en el que una reparación tarda en
-       * verse en el borde (el caché propio sí se purga al reparar, el de Vercel no se puede).
+       * Y el precio de esa ventana sí seguía ahí, escondido: el borde puede entregar una respuesta
+       * de hasta 24 h aunque el origen ya devuelva la corregida. Un capítulo que se demostró
+       * muerto y dejó de anunciarse seguía apareciendo un día entero — el usuario lo reportó con
+       * Trollhunters, cuyo 1x1 ya no viajaba en la respuesta del origen y la app seguía viéndolo.
+       * En un catálogo cuya regla es «lo que se entrega, funciona», servir un día de retraso es
+       * exactamente incumplirla.
+       *
+       * 5 min frescos + 10 de gracia: la peor demora pasa de 24 h a un cuarto de hora, y el borde
+       * sigue absorbiendo la inmensa mayoría de las peticiones. El caché propio (Redis) sí se
+       * invalida al escribir; este no se puede purgar, así que la única palanca es la ventana.
        */
-      res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=900, stale-while-revalidate=86400');
-      res.setHeader('CDN-Cache-Control', 'public, max-age=900, stale-while-revalidate=86400');
-      res.setHeader('Vercel-CDN-Cache-Control', 'public, max-age=900, stale-while-revalidate=86400');
+      res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
+      res.setHeader('CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
+      res.setHeader('Vercel-CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
     } else {
       res.setHeader('Cache-Control', 'public, max-age=3600, s-maxage=86400, stale-while-revalidate=604800');
       res.setHeader('CDN-Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
