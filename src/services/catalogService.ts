@@ -1001,6 +1001,30 @@ export class CatalogService {
   }
 
   /**
+   * ¿Tiene esta instancia permiso REAL para escribir en el catálogo?
+   *
+   * Se comprueba escribiendo: es la única forma. Un UPDATE bloqueado por RLS contesta 204 y sin
+   * error, así que mirar si la variable de entorno está puesta no demuestra nada — podría estar y
+   * ser la clave equivocada. Se toca una sola fila y con un valor que ya tenía (`id`), de modo que
+   * la prueba no cambia nada aunque salga bien.
+   */
+  static async puedeEscribirCatalogo(): Promise<boolean> {
+    try {
+      const { data } = await supabase.from('media_items').select('id').limit(1);
+      const id = (data || [])[0]?.id;
+      if (!id) return false;
+      const { data: tocadas, error } = await getSupabaseAdmin()
+        .from('media_items')
+        .update({ id })
+        .eq('id', id)
+        .select('id');
+      return !error && Array.isArray(tocadas) && tocadas.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * ESCRIBE EN LA FILA Y COMPRUEBA QUE DE VERDAD SE HA ESCRITO.
    *
    * Un UPDATE de PostgREST contra una fila que RLS no deja tocar NO da error: contesta 204 y sin

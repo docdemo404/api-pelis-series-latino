@@ -6,6 +6,7 @@ import { OverrideService } from '../services/overrideService';
 import { sendErrorResponse } from '../utils/apiHelpers';
 import { BandwidthService } from '../services/bandwidthService';
 import { externalProxyEnabled } from '../utils/externalProxy';
+import { CatalogService } from '../services/catalogService';
 
 /**
  * Panel de administración: página estática + API de fuentes y overrides.
@@ -31,9 +32,10 @@ router.get('/panel', (_req: Request, res: Response) => {
  */
 router.get('/api/v1/panel', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const [sources, bandwidth] = await Promise.all([
+    const [sources, bandwidth, escritura] = await Promise.all([
       SourceManager.getSourcesAsync(),
       BandwidthService.status(),
+      CatalogService.puedeEscribirCatalogo(),
     ]);
     const gb = (bytes: number) => Number((bytes / 1024 ** 3).toFixed(2));
     res.json({
@@ -47,6 +49,19 @@ router.get('/api/v1/panel', async (_req: Request, res: Response, next: NextFunct
         // —el único que reenvía la película entera— se delega y deja de contar aquí.
         external_proxy: externalProxyEnabled(),
       },
+      /**
+       * ¿PUEDE LA API CORREGIR EL CATÁLOGO? Por el mismo motivo que `shared_counter`.
+       *
+       * Un UPDATE que RLS no deja pasar NO da error: contesta 204 y cero filas. Así que la API
+       * puede llevar meses creyendo que escribe —enlaces resueltos, sellos de capítulos,
+       * veredictos de disponibilidad— sin que nada lo diga y sin forma de detectarlo salvo
+       * comparando a mano una fila antes y después. Pasó, y costó media tarde encontrarlo.
+       *
+       *   true  → el camino de petición puede retirar lo que demuestre que no se ve.
+       *   false → falta SUPABASE_SERVICE_ROLE_KEY en el entorno; todo lo que la API aprende al
+       *           servir se pierde, y el catálogo solo se corrige desde los trabajos de GitHub.
+       */
+      catalog_writable: escritura,
     });
   } catch (err) {
     next(err);
