@@ -998,6 +998,11 @@ export class CatalogService {
     if (verified) {
       update.has_streams = hasServers;
       update.streams_checked_at = new Date().toISOString();
+    } else if (item.has_streams === false) {
+      // La resolución acaba de terminar sin nada que entregar (ver el veredicto en `getStreams`).
+      // Sin esto el hallazgo se quedaba en memoria y la fila seguía anunciándose.
+      update.has_streams = false;
+      update.streams_checked_at = new Date().toISOString();
     }
     if (item._source_urls && item._source_urls.length > 0) {
       update.source_urls = item._source_urls;
@@ -2017,6 +2022,25 @@ export class CatalogService {
     const veredictoFiable = exhaustive && indecidibles === 0;
     if (veredictoFiable) {
       result.has_streams = this.hasPlayableDirectStream(result);
+      result.streams_checked_at = new Date().toISOString();
+    }
+
+    /**
+     * Y SI SE ACABA DE RESOLVER Y NO SALE NADA QUE ENTREGAR, LA FICHA DEJA DE ANUNCIARSE.
+     *
+     * `has_streams` solo se actualizaba tras una resolución EXHAUSTIVA, y el camino normal no lo
+     * es. Así quedaba la peor incoherencia posible: la columna decía que sí y la respuesta llegaba
+     * vacía, o sea un título en el catálogo cuyo botón de reproducir no tiene nada detrás. Lo
+     * encontró el usuario con «Batman: El caballero de la noche» (2008) — un servidor sellado en la
+     * base de datos, cero servidores en la respuesta, y la ficha anunciándose igual.
+     *
+     * Que la resolución llegara a visitar alguna fuente es lo que separa esto de un fallo de red:
+     * sin haber podido preguntar a nadie no se concluye nada. Y equivocarse hacia «no hay» se
+     * arregla solo — `--sin-directo` y `--series-ocultas` devuelven al catálogo lo que vuelva a
+     * reproducir— mientras que equivocarse hacia «sí hay» se lo come el espectador.
+     */
+    if (!veredictoFiable && knownSources.size > 0 && !this.hasPlayableDirectStream(result)) {
+      result.has_streams = false;
       result.streams_checked_at = new Date().toISOString();
     }
 
