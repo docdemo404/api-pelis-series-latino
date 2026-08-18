@@ -2012,22 +2012,38 @@ export class CatalogService {
   private static async searchDbByPrefix(query: string, limit: number = 30): Promise<MediaItem[]> {
     const nq = normalizeTitle(query).trim();
     if (!nq) return [];
+
+    /**
+     * Y CON EL MISMO FILTRO QUE EL RESTO DEL CATÁLOGO.
+     *
+     * Era la única consulta que se lo saltaba: la portada, los carruseles, el «ver todo» y la RPC
+     * `search_media` exigen `has_streams = true`, y este `ilike` devolvía todo. Resultado: un
+     * título retirado por no poder reproducirse seguía saliendo si lo buscabas por su nombre.
+     * Lo encontró el usuario con Trollhunters — fuera de la portada y del catálogo, dentro del
+     * buscador—. Una regla que se aplica en cuatro sitios de cinco no es una regla.
+     */
+    const playable = await this.playableFilter();
+
     try {
-      const { data, error } = await supabase
+      let query1 = supabase
         .from('media_items')
         .select('*')
         .ilike('title_normalized', `${nq}%`)
         .limit(limit);
+      if (playable) query1 = query1.or(playable);
+      const { data, error } = await query1;
       // Si la columna existe (sin error), confiar en su resultado aunque venga vacío.
       if (!error) return (data || []).map(this.mapDbItemToMediaItem);
     } catch {}
     try {
       // Fallback: la columna title_normalized aún no existe en esta DB.
-      const { data } = await supabase
+      let query2 = supabase
         .from('media_items')
         .select('*')
         .ilike('title', `${nq}%`)
         .limit(limit);
+      if (playable) query2 = query2.or(playable);
+      const { data } = await query2;
       return (data || []).map(this.mapDbItemToMediaItem);
     } catch {}
     return [];
