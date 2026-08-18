@@ -205,6 +205,35 @@ export function esDelEpisodio(
 }
 
 /**
+ * El título de una obra a partir del `<title>` de Cinecalidad.
+ *
+ * NO USA EL MISMO ORDEN EN TODAS SUS PÁGINAS, y esa diferencia dejó la fuente muda en los
+ * episodios:
+ *
+ *   ficha     «Ver Breaking Bad Online Gratis HD - Cinecalidad»
+ *   episodio  «Ver online gratis Breaking Bad 1x1 ⚜️ Cinecalidad»
+ *
+ * Quitar «Ver » por delante y todo lo que empieza en «Online Gratis» funciona en la primera y se
+ * come el título ENTERO en la segunda: devolvía cadena vacía, el scraper contestaba null y el
+ * episodio acababa resolviéndose contra otra fuente. Seis servidores esperando detrás.
+ *
+ * Se recortan los adornos estén donde estén, en vez de asumir dónde van.
+ */
+function tituloDeCinecalidad(raw: string | undefined): string {
+  return String(raw || '')
+    // La firma del sitio con lo que la separe. Se aceptan CUALESQUIERA caracteres no-palabra por
+    // delante y no un separador de una lista: entre el adorno y el nombre va un selector de
+    // variación invisible (U+FE0F) que no se ve al leer el título y hacía fallar la coincidencia,
+    // dejando «Breaking Bad 1x1 ⚜️ Cinecalidad» como nombre de la obra.
+    .replace(/[\s\W]*Cinecalidad\s*$/i, '')
+    .replace(/\bOnline\s+Gratis(\s+HD)?\b/gi, '')
+    .replace(/^\s*Ver\s+(Serie\s+)?/i, '')
+    .replace(/^\s*online\s+gratis\s*/i, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+/**
  * Las temporadas de una serie de Cinecalidad, leídas de su lista de episodios.
  *
  * El número real está en `.numerando` con la forma `S1-E1`, no en el texto del enlace —que es
@@ -380,10 +409,7 @@ export class RealScraperService {
         const res = await httpGet(url);
         if (res.status >= 400) return null;
         const $ = cheerio.load(String(res.data || ''));
-        const title = ($('title').text() || '')
-          .replace(/^\s*Ver\s+(Serie\s+)?/i, '')
-          .replace(/\s*Online\s+Gratis.*$/i, '')
-          .trim();
+        const title = tituloDeCinecalidad($('title').text());
         if (!title) return null;
         const img = $('img[data-src*="image.tmdb.org/t/p/w342"]').first().attr('data-src')
           || $('img[src*="image.tmdb.org/t/p/w342"]').first().attr('src') || '';
@@ -1245,10 +1271,7 @@ export class RealScraperService {
 
       // El <h1> es el logotipo del sitio, así que el título sale del <title>, que trae siempre la
       // misma envoltura: «Ver [Serie] X Online Gratis HD - Cinecalidad».
-      const title = ($('title').text() || '')
-        .replace(/^\s*Ver\s+(Serie\s+)?/i, '')
-        .replace(/\s*Online\s+Gratis.*$/i, '')
-        .trim();
+      const title = tituloDeCinecalidad($('title').text());
       if (!title) return null;
 
       const esSerie = /\/ver-serie\//i.test(url);
