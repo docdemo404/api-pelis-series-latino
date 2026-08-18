@@ -313,10 +313,41 @@ export class FeedService {
     // obliga a reconstruir nada.
     if (opts.rows && opts.rows.length > 0) {
       const wanted = new Set(opts.rows.map(r => r.trim().toLowerCase()).filter(Boolean));
-      return { ...feed, rows: feed.rows.filter(row => wanted.has(row.id.toLowerCase())) };
+      feed = { ...feed, rows: feed.rows.filter(row => wanted.has(row.id.toLowerCase())) };
     }
 
-    return feed;
+    return this.descontarRetirados(feed);
+  }
+
+  /**
+   * QUITA DE LA PORTADA YA CONSTRUIDA lo que se ha caído desde que se construyó.
+   *
+   * El feed se sirve hasta 12 h —a propósito: reconstruirlo cuesta segundos y nadie debería
+   * esperarlos—, así que sus carruseles son una foto de hace rato. Cuando una petición demuestra
+   * que un título ya no entrega vídeo, su fila en la base de datos se corrige al momento… pero
+   * esta foto no, y es la que se está enseñando. Ver `CatalogService.sinRetirados`.
+   *
+   * Se descuenta también del hero: es lo primero que se ve y lo primero que se pulsa.
+   *
+   * Una fila a la que le falten dos títulos se sigue publicando; solo desaparece si se queda sin
+   * nada. Un carrusel algo más corto es mejor que un hueco que al pulsarlo no lleva a ninguna parte.
+   */
+  private static async descontarRetirados(feed: HomeFeedResponse): Promise<HomeFeedResponse> {
+    const fuera = await CatalogService.retirados();
+    if (fuera.size === 0) return feed;
+
+    const vive = (item: { id?: string }) => !item?.id || !fuera.has(item.id);
+    const spotlight = feed.spotlight.filter(vive);
+    const rows = feed.rows
+      .map(row => ({ ...row, items: row.items.filter(vive) }))
+      .filter(row => row.items.length > 0);
+
+    return {
+      ...feed,
+      featured: spotlight[0] || null,
+      spotlight,
+      rows
+    };
   }
 
   private static async buildHomeFeed(
@@ -471,15 +502,19 @@ export class FeedService {
 
     const fromDb = await CatalogService.discoverPaged(safePage, safeLimit, type, genre);
     if (fromDb) {
+      // `has_more` y el total se calculan sobre lo que dice la base; lo retirado en caliente solo
+      // recorta ESTA página. Un hueco de dos títulos en una página de veinte no vale una consulta
+      // extra, y el scroll infinito sigue avanzando igual.
       const consumed = (safePage - 1) * safeLimit + fromDb.items.length;
       const hasMore = consumed < fromDb.total;
+      const vivos = await CatalogService.sinRetirados(fromDb.items);
       return {
         page: safePage,
         limit: safeLimit,
         total_results: fromDb.total,
         has_more: hasMore,
         next_page: hasMore ? safePage + 1 : null,
-        results: fromDb.items.map(item => CatalogService.toPublicItem(item))
+        results: vivos.map(item => CatalogService.toPublicItem(item))
       };
     }
 
@@ -493,7 +528,7 @@ export class FeedService {
     }
 
     const startIndex = (safePage - 1) * safeLimit;
-    const paginatedItems = items.slice(startIndex, startIndex + safeLimit);
+    const paginatedItems = await CatalogService.sinRetirados(items.slice(startIndex, startIndex + safeLimit));
     const hasMore = startIndex + safeLimit < items.length;
 
     return {

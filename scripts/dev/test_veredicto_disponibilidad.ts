@@ -1,10 +1,3 @@
-/**
- * Las reglas de «cuándo hay derecho a decidir», fijadas con los casos REALES que las rompieron.
- *
- * Cada aserción de aquí abajo es un daño que ya ocurrió en producción, no un caso inventado.
- *
- *   npx tsx scripts/dev/test_veredicto_disponibilidad.ts
- */
 import { veredictoDisponibilidad } from '../../src/services/streamSorter';
 
 let fallos = 0;
@@ -36,6 +29,27 @@ console.log('\n── Alcance');
 ok('no se pudo preguntar a nadie', veredictoDisponibilidad({ type: 'movie', servers: [] }, 'nada'), undefined);
 ok('repaso completo y vacío', veredictoDisponibilidad({ type: 'movie', servers: [] }, 'todo'), false);
 ok('repaso completo con algo', veredictoDisponibilidad({ type: 'movie', servers: [vivo] }, 'todo'), true);
+
+console.log('\n── Una PELÍCULA sí se puede concluir en el camino de una petición');
+/*
+ * El daño: entre el 8 % y el 33 % de lo que se anunciaba en producción no entregaba un solo
+ * servidor. La petición sondeaba la lista entera, la dejaba vacía… y devolvía `undefined`, así que
+ * el veredicto no se escribía en ninguna parte y el título seguía en la portada, en el catálogo y
+ * en el buscador. Medido con «La Máscara»: seis servidores, y el único con vídeo directo
+ * contestando 403.
+ *
+ * La regla: en una película, «parcial» solo puede significar «quedaron servidores sin sondear».
+ * Si no queda ninguno, se ha mirado todo lo que había — y eso es tan concluyente como el repaso
+ * completo. La cautela que nació con las series se queda en las series.
+ */
+const muerto = { embed_url: 'https://x/1', status: 'offline' } as any;
+const soloEmbed = { embed_url: 'https://x/2', status: 'online' } as any;
+ok('película con toda la lista sondeada y caída', veredictoDisponibilidad({ type: 'movie', servers: [muerto, muerto] }, 'parcial'), false);
+ok('película que solo puede ofrecer iframes', veredictoDisponibilidad({ type: 'movie', servers: [soloEmbed] }, 'parcial'), false);
+ok('película sin un solo servidor', veredictoDisponibilidad({ type: 'movie', servers: [] }, 'parcial'), false);
+// Y lo que NO se puede concluir: con el presupuesto agotado quedan directos sin mirar.
+ok('película con un directo SIN sondear', veredictoDisponibilidad({ type: 'movie', servers: [muerto, sinSello] }, 'parcial'), undefined);
+ok('película sin poder preguntar a nadie', veredictoDisponibilidad({ type: 'movie', servers: [muerto] }, 'nada'), undefined);
 
 console.log('\n── Y el criterio que ya estaba');
 ok('servidor SIN verificar no cuenta', veredictoDisponibilidad({ type: 'movie', servers: [sinSello] }, 'todo'), false);

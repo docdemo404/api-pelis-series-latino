@@ -428,6 +428,28 @@ export function fichaReproducible(item: {
  */
 export type Disponibilidad = true | false | undefined;
 
+/**
+ * ¿Le queda a esta ficha algún servidor SIN MIRAR que todavía pudiera reproducir?
+ *
+ * Es la pieza que faltaba para poder concluir sobre una PELÍCULA en el camino de una petición, y
+ * se puede leer del propio resultado de `revisarServidores` sin llevar la cuenta aparte:
+ *
+ *   · si se le sondeó y entregó vídeo  → lleva sello recién puesto (y entonces la ficha es
+ *     reproducible, así que no se llega hasta aquí);
+ *   · si se le sondeó y no lo entregó  → se le quitó el `direct_stream` y bajó a `offline`;
+ *   · si no se le sondeó                → sigue tal cual: con su `direct_stream` y sin caer.
+ *
+ * O sea que un servidor con vídeo directo que no está `offline` es exactamente uno que esta
+ * pasada NO llegó a mirar. Si no queda ninguno así, la lista se ha agotado: lo que hay se ha
+ * probado entero.
+ *
+ * Los que solo traen `embed_url` no cuentan como pendientes: esta API no publica iframes, así
+ * que por mucho que se les mire no van a aportar nada reproducible.
+ */
+function quedaPorMirar(servers?: ServerOption[] | null): boolean {
+  return (servers || []).some(s => s?.direct_stream && s.status !== 'offline');
+}
+
 export function veredictoDisponibilidad(
   item: {
     type?: string | null;
@@ -451,8 +473,36 @@ export function veredictoDisponibilidad(
    * capítulo por comprobar. Es lo que impide que el primer capítulo vacío entierre la serie.
    */
   const episodios = (item?.seasons || []).flatMap(t => t?.episodes || []);
-  if (episodios.length === 0) return undefined;
-  return episodios.every(e => e?.checked_at) ? false : undefined;
+  if (episodios.length > 0) return episodios.every(e => e?.checked_at) ? false : undefined;
+
+  /**
+   * Y UNA SERIE SIN ÁRBOL DE TEMPORADAS TAMPOCO SE CONCLUYE, aunque no le quede ningún servidor.
+   *
+   * Es el caso que enterró ~700 series con la migración 007: una serie a la que todavía no se le
+   * han resuelto los capítulos se ve EXACTAMENTE igual que una a la que se le miraron todos y no
+   * tenía ninguno. Sus servidores de ficha no dicen nada —no se publican, ver `fichaReproducible`—
+   * así que aquí no hay nada que haya sido mirado. Lo dice el banco de pruebas, no la intuición:
+   * `test_veredicto_disponibilidad.ts` lo cubre desde entonces.
+   */
+  if (item?.type === 'tvseries') return undefined;
+
+  /**
+   * UNA PELÍCULA NO TIENE MÁS SITIOS DONDE MIRAR QUE SU LISTA DE SERVIDORES.
+   *
+   * Aquí se devolvía `undefined` siempre, y ese `undefined` es el agujero por el que se colaban
+   * las fichas fantasma. El caso medido, «La Máscara»: la petición sondea sus seis servidores, el
+   * único con vídeo directo contesta 403, se le retira el directo y la respuesta sale VACÍA. Se
+   * acaba de demostrar que no hay nada que entregar… y no se escribía en ninguna parte, así que la
+   * película seguía anunciándose en la portada, en el catálogo y en el buscador hasta que el
+   * barrido de cada 3 h volviera a pasar por ella. Medido en producción: entre el 8 % y el 33 % de
+   * lo que se anunciaba no entregaba un solo servidor.
+   *
+   * La cautela de la que nació ese `undefined` es real, pero es la de las SERIES —enterrar
+   * veinticinco capítulos por lo que diga el primero— y ahí se queda, en la rama de arriba. En una
+   * película «parcial» solo puede significar una cosa: que quedaron servidores sin sondear. Si no
+   * queda ninguno, la pasada ha sido tan concluyente como la exhaustiva.
+   */
+  return quedaPorMirar(item?.servers) ? undefined : false;
 }
 
 /**

@@ -8,6 +8,7 @@ import { bestMode, policyFor } from '../scrapers/hostPolicy';
 import { DirectMode } from '../types';
 import { sendErrorResponse } from '../utils/apiHelpers';
 import { CacheStore } from '../cache/store';
+import { CatalogService } from '../services/catalogService';
 import { USER_AGENT, streamClient } from '../utils/httpClient';
 import { inicioDelTs } from '../utils/segmentBytes';
 import { destinoSirveCors } from '../services/manifestHealth';
@@ -873,6 +874,31 @@ router.post(['/api/v1/report', '/api/v1/playback/report'], async (req: Request, 
     // Se registra siempre, tabla o no: en los registros de Vercel se puede buscar y agrupar, y
     // eso ya es infinitamente mas de lo que habia.
     console.log('[playback]', JSON.stringify(evento));
+
+    /**
+     * Y ADEMAS SE ACTUA. Esto era solo un archivo.
+     *
+     * `outcome: 'failed'` no es un fallo cualquiera: la app lo manda cuando ha agotado TODAS las
+     * fuentes que le dimos —es el «Se probaron todas las fuentes de este contenido» que ve el
+     * espectador—. O sea que un reproductor de verdad, en un aparato de verdad, acaba de demostrar
+     * que lo que entregamos no se ve. No hay senal mas fiable que esa en todo el proyecto, y se
+     * estaba guardando en una tabla para no volver a mirarla.
+     *
+     * Lo que se hace es RETIRAR LA FICHA DEL CACHE, no marcarla como muerta. La diferencia importa:
+     * un aviso viene de un aparato, y una wifi que se cae no puede esconder una pelicula para todos.
+     * Sin cache, la siguiente apertura no puede salir por el camino barato —que es justo el que
+     * volveria a entregar la misma lista muerta, y por eso el error se repetia despues de haberla
+     * visto bien— y tiene que resolver de cero: sondear, y con lo que mida, decidir. Si de verdad
+     * no queda nada, ahi es donde se escribe el veredicto y el titulo sale de los listados; si era
+     * cosa del aparato, la sonda lo demuestra y no se esconde nada.
+     *
+     * Sin `await`: esto es telemetria y no puede retrasar ni un milisegundo lo que ve nadie.
+     */
+    if (evento.outcome.startsWith('failed') || evento.outcome.startsWith('playback_failed')) {
+      if (evento.item_id) {
+        void CatalogService.invalidateItem({ id: evento.item_id }).catch(() => {});
+      }
+    }
 
     const { error } = await getSupabaseAdmin().from('playback_events').insert(evento);
 

@@ -194,6 +194,54 @@ export class CacheStore {
   }
 
   /**
+   * CONJUNTOS: añadir, quitar y leer entero. Tres operaciones, un viaje cada una.
+   *
+   * `set` no sirve para esto y el motivo es la concurrencia. Guardar una lista como un JSON obliga
+   * a leer, añadir y volver a escribir, y con varias lambdas haciéndolo a la vez las dos leen lo
+   * mismo y la última pisa a la primera: justo con tráfico se pierden entradas. Un conjunto de
+   * Redis lo resuelve de un golpe, sin leer nada antes.
+   *
+   * El TTL se refresca en cada alta, así que el conjunto vive mientras se use y desaparece solo
+   * cuando deja de usarse.
+   */
+  static async addToSet(key: string, member: string, ttlSeconds: number): Promise<void> {
+    const k = NAMESPACE + key;
+    if (!this.isShared()) {
+      const actual = memoryGet<string[]>(k) || [];
+      if (!actual.includes(member)) actual.push(member);
+      memorySet(k, actual, ttlSeconds);
+      return;
+    }
+    try {
+      await kvCommand(['SADD', k, member]);
+      await kvCommand(['EXPIRE', k, String(ttlSeconds)]);
+    } catch {}
+  }
+
+  /** Baja del conjunto. Es la vuelta atrás: sin ella, lo que se retira no vuelve nunca. */
+  static async removeFromSet(key: string, member: string): Promise<void> {
+    const k = NAMESPACE + key;
+    if (!this.isShared()) {
+      const actual = memoryGet<string[]>(k);
+      if (!actual) return;
+      const i = actual.indexOf(member);
+      if (i >= 0) { actual.splice(i, 1); memorySet(k, actual, 6 * 60 * 60); }
+      return;
+    }
+    try {
+      await kvCommand(['SREM', k, member]);
+    } catch {}
+  }
+
+  /** El conjunto entero. Devuelve [] si no existe o si Redis no contesta. */
+  static async readSet(key: string): Promise<string[]> {
+    const k = NAMESPACE + key;
+    if (!this.isShared()) return memoryGet<string[]>(k) || [];
+    const res = await kvCommand<string[]>(['SMEMBERS', k]);
+    return Array.isArray(res) ? res.map(String) : [];
+  }
+
+  /**
    * Limpia el caché en memoria del proceso. En Redis las claves expiran por TTL;
    * no se hace FLUSH global para no arrasar claves ajenas al proyecto (para borrar las de una
    * ficha concreta, `del`).

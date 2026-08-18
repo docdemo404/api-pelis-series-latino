@@ -525,10 +525,14 @@ export class CatalogService {
    * Consulta múltiples títulos en lote (Batching Request).
    * Usa el camino RÁPIDO (metadata sin resolución de enlaces) para que prefetchear
    * una fila entera del home siga siendo barato.
+   *
+   * Y con el mismo descuento que los demás listados: esto sirve para prefetchear una fila del
+   * home, así que es un listado con otro nombre. Si se lo saltara, la app se traería en el lote
+   * justo los títulos que el carrusel acaba de dejar de enseñar. Ver `sinRetirados`.
    */
   static async getBatch(ids: string[]): Promise<MediaItem[]> {
     const results = await Promise.all(ids.map(id => this.getMetadata(id)));
-    return results.filter((item): item is MediaItem => item !== null);
+    return this.sinRetirados(results.filter((item): item is MediaItem => item !== null));
   }
 
   /**
@@ -997,6 +1001,113 @@ export class CatalogService {
   }
 
   /**
+   * ESCRIBE EL VEREDICTO, Y SI ES EL QUE ESCONDE LA FICHA, ESPERA A QUE LLEGUE.
+   *
+   * `persistStreams` iba siempre lanzado y olvidado, y sobre Vercel eso significa muchas veces
+   * NUNCA: la función se congela en cuanto contesta, así que un UPDATE que aún no había salido se
+   * queda a medias y no se escribe jamás. No es una sospecha — está medido y documentado en este
+   * mismo archivo, en `getEpisode`: por eso los capítulos pasaron a esperar su escritura, y por eso
+   * `--episodios` veía los mismos 90.000 pendientes corrida tras corrida.
+   *
+   * Aquí muerde exactamente igual, y en el peor sitio: la petición sondea la lista entera, se queda
+   * sin nada que entregar, concluye que la ficha no se puede anunciar… y ese `has_streams = false`
+   * se evapora con la lambda. El título vuelve a la portada como si nada, y el siguiente que lo
+   * abra repite la misma comprobación para volver a perderla.
+   *
+   * Así que se distingue por lo que hay en juego, no por comodidad:
+   *
+   *   · queda algo que entregar → el write-through es un ADELANTO para la próxima apertura, y
+   *     perderlo solo cuesta repetir trabajo. Se lanza y se olvida, como estaba.
+   *   · no queda nada          → esa escritura es lo ÚNICO que saca el título de los listados.
+   *     Se espera. Son ~150 ms al final de una respuesta que acaba de gastar varios segundos
+   *     sondeando, y sin ellos todo lo demás es decorativo.
+   */
+  private static async guardarEnlaces(item: MediaItem, verified: boolean, seMiroAlgo: boolean): Promise<void> {
+    const hayQueEntregar = paraElCliente(item.servers).length > 0 || this.hasEpisodeServers(item);
+    if (hayQueEntregar) {
+      void this.persistStreams(item, verified, seMiroAlgo).catch(() => {});
+      return;
+    }
+    await this.persistStreams(item, verified, seMiroAlgo).catch(() => {});
+  }
+
+  /**
+   * FICHAS RETIRADAS EN CALIENTE: lo que la última petición demostró que ya no se puede entregar.
+   *
+   * `has_streams = false` saca un título de los listados… la próxima vez que se construyan. Y los
+   * listados son justo lo más cacheado que hay aquí: la portada se sirve hasta 12 h (se entrega
+   * caducada a propósito, para que nadie espere a reconstruirla) y las búsquedas y el «ver todo»,
+   * una hora. O sea que retirar una película en la base de datos no impide que la portada la siga
+   * enseñando durante media jornada — que es exactamente lo que el espectador ve.
+   *
+   * Purgar los listados en cada retirada tampoco vale: reconstruir la portada cuesta segundos y se
+   * dispararía con cada título que se cae, en cadena y en hora punta.
+   *
+   * Así que se anota el id en un conjunto compartido y los listados lo descuentan AL SERVIR. Es
+   * una lectura de Redis por instancia y por minuto —el conjunto es corto y se recuerda en el
+   * proceso—, y funciona sobre cualquier lista ya construida, esté donde esté cacheada.
+   *
+   * Se cae solo: cada alta refresca el TTL del conjunto, y en cuanto un título vuelve a entregar
+   * vídeo, el mismo sitio que escribe el veredicto lo da de baja. Nada queda escondido para
+   * siempre por una tarde mala de un host.
+   */
+  private static readonly CLAVE_RETIRADOS = 'retirados:v1';
+
+  /** Cuánto vive el conjunto sin que nadie lo toque. Por debajo del barrido, que decide de verdad. */
+  private static readonly RETIRADOS_TTL_SECONDS = 3 * 60 * 60;
+
+  /**
+   * Copia en el proceso, para no preguntarle a Redis en cada petición de la portada.
+   *
+   * Un minuto: lo que se retira empieza a esconderse en menos de eso, y a cambio la lista de
+   * carruseles no paga un viaje de red por servirse.
+   */
+  private static retiradosMemo: { ids: Set<string>; expira: number } = { ids: new Set(), expira: 0 };
+  private static readonly RETIRADOS_MEMO_MS = 60_000;
+
+  /** Los ids que ahora mismo no se anuncian aunque su fila todavía diga que sí. */
+  static async retirados(): Promise<Set<string>> {
+    if (Date.now() < this.retiradosMemo.expira) return this.retiradosMemo.ids;
+    try {
+      const ids = new Set(await CacheStore.readSet(this.CLAVE_RETIRADOS));
+      this.retiradosMemo = { ids, expira: Date.now() + this.RETIRADOS_MEMO_MS };
+      return ids;
+    } catch {
+      // Sin Redis no se esconde nada: el filtro de la base de datos sigue en pie.
+      return this.retiradosMemo.ids;
+    }
+  }
+
+  /**
+   * Deja constancia de lo que se acaba de aprender sobre una ficha, en los dos sentidos.
+   *
+   * Además del conjunto se purga su propia entrada de caché: la ficha se guarda 6 h como metadata
+   * y 1 h como enlaces, así que sin esto el detalle seguiría anunciando `streams.status: "ready"`
+   * sobre una lista que ya sabemos vacía.
+   */
+  private static async anotarDisponibilidad(item: MediaItem, disponible: boolean): Promise<void> {
+    if (!item.id) return;
+    try {
+      if (disponible) {
+        await CacheStore.removeFromSet(this.CLAVE_RETIRADOS, item.id);
+        this.retiradosMemo.ids.delete(item.id);
+        return;
+      }
+      await CacheStore.addToSet(this.CLAVE_RETIRADOS, item.id, this.RETIRADOS_TTL_SECONDS);
+      this.retiradosMemo.ids.add(item.id);
+      await CacheStore.del(...this.cacheKeysFor(item));
+    } catch {}
+  }
+
+  /** Descuenta de una lista ya construida lo que se ha retirado desde que se construyó. */
+  static async sinRetirados<T extends { id?: string }>(items: T[]): Promise<T[]> {
+    if (!items || items.length === 0) return items || [];
+    const fuera = await this.retirados();
+    if (fuera.size === 0) return items;
+    return items.filter(i => !i?.id || !fuera.has(i.id));
+  }
+
+  /**
    * Escribe de vuelta en Supabase los enlaces recién resueltos (write-through). Se llama en
    * fire-and-forget: NUNCA debe retrasar ni tumbar la respuesta. Si la migración 004 aún no
    * se ejecutó, el update falla en silencio y todo sigue funcionando desde el caché.
@@ -1008,7 +1119,6 @@ export class CatalogService {
   private static async persistStreams(item: MediaItem, verified: boolean = false, seMiroAlgo: boolean = true): Promise<void> {
     if (!item.id) return;
 
-    const hasServers = this.hasPlayableDirectStream(item);
     const update: Record<string, unknown> = {
       servers: item.servers || [],
       seasons: item.seasons || [],
@@ -1024,6 +1134,8 @@ export class CatalogService {
     if (veredicto !== undefined) {
       update.has_streams = veredicto;
       update.streams_checked_at = new Date().toISOString();
+      // Y que se note YA, sin esperar a que caduquen los listados cacheados. Ver `anotarDisponibilidad`.
+      await this.anotarDisponibilidad(item, veredicto);
     }
     if (item._source_urls && item._source_urls.length > 0) {
       update.source_urls = item._source_urls;
@@ -1840,7 +1952,7 @@ export class CatalogService {
       );
       result.servers = sortServersBySourcePriority(revisados);
       result.primary_stream = getPrimaryStream(result.servers);
-      void this.persistStreams(result, false, true).catch(() => {});
+      await this.guardarEnlaces(result, false, true);
       await this.cacheItem('byid', cacheKey, result, CACHE_TTL_SECONDS);
       return result;
     }
@@ -2146,7 +2258,7 @@ export class CatalogService {
     // resultado negativo el que marca la ficha como fantasma, y sin guardarlo la API
     // repetiría la fusión multifuente completa en cada petición del mismo título.
     if (result.servers.length > 0 || exhaustive) {
-      void this.persistStreams(result, veredictoFiable, seMiroAlgo).catch(() => {});
+      await this.guardarEnlaces(result, veredictoFiable, seMiroAlgo);
     }
 
     return result;
@@ -2228,14 +2340,24 @@ export class CatalogService {
     const offset = (safePage - 1) * safeLimit;
 
     const cacheKey = `searchp:direct-only:v1:${nq}:${safePage}:${safeLimit}`;
+
+    /**
+     * EL DESCUENTO DE RETIRADOS VA FUERA DEL CACHÉ, y ese orden es el que hace que sirva.
+     *
+     * Una búsqueda se guarda una hora. Si el filtro se aplicara antes de guardar, la lista
+     * quedaría congelada con lo que se supiera en ese momento y el título que se cae diez minutos
+     * después seguiría saliendo los cincuenta restantes — que es el mismo agujero que tiene la
+     * portada, solo que más corto. Aplicándolo a la SALIDA, lo cacheado es la consulta (que es lo
+     * caro) y la disponibilidad se resuelve en cada respuesta. Ver `sinRetirados`.
+     */
     const cached = await CacheStore.get<{ items: MediaItem[]; total: number }>(cacheKey);
-    if (cached) return cached;
+    if (cached) return { ...cached, items: await this.sinRetirados(cached.items) };
 
     // 1. DB-FIRST: RPC rankeado sobre el catálogo poblado (prefijo-primero + rating).
     const dbResult = await this.searchDbPaged(nq, safeLimit, offset);
     if (dbResult && dbResult.total > 0) {
       await CacheStore.set(cacheKey, dbResult, CACHE_TTL_SECONDS);
-      return dbResult;
+      return { ...dbResult, items: await this.sinRetirados(dbResult.items) };
     }
 
     // 2. FALLBACK: DB vacía o RPC ausente → scrape en vivo LEAN, paginado en memoria.
@@ -2243,7 +2365,7 @@ export class CatalogService {
     const ranked = this.scoreAndSortResults(pool, q);
     const out = { items: ranked.slice(offset, offset + safeLimit), total: ranked.length };
     await CacheStore.set(cacheKey, out, CACHE_TTL_SECONDS);
-    return out;
+    return { ...out, items: await this.sinRetirados(out.items) };
   }
 
   /**
