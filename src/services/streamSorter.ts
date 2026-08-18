@@ -324,16 +324,25 @@ export function paraElCliente<T extends ServerOption>(servers: T[] | undefined |
  *
  * Lo que se copia se desincroniza. Lo que se llama, no.
  *
- * Una película necesita un directo propio; una serie, uno en cualquiera de sus capítulos.
+ * Una película necesita un directo propio; una serie, uno en cualquiera de sus CAPÍTULOS.
+ *
+ * Y en una serie los servidores de nivel ficha NO cuentan, que es la otra mitad del mismo fallo.
+ * Salen de scrapear la página de la serie —el reproductor que esa página trae cargado, o sea UN
+ * capítulo suelto, normalmente el último— y desde que un episodio no hereda nada, no aparecen por
+ * ninguna parte de la respuesta: el cliente reproduce capítulos. Contarlos hacía visible una serie
+ * que después no podía enseñar ni una línea de lista. Medido: entre las series visibles sin un
+ * solo capítulo anunciable, unas cuantas lo eran solo por esto.
  */
 export function fichaReproducible(item: {
+  type?: string | null;
   servers?: ServerOption[] | null;
   seasons?: Array<{ episodes?: Array<{ servers?: ServerOption[] | null }> | null }> | null;
 }): boolean {
-  if (paraElCliente(item?.servers).length > 0) return true;
-  return (item?.seasons || []).some(t =>
+  const enEpisodios = (item?.seasons || []).some(t =>
     (t?.episodes || []).some(e => paraElCliente(e?.servers).length > 0)
   );
+  if (item?.type === 'tvseries') return enEpisodios;
+  return paraElCliente(item?.servers).length > 0 || enEpisodios;
 }
 
 /**

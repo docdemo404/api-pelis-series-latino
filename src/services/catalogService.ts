@@ -1002,7 +1002,7 @@ export class CatalogService {
   }
 
   /** Delega en la única fuente de verdad. Ver `fichaReproducible` en streamSorter. */
-  private static hasPlayableDirectStream(item: Pick<MediaItem, 'servers' | 'seasons'>): boolean {
+  private static hasPlayableDirectStream(item: Pick<MediaItem, 'servers' | 'seasons' | 'type'>): boolean {
     return fichaReproducible(item as any);
   }
 
@@ -1657,7 +1657,7 @@ export class CatalogService {
      * comprobado-y-vacío no es lo mismo que sin-comprobar— aplicado a la ficha.
      */
     const episodios = seasons.flatMap((t: any) => t?.episodes || []);
-    const reproducible = this.hasPlayableDirectStream({ servers: serie.servers, seasons } as MediaItem);
+    const reproducible = this.hasPlayableDirectStream({ type: serie.type, servers: serie.servers, seasons } as MediaItem);
     const todosComprobados = episodios.length > 0 && episodios.every((e: any) => e?.checked_at);
 
     const update: Record<string, unknown> = {
