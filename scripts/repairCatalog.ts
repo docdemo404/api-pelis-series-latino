@@ -2651,7 +2651,15 @@ async function verifyPlayableServers(apply: boolean, limitArg?: number, soloHost
   }
   console.log(`   ${lista.length} por comprobar\n`);
 
-  const CONCURRENCIA = Math.max(2, Math.min(20, porHostCola.size * 2));
+  /**
+   * El tope era 20 y se midió en producción que no llega: 4.547 servidores tardaron 95 minutos y
+   * la corrida murió en el minuto 90 con 4.400 hechos. Cada comprobación baja hasta un segmento
+   * real, así que son ~24 s de reloj cada una y lo único que las acorta es hacer más a la vez.
+   *
+   * Sube a 32, no más: lo que provoca los 429 no es el total en vuelo sino cuántas caen sobre el
+   * MISMO host, y eso lo sigue gobernando el reparto por turnos —dos por host— de más arriba.
+   */
+  const CONCURRENCIA = Math.max(2, Math.min(32, porHostCola.size * 2));
   const veredictos = new Map<string, 'vivo' | 'muerto'>();
   let vivos = 0, muertos = 0, dudosos = 0;
 

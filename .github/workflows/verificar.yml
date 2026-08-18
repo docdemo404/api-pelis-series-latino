@@ -13,16 +13,19 @@ name: Que nada del catálogo esté sin comprobar
 # medio día, y cada título que se pudría seguía anunciándose hasta que alguien lo abría y se
 # llevaba el «no se pudo reproducir». Se arreglaban casos porque el mecanismo no alcanzaba.
 #
-# Comprobar los 5.615 no es caro: son unos 15 minutos con las sondas repartidas entre hosts. Lo
-# caro era no hacerlo. Aquí se hacen TODOS, sin ventana rotatoria, cada 2 h — muy por debajo de
-# las 6 h del sello, así que nada llega a caducar.
+# CUÁNTO CUESTA DE VERDAD, medido y no estimado: 4.547 servidores tardaron 95 minutos, y la
+# primera corrida murió en el minuto 90 con 4.400 hechos. Se estimó en 15 y no era ni parecido —
+# cada comprobación baja hasta un segmento real, unos 24 s de reloj.
+#
+# Así que cada 3 h con 170 minutos de tope y más sondas a la vez (32). Tres horas siguen estando
+# por debajo de las 6 h del sello, que es lo único que importa: nada llega a caducar.
 #
 # Y justo después se recalcula qué se anuncia, para que el catálogo diga exactamente lo que la
 # comprobación acaba de demostrar. Sin ese segundo paso, lo que se aprende no llega a los listados.
 
 on:
   schedule:
-    - cron: '0 */2 * * *'
+    - cron: '0 */3 * * *'
   workflow_dispatch:
 
 concurrency:
@@ -32,7 +35,7 @@ concurrency:
 jobs:
   verificar:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 170
 
     steps:
       - uses: actions/checkout@v4
