@@ -2381,14 +2381,14 @@ async function checkEpisodes(apply: boolean, limitArg?: number): Promise<void> {
   const tope = Number.isFinite(limitArg as number) && (limitArg as number) > 0 ? (limitArg as number) : 200;
   console.log(`🎞  Comprobando capítulos uno a uno${apply ? '' : ' (dry-run)'} · tope ${tope}\n`);
 
-  type Pendiente = { id: string; title: string; season: number; episode: number; edad: number };
+  type Pendiente = { id: string; title: string; season: number; episode: number; edad: number; visible: boolean; orden: number };
   const pendientes: Pendiente[] = [];
 
   const PAGINA = 40;
   for (let from = 0; ; from += PAGINA) {
     const { data, error } = await db
       .from('media_items')
-      .select('id,title,seasons')
+      .select('id,title,seasons,has_streams')
       .eq('type', 'tvseries')
       .range(from, from + PAGINA - 1);
     if (error) { console.warn(`   ⚠ ${error.message}`); break; }
@@ -2399,10 +2399,12 @@ async function checkEpisodes(apply: boolean, limitArg?: number): Promise<void> {
         for (const e of t?.episodes || []) {
           const sello = e?.checked_at ? Date.parse(e.checked_at) : 0;
           if (sello && Date.now() - sello < CADUCA_MS) continue;
+          const season = Number(t.season_number), episode = Number(e.episode_number);
           pendientes.push({
-            id: row.id, title: row.title,
-            season: Number(t.season_number), episode: Number(e.episode_number),
-            edad: sello,   // 0 = nunca comprobado, va primero
+            id: row.id, title: row.title, season, episode,
+            edad: sello,                        // 0 = nunca comprobado, va primero
+            visible: row.has_streams === true,  // lo que la gente ve HOY
+            orden: season * 10000 + episode,    // 1x1 antes que 1x2, y ese antes que 2x1
           });
         }
       }
@@ -2410,9 +2412,22 @@ async function checkEpisodes(apply: boolean, limitArg?: number): Promise<void> {
     if (data.length < PAGINA) break;
   }
 
-  pendientes.sort((a, b) => a.edad - b.edad);
+  /**
+   * EL ORDEN DECIDE CUÁNTO TARDA EN NOTARSE, y con 90.000 pendientes eso pesa más que el ritmo.
+   *
+   *   1. Series que HOY están en el catálogo. Comprobar los capítulos de una que nadie ve no
+   *      arregla nada visible.
+   *   2. A lo ANCHO antes que a lo hondo: el 1x1 de todas las series antes que el 1x2 de ninguna.
+   *      Resolver los 289 capítulos de «El Chapulín Colorado» antes de tocar el primero de las
+   *      otras mil deja mil series rotas para arreglar una. Nadie empieza una serie por el 5x12.
+   *   3. Y entre iguales, lo más viejo primero.
+   */
+  pendientes.sort((a, b) =>
+    (Number(b.visible) - Number(a.visible)) || (a.orden - b.orden) || (a.edad - b.edad)
+  );
   const lista = pendientes.slice(0, tope);
-  console.log(`   ${pendientes.length} capítulos sin comprobar o caducados · se hacen ${lista.length}\n`);
+  const visibles = pendientes.filter(p => p.visible).length;
+  console.log(`   ${pendientes.length} capítulos por comprobar (${visibles} de series visibles) · se hacen ${lista.length}`);
 
   let conVideo = 0, vacios = 0;
   // Seis a la vez: cada capítulo es una página de la fuente más el sondeo de sus servidores, y con

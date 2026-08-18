@@ -1570,10 +1570,25 @@ export class CatalogService {
     // cachear para que el siguiente intento vuelva a probar.
     if (todos.length > 0) {
       await CacheStore.set(cacheKey, resultado, CACHE_TTL_SECONDS);
-      // Y se GUARDA, que es lo que faltaba. Ver `persistEpisodeServers`. Solo cuando se ha
-      // resuelto de verdad: si esto salió de lo ya guardado, reescribirlo solo renovaría el sello
-      // sin haber comprobado nada, y el sello es justo lo que dice que se comprobó.
-      if (!yaResuelto) void this.persistEpisodeServers(serie, season, episode, todos).catch(() => {});
+      /**
+       * Y se GUARDA. Solo cuando se ha resuelto de verdad: si esto salió de lo ya guardado,
+       * reescribirlo renovaría el sello sin haber comprobado nada, y el sello es justo lo que
+       * dice que se comprobó.
+       *
+       * SE ESPERA, no se lanza y se olvida. Iba en fire-and-forget como `persistStreams`, y ahí
+       * no se sostiene: en Vercel la función se congela en cuanto responde, así que el UPDATE se
+       * quedaba a medias y NUNCA llegaba a escribirse — medido sobre Trollhunters, resuelto por
+       * la API y con `checked_at` a null en la base de datos después. Lo mismo en el barrido por
+       * lotes, cuyo proceso termina sin esperar a las promesas sueltas: por eso `--episodios`
+       * seguía viendo los mismos 90.000 pendientes corrida tras corrida.
+       *
+       * Cuesta un UPDATE (~150 ms) sobre un camino que ya tarda segundos porque acaba de scrapear
+       * la fuente, y solo se paga una vez por capítulo: la siguiente apertura sale del camino
+       * rápido sin tocar la red. Un sello que no se escribe no vale nada.
+       */
+      if (!yaResuelto) {
+        await this.persistEpisodeServers(serie, season, episode, todos).catch(() => {});
+      }
     }
     return resultado;
   }
