@@ -2134,8 +2134,32 @@ export class CatalogService {
       pool.push(...catalogMatches);
     }
 
-    return this.unifyForSearch(pool, normalizedMax)
-      .filter(item => this.esReproducible(item));
+    const unificados = this.unifyForSearch(pool, normalizedMax).filter(item => this.esReproducible(item));
+
+    /**
+     * Y NO RESUCITAR LO QUE EL CATÁLOGO YA DESCARTÓ.
+     *
+     * Este camino solo corre cuando la RPC no encuentra nada, y encontraba menos justamente porque
+     * `search_media` exige `has_streams = true`. O sea que el fallback se activaba SOBRE los
+     * títulos retirados y los devolvía recién scrapeados de la fuente, con servidores que aún no
+     * ha comprobado nadie. Trollhunters desaparecía de la portada y del catálogo y seguía saliendo
+     * al buscarlo por su nombre.
+     *
+     * Lo que la fuente publique hoy no vuelve a poner en pie un título que el catálogo ya juzgó:
+     * si vuelve a ser reproducible, lo dirá el verificador y `has_streams` se pondrá solo.
+     */
+    const ids = unificados.map(i => i.id).filter(Boolean);
+    if (ids.length === 0) return unificados;
+    try {
+      const { data } = await supabase
+        .from('media_items')
+        .select('id')
+        .in('id', ids)
+        .eq('has_streams', false);
+      const descartados = new Set((data || []).map((r: any) => r.id));
+      if (descartados.size > 0) return unificados.filter(i => !descartados.has(i.id));
+    } catch {}
+    return unificados;
   }
   /**
    * Calcula el score de relevancia para cada resultado y ordena por puntaje descendente

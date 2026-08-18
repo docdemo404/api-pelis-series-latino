@@ -289,6 +289,21 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
 export function paraElCliente<T extends ServerOption>(servers: T[] | undefined | null): T[] {
   if (!servers?.length) return [];
   return servers
+    /**
+     * Y ADEMÁS, DEMOSTRADO. Tener `direct_stream` y no estar `offline` dice que al scrapear se le
+     * sacó una url y su página cargaba; no dice que hoy haya vídeo al otro lado. Sobre 4.087
+     * servidores publicados, solo 447 lo habían demostrado — el resto eran una url y una
+     * suposición.
+     *
+     * Es lo que quedaba por cerrar. El usuario lo dio con Breaking Bad: la serie salía con dos
+     * capítulos, y ninguno reproducía. Los dos tenían `direct_stream`; ninguno había pasado por
+     * `--verificar`, que es quien baja el manifiesto y se descarga un segmento real.
+     *
+     * El precio se sabe y se acepta: hasta que el verificador dé su primera vuelta, el catálogo
+     * queda en una cuarta parte. Un catálogo pequeño donde todo se ve vale más que uno grande
+     * donde falla el botón de reproducir.
+     */
+    .filter(s => verificadoVigente(s))
     .filter(s => s?.direct_stream && s.status !== 'offline')
     .map(s => {
       const { embed_url, ...resto } = s as ServerOption;
