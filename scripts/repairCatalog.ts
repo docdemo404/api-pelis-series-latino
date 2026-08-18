@@ -75,7 +75,7 @@ import { streamClient } from '../src/utils/httpClient';
 import { inspectEmbed } from '../src/scrapers/embedHealth';
 import { bestMode, policyFor } from '../src/scrapers/hostPolicy';
 import { sinVideoDirecto, comprobarEmbed } from '../src/services/playbackHealth';
-import { nombreConTipo } from '../src/services/streamSorter';
+import { nombreConTipo, paraElCliente } from '../src/services/streamSorter';
 import { MediaItem, ContentType } from '../src/types';
 
 const db = getSupabaseAdmin();
@@ -2321,7 +2321,19 @@ async function hideRowsWithoutDirect(apply: boolean): Promise<void> {
     ...(r.servers || []),
     ...(r.seasons || []).flatMap((t: any) => (t.episodes || []).flatMap((e: any) => e.servers || [])),
   ];
-  const hayDirecto = (r: any) => todosLosServidores(r).some(s => s?.direct_stream && s.status !== 'offline');
+  /**
+   * LA MISMA FUNCIÓN QUE DECIDE QUÉ SALE AL CLIENTE, no una copia de su criterio.
+   *
+   * Había aquí un `s.direct_stream && s.status !== 'offline'` escrito a mano, y era el criterio de
+   * `paraElCliente`… hasta que `paraElCliente` empezó a exigir además que el servidor hubiera
+   * demostrado entregar vídeo. Las dos reglas se separaron en silencio y el resultado fue una
+   * ficha que se anunciaba sin poder enseñar ni un capítulo: `has_streams` decía que sí porque la
+   * copia vieja daba que sí, y la lista salía vacía porque la de verdad daba que no. El usuario lo
+   * vio con Breaking Bad — visible, 62 capítulos, ninguno anunciable, cero servidores verificados.
+   *
+   * Duplicar un criterio es apostar a que nadie lo cambiará nunca. Ahora se llama a la fuente.
+   */
+  const hayDirecto = (r: any) => paraElCliente(todosLosServidores(r)).length > 0;
 
   const conServidores = rows.filter(r => todosLosServidores(r).length > 0);
   const aEsconder = conServidores.filter(r => !hayDirecto(r) && r.has_streams !== false);
