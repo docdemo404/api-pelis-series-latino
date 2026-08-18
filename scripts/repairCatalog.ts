@@ -74,7 +74,7 @@ import { CacheStore } from '../src/cache/store';
 import { streamClient } from '../src/utils/httpClient';
 import { inspectEmbed } from '../src/scrapers/embedHealth';
 import { bestMode, policyFor } from '../src/scrapers/hostPolicy';
-import { sinVideoDirecto } from '../src/services/playbackHealth';
+import { sinVideoDirecto, comprobarEmbed } from '../src/services/playbackHealth';
 import { nombreConTipo } from '../src/services/streamSorter';
 import { MediaItem, ContentType } from '../src/types';
 
@@ -2357,6 +2357,137 @@ async function hideRowsWithoutDirect(apply: boolean): Promise<void> {
 }
 
 /**
+ * VERIFICAR QUE LO PUBLICADO ENTREGA VÍDEO DE VERDAD (`--verificar`).
+ *
+ * `--servidores-muertos` usa `inspectEmbed`, que comprueba si la PÁGINA del reproductor carga. Una
+ * página puede cargar impecable y no tener vídeo detrás: es exactamente lo que hacía la familia
+ * upns —su API contestaba 200 sin un solo campo de CDN— y lo que deja pasar a un `direct_stream`
+ * que al reproducir da 502. Aquí se usa `comprobarEmbed`, que acuña el enlace, baja el manifiesto,
+ * revisa las variantes y **descarga un segmento real**. Es la misma comprobación que hace el
+ * reproductor, no una aproximación.
+ *
+ * Y MIRA DENTRO DE LOS EPISODIOS. Los servidores de una serie viven en
+ * `seasons[].episodes[].servers`, donde ni `--servidores-muertos` ni `--directos-falsos` han
+ * entrado nunca; por eso las series eran las que peor reproducían.
+ *
+ * Lo que se escribe:
+ *   vivo        → `verified_at` con la fecha. Es el sello que permitirá publicar solo lo probado.
+ *   muerto      → se le quitan los campos de vídeo directo y baja a `offline` (no se borra: el
+ *                 embed sigue ahí para reextraer, y `resucitarCaidos` puede absolverlo).
+ *   desconocido → NO se toca. No poder demostrar algo no es demostrar lo contrario.
+ *
+ * Se reutiliza el reparto por turnos entre hosts de `--servidores-muertos`: sin él, diez sondas
+ * seguidas al mismo sitio devuelven 429 y la pasada mide humo.
+ *
+ *   npm run repair:catalog -- --verificar --limit=400
+ *   npm run repair:catalog -- --verificar --apply --limit=400
+ */
+async function verifyPlayableServers(apply: boolean, limitArg?: number, soloHost?: string): Promise<void> {
+  console.log(`🎬 Comprobando que lo publicado entrega vídeo${apply ? '' : ' (dry-run)'}...`);
+  const rows = await fetchAllRows(['servers', 'seasons', 'has_streams']);
+  const hostDe = (u: string) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return '(ilegible)'; } };
+
+  /** Todos los servidores de una ficha: los suyos y los de cada episodio. */
+  const servidoresDe = (r: any): any[] => [
+    ...(r.servers || []),
+    ...(r.seasons || []).flatMap((t: any) => (t.episodes || []).flatMap((e: any) => e.servers || [])),
+  ];
+
+  // Un mismo embed aparece en muchas fichas y en muchos episodios: se comprueba UNA vez.
+  const pendientes = new Set<string>();
+  for (const row of rows) {
+    for (const s of servidoresDe(row)) {
+      if (!s?.embed_url || !s.direct_stream) continue;
+      if (soloHost && !hostDe(s.embed_url).includes(soloHost)) continue;
+      pendientes.add(s.embed_url);
+    }
+  }
+  console.log(`   ${pendientes.size} embeds distintos publicados como vídeo directo`);
+
+  // Turnos entre hosts + ventana rotatoria, igual que en `--servidores-muertos`.
+  const porHostCola = new Map<string, string[]>();
+  for (const url of Array.from(pendientes).sort()) {
+    const h = hostDe(url);
+    (porHostCola.get(h) || porHostCola.set(h, []).get(h)!).push(url);
+  }
+  const todos: string[] = [];
+  for (let fila = 0; todos.length < pendientes.size; fila++) {
+    for (const cola of porHostCola.values()) if (fila < cola.length) todos.push(cola[fila]);
+  }
+  const lote = Number.isFinite(limitArg as number) ? (limitArg as number) : 0;
+  let lista = todos;
+  if (lote > 0 && lote < todos.length) {
+    const vueltas = Math.max(1, Math.ceil(todos.length / lote));
+    const desde = (Math.floor(Date.now() / 86400000) % vueltas) * lote;
+    lista = todos.slice(desde, desde + lote);
+    console.log(`   ventana rotatoria: ${desde}–${desde + lista.length} de ${todos.length} (vuelta completa cada ${vueltas} pasadas)`);
+  }
+  console.log(`   ${lista.length} por comprobar\n`);
+
+  const CONCURRENCIA = Math.max(2, Math.min(20, porHostCola.size * 2));
+  const veredictos = new Map<string, 'vivo' | 'muerto'>();
+  let vivos = 0, muertos = 0, dudosos = 0;
+
+  async function escribirLoDecidido(): Promise<void> {
+    for (const row of rows) {
+      let cambio = false;
+      const sello = new Date().toISOString();
+
+      const revisar = (s: any) => {
+        const v = s?.embed_url ? veredictos.get(s.embed_url) : undefined;
+        if (!v || !s.direct_stream) return s;
+        if (v === 'muerto') { cambio = true; return { ...sinVideoDirecto(s), status: 'offline', name: nombreConTipo(s.name, false) }; }
+        if (s.verified_at === sello) return s;
+        cambio = true;
+        return { ...s, verified_at: sello, status: 'online' };
+      };
+
+      const servers = (row.servers || []).map(revisar);
+      const seasons = (row.seasons || []).map((t: any) => ({
+        ...t,
+        episodes: (t.episodes || []).map((e: any) => (
+          Array.isArray(e?.servers) ? { ...e, servers: e.servers.map(revisar) } : e
+        )),
+      }));
+      if (!cambio) continue;
+
+      row.servers = servers; row.seasons = seasons;   // que la siguiente tanda no lo repita
+      if (!apply) continue;
+      marcarTocada(row);
+      const reproducible = [...servers, ...seasons.flatMap((t: any) => (t.episodes || []).flatMap((e: any) => e.servers || []))]
+        .some((s: any) => s?.direct_stream && s.status !== 'offline');
+      const { error } = await db.from('media_items')
+        .update({ servers, seasons, has_streams: reproducible, streams_checked_at: sello })
+        .eq('id', row.id);
+      if (error) console.warn(`   ⚠ ${row.id}: ${error.message}`);
+    }
+  }
+
+  let hechos = 0;
+  for (let i = 0; i < lista.length; i += CONCURRENCIA) {
+    await Promise.all(lista.slice(i, i + CONCURRENCIA).map(async url => {
+      try {
+        const c = await comprobarEmbed(url, { limite: Date.now() + 30000 });
+        if (c.veredicto === 'vivo') { veredictos.set(url, 'vivo'); vivos++; }
+        else if (c.veredicto === 'muerto' && c.universal) { veredictos.set(url, 'muerto'); muertos++; }
+        else dudosos++;
+      } catch { dudosos++; }
+    }));
+    hechos += Math.min(CONCURRENCIA, lista.length - i);
+    if (hechos % 200 < CONCURRENCIA) {
+      await escribirLoDecidido();
+      console.log(`   ${hechos}/${lista.length} · ${vivos} entregan vídeo · ${muertos} muertos · ${dudosos} sin veredicto`);
+    }
+  }
+  await escribirLoDecidido();
+
+  const tot = vivos + muertos + dudosos || 1;
+  console.log(`\n🎬 ${vivos} entregan vídeo (${((vivos / tot) * 100).toFixed(0)}%) · ${muertos} muertos · ${dudosos} sin veredicto`);
+  console.log(apply ? '   ✅ aplicado' : '   (dry-run: repite con --apply)');
+  await purgarCacheDeTocadas(apply);
+}
+
+/**
  * SERIES ESCONDIDAS QUE SÍ SE VEN (`--series-ocultas`).
  *
  * `has_streams` se calcula con lo GUARDADO, y hasta ahora una serie no guardaba nada: sus
@@ -2737,6 +2868,15 @@ async function main() {
 
   if (process.argv.includes('--politica')) {
     await reconcilePolicyDirects(apply);
+    return;
+  }
+
+  if (process.argv.includes('--verificar')) {
+    await verifyPlayableServers(
+      apply,
+      Number.isFinite(limitArg) ? limitArg : undefined,
+      (process.argv.find(a => a.startsWith('--host=')) || '').split('=')[1]
+    );
     return;
   }
 

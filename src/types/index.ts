@@ -60,6 +60,17 @@ export interface ServerOption {
   headers?: Record<string, string>;
   status: LinkStatus;
   last_checked: string;
+  /**
+   * ISO de la última vez que se bajó HASTA EL VÍDEO por este servidor y llegaron bytes de medio.
+   *
+   * No es lo mismo que `last_checked`, y la diferencia es la que decide si el catálogo miente:
+   * `last_checked` dice cuándo se miró el servidor —a veces solo para ver si su página de
+   * reproductor cargaba—, y una página puede cargar perfectamente sin vídeo detrás. Esto dice
+   * cuándo se comprobó lo único que le importa al espectador: que el vídeo existe y se descarga.
+   *
+   * Ausente = nunca se ha demostrado. No es prueba de que esté roto, es falta de prueba.
+   */
+  verified_at?: string;
   source_id?: string;
   source_priority?: number;
 }
