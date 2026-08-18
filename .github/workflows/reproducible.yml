@@ -13,9 +13,9 @@ name: Que todo lo que se anuncia se pueda reproducir
 #   3. Se quiere MÁS a menudo que el crawl. Con 1.743 fichas de atraso, una vez al día tarda dos
 #      días en ponerse al corriente; cada 8 h, unas horas.
 #
-# EL ORDEN DE LOS TRES PASOS NO ES NEGOCIABLE: extraer rescata fichas, retirar directos falsos
-# deja otras mudas, y solo cuando ambos han terminado tiene sentido decidir cuáles se anuncian.
-# Al revés, el último paso escondería justo lo que los dos primeros acaban de arreglar.
+# EL ORDEN NO ES NEGOCIABLE: extraer rescata fichas, comprobar deja mudas a las que mentían, y
+# recuperar series devuelve las que sí se ven. Solo cuando los cuatro han terminado tiene sentido
+# decidir qué se anuncia. Al revés, el último paso escondería justo lo que los anteriores arreglan.
 
 on:
   schedule:
@@ -87,7 +87,43 @@ jobs:
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
         run: npx ts-node scripts/repairCatalog.ts --directos-falsos --apply --limit=2500
 
-      # 3. Y recién ahora, qué se anuncia. Va en los DOS sentidos: esconde las fichas que se
+      # 3. LA COMPROBACIÓN DE VERDAD: bajar hasta el vídeo, no hasta la página del reproductor.
+      #
+      #    El paso anterior pregunta al endpoint si contesta. Este acuña el enlace, baja el
+      #    manifiesto, revisa las variantes y se descarga un SEGMENTO REAL — la misma comprobación
+      #    que hace el reproductor. Medido sobre 60 embeds publicados: 1 de cada 6 no entrega
+      #    vídeo aunque su página cargue perfectamente. Y es el único paso que entra en
+      #    `seasons[].episodes[].servers`, donde viven los enlaces de las series.
+      #
+      #    Deja `verified_at` en los que pasan, que es lo que hace que el `primary_stream` sea
+      #    siempre algo probado. La ventana es rotatoria: cada corrida coge una tanda distinta y
+      #    la vuelta completa llega sola.
+      - name: Comprobar que lo publicado entrega vídeo de verdad
+        if: always()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+        run: npx ts-node scripts/repairCatalog.ts --verificar --apply --limit=800
+
+      # 4. DEVOLVER LAS SERIES QUE SÍ SE VEN. Una serie resuelve sus capítulos al abrirla, así que
+      #    las que nadie abre nunca se quedan sin nada escrito y el paso 5 las esconde. Aquí se les
+      #    abre un capítulo de verdad; desde que `getEpisode` persiste lo que resuelve, con eso
+      #    basta para que vuelvan. Sin este paso el catálogo de series solo puede encoger.
+      - name: Devolver al catálogo las series escondidas que reproducen
+        if: always()
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+        run: npx ts-node scripts/repairCatalog.ts --series-ocultas --apply --limit=300
+
+      # 5. Y recién ahora, qué se anuncia. Va en los DOS sentidos: esconde las fichas que se
       #    quedaron sin nada reproducible y devuelve las que han recuperado vídeo directo. Sin
       #    esa segunda mitad, cada corrida encogería el catálogo un poco más y lo que arreglan
       #    los extractores no volvería nunca.
