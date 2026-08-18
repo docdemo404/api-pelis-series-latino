@@ -1465,16 +1465,33 @@ export class CatalogService {
     const serie = await this.getMetadata(id, 'tvseries');
     if (!serie) return null;
 
-    const sourceUrls = [...(serie._source_urls || []), serie._source_url].filter(Boolean) as string[];
-    const scraped = await RealScraperService
-      .scrapeEpisodeDetail(serie.id || id, season, episode, { sourceUrls })
-      .catch(() => null);
-
     // La ficha de la temporada da nombre, imagen y sinopsis del capítulo; los ENLACES, solo la
     // página del episodio o los que ya estuvieran guardados para ESE episodio.
     const deLaFicha = (serie.seasons || [])
       .find(s => s.season_number === season)?.episodes
       ?.find(e => e.episode_number === episode);
+
+    /**
+     * SI YA ESTÁ RESUELTO Y FRESCO, NO SE SCRAPEA. Es la misma regla que `hasFreshStreams` aplica
+     * a las películas, y aquí faltaba: se scrapeaba SIEMPRE, aunque los enlaces estuvieran
+     * guardados y recién comprobados. Abrir un capítulo costaba una visita a la fuente y el sondeo
+     * de sus servidores —segundos— cuando la respuesta ya estaba en la base de datos.
+     *
+     * Resolver bajo demanda no puede ser el mecanismo normal: eso convierte cada reproducción en
+     * una espera y deja al cliente pagando un trabajo que le toca al catálogo. Lo normal es leer
+     * lo ya resuelto; scrapear es el respaldo para lo que la pasada de fondo aún no ha cubierto.
+     */
+    const selloEp = deLaFicha?.checked_at ? Date.parse(deLaFicha.checked_at) : 0;
+    const yaResuelto = Boolean(selloEp)
+      && Date.now() - selloEp < STREAMS_FRESH_MS
+      && (deLaFicha?.servers || []).length > 0;
+
+    const sourceUrls = [...(serie._source_urls || []), serie._source_url].filter(Boolean) as string[];
+    const scraped = yaResuelto
+      ? null
+      : await RealScraperService
+          .scrapeEpisodeDetail(serie.id || id, season, episode, { sourceUrls })
+          .catch(() => null);
 
     const propios = scraped?.servers?.length
       ? scraped.servers
@@ -1553,8 +1570,10 @@ export class CatalogService {
     // cachear para que el siguiente intento vuelva a probar.
     if (todos.length > 0) {
       await CacheStore.set(cacheKey, resultado, CACHE_TTL_SECONDS);
-      // Y se GUARDA, que es lo que faltaba. Ver `persistEpisodeServers`.
-      void this.persistEpisodeServers(serie, season, episode, todos).catch(() => {});
+      // Y se GUARDA, que es lo que faltaba. Ver `persistEpisodeServers`. Solo cuando se ha
+      // resuelto de verdad: si esto salió de lo ya guardado, reescribirlo solo renovaría el sello
+      // sin haber comprobado nada, y el sello es justo lo que dice que se comprobó.
+      if (!yaResuelto) void this.persistEpisodeServers(serie, season, episode, todos).catch(() => {});
     }
     return resultado;
   }

@@ -130,9 +130,8 @@ jobs:
       #    vacía dejaría casi todas las series sin un solo capítulo. Esto es lo que convierte «sin
       #    comprobar» en un veredicto, sellando `checked_at` con enlaces o sin ellos.
       #
-      #    Son ~90.000 capítulos, así que no termina en una corrida: prioriza lo nunca comprobado y
-      #    la vuelta completa llega en unos días. Los capítulos que la gente abre se comprueban
-      #    solos por el camino normal.
+      #    El grueso lo lleva `episodios.yml`, que tiene presupuesto propio y corre cada 4 h. Aquí
+      #    va una tanda corta para que este trabajo no dependa de aquel.
       - name: Comprobar capítulos uno a uno
         if: always()
         env:
@@ -142,7 +141,7 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
-        run: npx ts-node scripts/repairCatalog.ts --episodios --apply --limit=1500
+        run: npx ts-node scripts/repairCatalog.ts --episodios --apply --limit=600
 
       # 6. Y recién ahora, qué se anuncia. Va en los DOS sentidos: esconde las fichas que se
       #    quedaron sin nada reproducible y devuelve las que han recuperado vídeo directo. Sin

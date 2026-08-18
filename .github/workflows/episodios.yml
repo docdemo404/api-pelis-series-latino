@@ -1,0 +1,65 @@
+name: Resolver los capítulos por adelantado
+
+# POR QUÉ ESTO VA EN SU PROPIO TRABAJO
+#
+# Un capítulo que se resuelve cuando el espectador le da a Reproducir es una espera de segundos
+# que paga él. La API tiene que llegar con la respuesta hecha: el camino de petición lee lo ya
+# resuelto y solo scrapea lo que la pasada de fondo aún no ha cubierto.
+#
+# Son ~90.000 capítulos. A 1.500 por corrida dentro del trabajo de reproducibilidad serían casi
+# tres semanas, y además compitiendo por sus 330 minutos con la extracción. Con presupuesto propio
+# y cada 4 h, la primera vuelta completa baja a unos días.
+#
+# Cada capítulo resuelto queda escrito con `checked_at`, y ese sello es lo que permite esconder
+# los que se comprobaron y no tienen nada — que es lo que hace que la app no reciba capítulos
+# muertos ni temporadas vacías.
+
+on:
+  schedule:
+    # Cada 4 h, a las horas impares para no coincidir con el crawl (04:00) ni con
+    # reproducible.yml (01/09/17).
+    - cron: '0 3,7,11,15,19,23 * * *'
+  workflow_dispatch:
+    inputs:
+      capitulos:
+        description: 'Cuántos capítulos resolver en esta corrida'
+        required: false
+        default: '4000'
+
+# Dos corridas a la vez escribirían las mismas filas y doblarían las peticiones a las fuentes, que
+# contestan 429 mucho antes de lo que parece. La nueva espera: lo ya resuelto a medias vale.
+concurrency:
+  group: episodios
+  cancel-in-progress: false
+
+jobs:
+  episodios:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Comprobar que todo compila
+        run: npx tsc --noEmit
+
+      # Prioriza lo NUNCA comprobado y después lo más viejo, así la primera vuelta cubre catálogo
+      # nuevo en vez de repasar lo mismo. El sello caduca a los 7 días, de modo que cuando la
+      # primera vuelta termine, esto pasa a ser mantenimiento.
+      - name: Resolver capítulos pendientes
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+        run: npx ts-node scripts/repairCatalog.ts --episodios --apply --limit=${{ github.event.inputs.capitulos || 4000 }}
