@@ -1549,9 +1549,20 @@ export class CatalogService {
      * lo ya resuelto; scrapear es el respaldo para lo que la pasada de fondo aún no ha cubierto.
      */
     const selloEp = deLaFicha?.checked_at ? Date.parse(deLaFicha.checked_at) : 0;
+    /**
+     * Y que lo guardado SIRVA PARA ALGO. Tener servidores no basta: si ninguno es publicable, el
+     * atajo devuelve una lista vacía y encima impide volver a mirar durante 24 h — el capítulo se
+     * queda muerto por un sello que puso una resolución que salió mal.
+     *
+     * Pasó con «Breaking Bad»: un intento anterior selló el capítulo con los servidores de una sola
+     * fuente, todos inservibles, y a partir de ahí ya no se scrapeaba. La fuente nueva estaba
+     * enganchada, tenía tres vídeos directos y no se llegaba a preguntar.
+     *
+     * Es la misma regla que `hasFreshStreams` aplica a las películas.
+     */
     const yaResuelto = Boolean(selloEp)
       && Date.now() - selloEp < STREAMS_FRESH_MS
-      && (deLaFicha?.servers || []).length > 0;
+      && paraElCliente(deLaFicha?.servers).length > 0;
 
     const sourceUrls = [...(serie._source_urls || []), serie._source_url].filter(Boolean) as string[];
     const scraped = yaResuelto

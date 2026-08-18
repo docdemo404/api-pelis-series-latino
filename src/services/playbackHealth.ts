@@ -422,7 +422,18 @@ export async function revisarServidores(
           if (servidor.status !== 'online') {
             salida[i] = { ...servidor, status: 'online', last_checked: new Date().toISOString() };
           }
-          if (hastaElPrimeroUtil) break;
+          /**
+           * NO SE PARA AQUÍ, y este `break` costaba fichas enteras.
+           *
+           * `hastaElPrimeroUtil` significa «ya tenemos algo que entregar». Un embed vivo lo era
+           * cuando la API entregaba iframes; desde que solo sale vídeo directo verificado, un
+           * servidor sin `direct_stream` NO se publica — así que pararse en él deja la lista sin
+           * comprobar justo donde estaban los que sí sirven.
+           *
+           * Medido en Breaking Bad: su 1x1 tiene cinco servidores y tres con vídeo directo, y la
+           * respuesta salía con CERO porque el primero de la lista era un embed vivo y la pasada
+           * terminaba ahí.
+           */
         }
         continue;
       }

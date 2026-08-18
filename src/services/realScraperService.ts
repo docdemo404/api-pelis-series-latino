@@ -953,16 +953,44 @@ export class RealScraperService {
     const yaEsta = new Set(desdeFuente.map(c => c.url));
     const tandas = [desdeFuente, porId.filter(c => !yaEsta.has(c.url))].filter(t => t.length > 0);
 
+    /**
+     * SE FUSIONAN TODAS LAS CANDIDATAS VÁLIDAS, no se elige la primera.
+     *
+     * Antes se cogía la primera página que diera servidores y se tiraba el resto. Con una sola
+     * fuente daba igual; con tres es la diferencia entre reproducir y no: el 1x1 de «Breaking Bad»
+     * salía de TioPlus con un único vídeo directo —un emturbovid cuyas variantes están muertas— y
+     * los tres directos que tenía Cinecalidad no se miraban siquiera, porque su candidata iba
+     * detrás en la lista.
+     *
+     * Es lo que el camino de las PELÍCULAS lleva haciendo desde siempre (`addServers` en
+     * `getStreams`), y lo que a los episodios les faltaba. La deduplicación es la misma:
+     * `unwrapRedirector` sobre el embed, para que el mismo servidor publicado por dos fuentes no
+     * entre dos veces.
+     *
+     * Las tandas siguen existiendo por lo que existían —no pagar la segunda si la primera ya
+     * resolvió— pero ahora la primera tiene que haber aportado algo publicable, no solo algo.
+     */
     let detail = null as Awaited<ReturnType<typeof this.scrapeDetail>>;
+    const servidores: ServerOption[] = [];
+    const clavesVistas = new Set<string>();
+
     for (const tanda of tandas) {
       const settled = await Promise.allSettled(tanda.map(c => this.scrapeDetail(c.url)));
-      detail = settled
-        .map((r, i) => ({ d: r.status === 'fulfilled' ? r.value : null, cand: tanda[i] }))
-        .find(({ d, cand }) =>
-          d && d.servers && d.servers.length > 0 &&
-          esDelEpisodio(d.title, season, episode, { exigeRotulo: cand.adivinada })
-        )?.d || null;
-      if (detail) break;
+      settled.forEach((r, i) => {
+        const d = r.status === 'fulfilled' ? r.value : null;
+        const cand = tanda[i];
+        if (!d || !d.servers || d.servers.length === 0) return;
+        if (!esDelEpisodio(d.title, season, episode, { exigeRotulo: cand.adivinada })) return;
+        if (!detail) detail = d;   // la primera válida da nombre, imagen y sinopsis al capítulo
+        for (const sv of d.servers) {
+          const clave = unwrapRedirector(sv.embed_url);
+          if (!clave || clavesVistas.has(clave)) continue;
+          clavesVistas.add(clave);
+          servidores.push(sv);
+        }
+      });
+      // Solo se paga la siguiente tanda si esta no ha dejado nada que el cliente pueda reproducir.
+      if (servidores.some(sv => sv.direct_stream)) break;
     }
 
     if (!detail) return null;
@@ -978,8 +1006,8 @@ export class RealScraperService {
       series_id: String(tmdbId),
       season_number: season,
       episode_number: episode,
-      primary_stream: detail.primary_stream,
-      servers: detail.servers || []
+      primary_stream: getPrimaryStream(servidores),
+      servers: servidores,
     };
   }
 
