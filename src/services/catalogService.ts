@@ -967,13 +967,29 @@ export class CatalogService {
     return { ...item, servers, primary_stream: getPrimaryStream(servers) };
   }
 
+  /**
+   * ¿Se puede entregar lo guardado sin volver a comprobar nada?
+   *
+   * ESTE ATAJO SE COMÍA TODAS LAS COMPROBACIONES. Bastaba con que los enlaces se hubieran escrito
+   * hace menos de 24 h para devolverlos tal cual, sin sondear: se amplió el presupuesto de sondeo,
+   * se hizo que se resellara al servir… y nada de eso llegaba a ejecutarse nunca, porque la ficha
+   * salía por aquí. «Milagro en la Celda 7» seguía entregando su servidor muerto después de tres
+   * arreglos seguidos, y los tres eran correctos: no se ejecutaba ninguno.
+   *
+   * La fecha de escritura dice cuándo se resolvió la lista, no si el vídeo sigue ahí. Lo segundo
+   * lo dice el sello de cada servidor, y ahora se exige: si lo que se iba a entregar no está
+   * sellado y vigente, se cae a la resolución completa, que sondea y resella.
+   */
   private static hasFreshStreams(item: MediaItem): boolean {
     if (!item.servers || item.servers.length === 0) return false;
     if (!item.streams_updated_at) return false;
     const ts = Date.parse(item.streams_updated_at);
     if (!Number.isFinite(ts)) return false;
     if (ts < DIRECT_EXTRACTION_SINCE) return false;
-    return Date.now() - ts < STREAMS_FRESH_MS;
+    if (Date.now() - ts >= STREAMS_FRESH_MS) return false;
+    // Y que lo publicable siga vigente: `paraElCliente` ya exige sello fresco, así que si esto
+    // devuelve algo es que hay al menos un servidor demostrado hace poco.
+    return paraElCliente(item.servers).length > 0 || this.hasEpisodeServers(item);
   }
 
   /**
