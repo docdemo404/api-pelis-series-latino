@@ -380,7 +380,11 @@ export function tmdbImagePath(url: string | null | undefined): string | null {
   // `https://www.themoviedb.org/t/p/w1280/zmmrC3E0…jpg`, o sea que la prueba de identidad MÁS
   // fuerte que existe —el hash de una imagen de TMDB— estaba delante y se descartaba por el
   // nombre del servidor. La ficha se quedó sin año, sin sinopsis y con un tmdb_id sintético.
-  const m = String(url).match(/(?:image\.tmdb\.org|themoviedb\.org)\/t\/p\/[^/]+\/([\w-]+\.(?:jpg|jpeg|png|webp|svg))/i);
+  // Las barras se admiten REPETIDAS. TMDB devuelve `poster_path` ya con su barra inicial, así
+  // que quien concatena `"/t/p/w342" + poster_path` publica `/t/p/w342//hash.jpg` — y es
+  // exactamente lo que hace Cinecalidad. Con `\/` a secas, la prueba de identidad MÁS fuerte
+  // que existe se descartaba por una barra de más.
+  const m = String(url).match(/(?:image\.tmdb\.org|themoviedb\.org)\/t\/p\/[^/]+\/+([\w-]+\.(?:jpg|jpeg|png|webp|svg))/i);
   if (m) return `/${m[1]}`;
   // TMDB devuelve poster_path/backdrop_path ya como "/<hash>.jpg": se normaliza por basename.
   const bare = String(url).match(/^\/?([\w-]+\.(?:jpg|jpeg|png|webp|svg))$/i);
