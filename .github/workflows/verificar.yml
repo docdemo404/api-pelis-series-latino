@@ -1,0 +1,69 @@
+name: Que nada del catálogo esté sin comprobar
+
+# LA RAÍZ DE «APARECEN TÍTULOS QUE NO FUNCIONAN»
+#
+# No es un filtro que falte: los filtros ya exigen que un servidor haya demostrado entregar vídeo.
+# Es que esa demostración CADUCA —el sello vale 6 h porque estos hosts se pudren en horas— y la
+# verificación no daba la vuelta al catálogo ni de lejos a ese ritmo:
+#
+#   5.615 servidores publicados · sello de 6 h  →  hacen falta ~22.000 comprobaciones al día
+#   ritmo anterior: 800 por corrida x 3 corridas  →  2.400 al día
+#
+# Nueve veces menos. Así que la mayoría del catálogo vivía con el sello caducado o sellado hace
+# medio día, y cada título que se pudría seguía anunciándose hasta que alguien lo abría y se
+# llevaba el «no se pudo reproducir». Se arreglaban casos porque el mecanismo no alcanzaba.
+#
+# Comprobar los 5.615 no es caro: son unos 15 minutos con las sondas repartidas entre hosts. Lo
+# caro era no hacerlo. Aquí se hacen TODOS, sin ventana rotatoria, cada 2 h — muy por debajo de
+# las 6 h del sello, así que nada llega a caducar.
+#
+# Y justo después se recalcula qué se anuncia, para que el catálogo diga exactamente lo que la
+# comprobación acaba de demostrar. Sin ese segundo paso, lo que se aprende no llega a los listados.
+
+on:
+  schedule:
+    - cron: '0 */2 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: verificar
+  cancel-in-progress: false
+
+jobs:
+  verificar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+      - name: Instalar dependencias
+        run: npm ci
+      - name: Comprobar que todo compila
+        run: npx tsc --noEmit
+
+      # SIN --limit: el conjunto entero. Con ventana rotatoria esto no serviría — la gracia es que
+      # ningún servidor se quede sin comprobar dentro de la vida de su sello.
+      - name: Comprobar TODOS los servidores publicados
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+        run: npx ts-node scripts/repairCatalog.ts --verificar --apply
+
+      # Y que el catálogo diga lo que se acaba de demostrar. Va en los dos sentidos: esconde lo que
+      # se quedó sin nada y devuelve lo que ha vuelto a reproducir.
+      - name: Ajustar qué se anuncia
+        if: always()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+        run: npx ts-node scripts/repairCatalog.ts --sin-directo --apply

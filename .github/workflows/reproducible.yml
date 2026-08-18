@@ -87,7 +87,8 @@ jobs:
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
         run: npx ts-node scripts/repairCatalog.ts --directos-falsos --apply --limit=2500
 
-      # 3. LA COMPROBACIÓN DE VERDAD: bajar hasta el vídeo, no hasta la página del reproductor.
+      # 3. Una pasada corta de comprobación. El grueso lo lleva `verificar.yml`, que repasa el
+      #    conjunto ENTERO cada 2 h — que es lo que hace que ningún sello caduque.
       #
       #    El paso anterior pregunta al endpoint si contesta. Este acuña el enlace, baja el
       #    manifiesto, revisa las variantes y se descarga un SEGMENTO REAL — la misma comprobación
@@ -106,7 +107,7 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
-        run: npx ts-node scripts/repairCatalog.ts --verificar --apply --limit=800
+        run: npx ts-node scripts/repairCatalog.ts --verificar --apply --limit=400
 
       # 4. DEVOLVER LAS SERIES QUE SÍ SE VEN. Una serie resuelve sus capítulos al abrirla, así que
       #    las que nadie abre nunca se quedan sin nada escrito y el paso 5 las esconde. Aquí se les
