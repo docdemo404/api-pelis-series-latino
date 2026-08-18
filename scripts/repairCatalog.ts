@@ -2357,6 +2357,65 @@ async function hideRowsWithoutDirect(apply: boolean): Promise<void> {
 }
 
 /**
+ * SERIES ESCONDIDAS QUE SÍ SE VEN (`--series-ocultas`).
+ *
+ * `has_streams` se calcula con lo GUARDADO, y hasta ahora una serie no guardaba nada: sus
+ * capítulos se resolvían al abrirla y se tiraban. Así que en la base de datos toda serie parecía
+ * vacía, y el recuento de la migración 007 escondió a las que reproducen igual. Medido sobre 14
+ * series ocultas al azar: 6 reproducían.
+ *
+ * Aquí se les abre un capítulo DE VERDAD. Ya no hace falta escribir nada a mano: desde que
+ * `getEpisode` persiste lo que resuelve (`persistEpisodeServers`), resolver el 1x1 deja el árbol
+ * escrito y `has_streams` recalculado. Esta pasada solo elige a quién preguntar y a qué ritmo.
+ *
+ * Se prueban varios capítulos porque un 1x1 caído no significa que la serie entera lo esté.
+ *
+ *   npm run repair:catalog -- --series-ocultas --limit=50          # solo mide
+ *   npm run repair:catalog -- --series-ocultas --apply --limit=200 # y las devuelve
+ */
+async function recoverHiddenSeries(apply: boolean, limitArg?: number): Promise<void> {
+  console.log(`📺 Buscando series escondidas que sí reproducen${apply ? '' : ' (dry-run)'}...`);
+
+  const { data, error } = await db
+    .from('media_items')
+    .select('id,title')
+    .eq('type', 'tvseries')
+    .eq('has_streams', false)
+    .limit(Number.isFinite(limitArg as number) && (limitArg as number) > 0 ? (limitArg as number) : 100);
+  if (error) { console.error(`   ⚠ ${error.message}`); return; }
+  const filas = (data || []) as any[];
+  console.log(`   ${filas.length} series ocultas a revisar
+`);
+
+  let recuperadas = 0, siguenSinNada = 0;
+  const CONC = 4;
+
+  for (let i = 0; i < filas.length; i += CONC) {
+    await Promise.all(filas.slice(i, i + CONC).map(async row => {
+      // Tres capítulos: que el 1x1 esté caído no condena a la serie entera.
+      for (const [t, e] of [[1, 1], [1, 2], [1, 3]] as const) {
+        const ep = await CatalogService.getEpisode(row.id, t, e).catch(() => null);
+        if (ep?.streams?.status !== 'ready') continue;
+        recuperadas++;
+        marcarTocada(row);
+        console.log(`   + "${String(row.title).slice(0, 40).padEnd(42)}" reproduce en ${t}x${e}`);
+        // `getEpisode` ya ha escrito seasons y has_streams al persistir. En dry-run se deshace,
+        // porque medir no puede cambiar el catálogo.
+        if (!apply) await db.from('media_items').update({ has_streams: false }).eq('id', row.id);
+        return;
+      }
+      siguenSinNada++;
+    }));
+    if ((i + CONC) % 40 < CONC) console.log(`   ${Math.min(i + CONC, filas.length)}/${filas.length}...`);
+  }
+
+  console.log(`
+📺 ${recuperadas} vuelven al catálogo · ${siguenSinNada} siguen sin nada reproducible`);
+  console.log(apply ? '   ✅ aplicado' : '   (dry-run: repite con --apply)');
+  await purgarCacheDeTocadas(apply);
+}
+
+/**
  * RECONCILIAR LO GUARDADO CON LA POLÍTICA DE HOSTS (`--politica`).
  *
  * `noSePuedeServirDirecto` solo actúa en el momento de scrapear: `describeDirect` y
@@ -2678,6 +2737,11 @@ async function main() {
 
   if (process.argv.includes('--politica')) {
     await reconcilePolicyDirects(apply);
+    return;
+  }
+
+  if (process.argv.includes('--series-ocultas')) {
+    await recoverHiddenSeries(apply, Number.isFinite(limitArg) ? limitArg : undefined);
     return;
   }
 

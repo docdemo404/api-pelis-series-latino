@@ -1528,8 +1528,67 @@ export class CatalogService {
     // cachear para que el siguiente intento vuelva a probar.
     if (todos.length > 0) {
       await CacheStore.set(cacheKey, resultado, CACHE_TTL_SECONDS);
+      // Y se GUARDA, que es lo que faltaba. Ver `persistEpisodeServers`.
+      void this.persistEpisodeServers(serie, season, episode, todos).catch(() => {});
     }
     return resultado;
+  }
+
+  /**
+   * Escribe en la ficha los servidores que se acaban de resolver para UN episodio.
+   *
+   * ESTE ERA EL AGUJERO QUE HACÍA MENTIR AL CATÁLOGO SOBRE LAS SERIES. Una película guarda sus
+   * servidores (`persistStreams`) y por eso `has_streams` dice la verdad sobre ella. Un episodio
+   * los resolvía en vivo, los servía y los TIRABA: solo quedaban 10 minutos de caché. Así que en
+   * la base de datos una serie que reproduce perfectamente parecía vacía, y cualquier recuento
+   * hecho sobre lo guardado —la migración 007, sin ir más lejos— la escondía del catálogo. Medido:
+   * 6 de cada 14 series ocultas SÍ reproducían.
+   *
+   * Se guarda lo resuelto ANTES de filtrar por vídeo directo (`todos`, no `servers`): el embed hay
+   * que conservarlo para poder reextraer más adelante, y es `paraElCliente` quien decide qué sale
+   * al cliente. Misma regla que en `persistStreams`.
+   *
+   * Va en fire-and-forget: nunca puede retrasar ni tumbar la respuesta del capítulo.
+   */
+  private static async persistEpisodeServers(
+    serie: MediaItem,
+    season: number,
+    episode: number,
+    servers: ServerOption[]
+  ): Promise<void> {
+    if (!serie?.id) return;
+
+    // Se parte de lo que ya tenga la ficha y se sustituye SOLO este episodio. Si la temporada o el
+    // episodio no estaban, se crean: una serie recién descubierta no tiene árbol todavía.
+    const seasons = JSON.parse(JSON.stringify(serie.seasons || [])) as any[];
+    let temporada = seasons.find(t => Number(t?.season_number) === season);
+    if (!temporada) {
+      temporada = { season_number: season, name: `Temporada ${season}`, episodes_count: 0, poster: null, episodes: [] };
+      seasons.push(temporada);
+    }
+    if (!Array.isArray(temporada.episodes)) temporada.episodes = [];
+    let cap = temporada.episodes.find((e: any) => Number(e?.episode_number) === episode);
+    if (!cap) {
+      cap = { episode_number: episode, name: `Episodio ${episode}`, overview: '', still_path: null, air_date: null, servers: [] };
+      temporada.episodes.push(cap);
+    }
+    cap.servers = servers;
+
+    // El veredicto de disponibilidad se recalcula con el árbol ya actualizado: es justo lo que
+    // devuelve al catálogo una serie que estaba escondida por no tener nada guardado.
+    const reproducible = this.hasPlayableDirectStream({ servers: serie.servers, seasons } as MediaItem);
+
+    try {
+      await getSupabaseAdmin()
+        .from('media_items')
+        .update({
+          seasons,
+          has_streams: reproducible,
+          streams_updated_at: new Date().toISOString(),
+          streams_checked_at: new Date().toISOString(),
+        })
+        .eq('id', serie.id);
+    } catch {}
   }
 
   /** scrapeDetail con techo de latencia: una fuente lenta no puede bloquear la respuesta. */
