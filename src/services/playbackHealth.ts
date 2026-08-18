@@ -127,6 +127,10 @@ export interface Comprobacion {
    * que se ha visto es un 403 sobre la entrega literal, que otro cliente puede no sufrir.
    */
   universal: boolean;
+  /** Lo mejor que ofrece el maestro, si se llegó a mirar. Ver `EstadoManifiesto.maxAltura`. */
+  maxAltura?: number;
+  /** Lo que tardó el destino en empezar a contestar. */
+  ttfbMs?: number;
 }
 
 const VIVO_DESCONOCIDO: Comprobacion = { veredicto: 'desconocido', universal: false };
@@ -172,6 +176,29 @@ export async function comprobarDestino(
   } = {}
 ): Promise<Comprobacion> {
   const entregaLiteral = Boolean(opts.entregaLiteral);
+
+  /**
+   * LO PRIMERO: ¿YA SE SABE ALGO DE ESTE EMBED?
+   *
+   * Debajo hay un caché indexado por `verdict:<url acuñada>`, y esa URL se firma NUEVA en cada
+   * acuñado — así que para los hosts que firman, que son casi todos, ese caché no acierta jamás.
+   * Resultado medido: cada reproducción volvía a bajar el maestro, a recorrer todas sus variantes
+   * y a descargarse un trozo de segmento, para concluir lo que se había concluido segundos antes
+   * al sellar el servidor. Eran ~2,4 s del arranque, y sobraban.
+   *
+   * El veredicto bueno vive bajo `salud:<embed>` —clave ESTABLE, el embed no cambia— y esta
+   * función no lo miraba. `veredictoConocido` es justo eso, y ya se usa en `revisarServidores`.
+   *
+   * `entregaLiteral` NO puede aprovecharlo: ese modo pregunta algo distinto —si el CDN acepta la
+   * petición tal y como la hará el reproductor, sin Referer— y un veredicto guardado responde a la
+   * pregunta general. Confundirlas fue lo que dejó pasar el archive.org de «Volver al Futuro 3».
+   */
+  if (!entregaLiteral && opts.embedUrl) {
+    const sabido = await veredictoConocido(opts.embedUrl);
+    if (sabido === 'vivo') return { veredicto: 'vivo', universal: true };
+    if (sabido === 'muerto') return { veredicto: 'muerto', universal: true, motivo: 'ya-constaba' };
+  }
+
   const cacheKey = `verdict:${minted.url}`;
   const cacheado = await CacheStore.get<VeredictoCacheado>(cacheKey);
   if (cacheado) return { veredicto: cacheado.kind, universal: true };
@@ -210,6 +237,7 @@ export async function comprobarDestino(
 
   // El destino de primer nivel. Si ni siquiera se puede conectar con él, no hay nada que bajar
   // ni que redirigir. Para un mp4 esto es toda la comprobación: no hay manifiesto que abrir.
+  const inicioSondeo = Date.now();
   const primero = await sondearDestino(minted.url, minted.referer, false, entregaLiteral);
   if (!primero.vivo) return guardar(muerto(primero.motivo || 'no-responde'));
 
@@ -226,6 +254,9 @@ export async function comprobarDestino(
   if (!hayTiempo()) return { veredicto: 'desconocido', cuerpo: manifiesto, universal: false };
 
   const estado = await revisarManifiesto(manifiesto, minted.url, minted.referer);
+  // Lo que el maestro anuncia y lo que tardó en llegar: dos datos que ya estaban delante y se
+  // tiraban, y que son los que deciden qué servidor se entrega primero. Ver `streamSorter`.
+  const calidad = { maxAltura: estado.maxAltura, ttfbMs: Date.now() - inicioSondeo };
   if (estado.muerto) {
     return guardar(muerto(`variantes-muertas: ${estado.muertos.join(', ')}`));
   }
@@ -245,9 +276,10 @@ export async function comprobarDestino(
       filtrado: true,
       motivo: `calidades-caidas: ${estado.muertos.join(', ')}`,
       universal: true,
+      ...calidad,
     };
   }
-  return guardar({ veredicto: 'vivo', cuerpo: manifiesto, universal: true });
+  return guardar({ veredicto: 'vivo', cuerpo: manifiesto, universal: true, ...calidad });
 }
 
 /**
@@ -354,6 +386,18 @@ export async function revisarServidores(
     maximo?: number;
     /** Parar en cuanto uno de los de arriba resulte utilizable (camino de petición). */
     hastaElPrimeroUtil?: boolean;
+    /**
+     * Cuántos servidores DEMOSTRADOS se quieren antes de dar la pasada por terminada.
+     *
+     * `hastaElPrimeroUtil` cortaba en el primero, así que solo ese recibía sello — y como
+     * `paraElCliente` exige sello, la ficha salía con UN servidor y sin nada a lo que caer si ese
+     * se atascaba. Medido en el 1x1 de Breaking Bad: 10 servidores guardados, 4 con vídeo, 1
+     * publicado.
+     *
+     * Con un objetivo, la pasada sigue hasta reunir alternativas o hasta agotar presupuesto, lo que
+     * llegue antes. No se comprueba menos ni se publica nada sin comprobar: se comprueba MÁS.
+     */
+    objetivoSellados?: number;
     /** Cuántos servidores ya marcados `offline` se vuelven a mirar por si han resucitado. */
     resucitar?: number;
   } = {}
@@ -363,6 +407,9 @@ export async function revisarServidores(
   const presupuesto = opts.presupuestoMs ?? 4000;
   const maximo = opts.maximo ?? 3;
   const hastaElPrimeroUtil = opts.hastaElPrimeroUtil !== false;
+  const objetivoSellados = Math.max(1, opts.objetivoSellados ?? 1);
+  /** Cuántos llevan sello fresco en esta pasada. Lo que decide cuándo parar. */
+  let demostrados = 0;
   const limite = Date.now() + presupuesto;
 
   const salida = [...servers];
@@ -374,6 +421,8 @@ export async function revisarServidores(
 
     let veredicto = veredictoRecordado(servidor.embed_url);
     let sinVideo = false;
+    /** Lo que esta pasada haya medido del maestro. Vacío si el veredicto salió del caché. */
+    let calidadMedida: { maxAltura?: number; ttfbMs?: number } | undefined;
 
     if (!veredicto) {
       /**
@@ -457,6 +506,7 @@ export async function revisarServidores(
           queda
         );
         veredicto = c.veredicto;
+        calidadMedida = { maxAltura: c.maxAltura, ttfbMs: c.ttfbMs };
         sinVideo = Boolean('sinVideo' in c && c.sinVideo);
         if (c.veredicto === 'muerto') {
           console.warn(`[salud] ${servidor.embed_url.slice(0, 70)} no reproduce (${c.motivo})`);
@@ -494,10 +544,16 @@ export async function revisarServidores(
         status: 'online',
         verified_at: new Date().toISOString(),
         last_checked: new Date().toISOString(),
+        // Lo que se acaba de ver del maestro. Solo se pisa lo anterior si ESTA pasada lo midió: un
+        // veredicto que salió del caché no trae estos datos y no debe borrar los de antes.
+        ...(calidadMedida?.maxAltura !== undefined ? { max_height: calidadMedida.maxAltura } : {}),
+        ...(calidadMedida?.ttfbMs !== undefined ? { ttfb_ms: calidadMedida.ttfbMs } : {}),
       };
+      demostrados++;
     }
 
-    if (hastaElPrimeroUtil) break;
+    // Se para cuando hay ALTERNATIVAS suficientes, no en cuanto uno funciona. Ver `objetivoSellados`.
+    if (hastaElPrimeroUtil && demostrados >= objetivoSellados) break;
   }
 
   return resucitarCaidos(salida, limite, opts.resucitar ?? 0);

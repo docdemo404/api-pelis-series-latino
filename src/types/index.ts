@@ -71,6 +71,16 @@ export interface ServerOption {
    * Ausente = nunca se ha demostrado. No es prueba de que esté roto, es falta de prueba.
    */
   verified_at?: string;
+  /**
+   * Lo mejor que ofrece este servidor, en alto de pixeles (720, 1080...).
+   *
+   * La calidad NO la decide el reproductor: la decide que servidor se entrega. Dos servidores del
+   * mismo capitulo pueden ofrecer 480p y 1080p, y hasta ahora se escogia sin mirarlo. Lo lee
+   * `revisarManifiesto` del maestro, que ya se descargaba para comprobar que el video existe.
+   */
+  max_height?: number;
+  /** Lo que tarda su CDN en empezar a contestar. Para desempatar a igual calidad. */
+  ttfb_ms?: number;
   source_id?: string;
   source_priority?: number;
 }

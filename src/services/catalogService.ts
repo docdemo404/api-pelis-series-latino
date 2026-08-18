@@ -991,9 +991,9 @@ export class CatalogService {
     if (!Number.isFinite(ts)) return false;
     if (ts < DIRECT_EXTRACTION_SINCE) return false;
     if (Date.now() - ts >= STREAMS_FRESH_MS) return false;
-    // Y que lo publicable siga vigente: `paraElCliente` ya exige sello fresco, así que si esto
-    // devuelve algo es que hay al menos un servidor demostrado hace poco.
-    return paraElCliente(item.servers).length > 0 || this.hasEpisodeServers(item);
+    // Y que haya ALTERNATIVAS, no solo uno: con un único servidor, un atasco no tiene salida y
+    // el camino rápido impediría durante 24 h volver a buscar los demás. Ver `getEpisode`.
+    return paraElCliente(item.servers).length >= 2 || this.hasEpisodeServers(item);
   }
 
   /**
@@ -1560,9 +1560,20 @@ export class CatalogService {
      *
      * Es la misma regla que `hasFreshStreams` aplica a las películas.
      */
+    /**
+     * Y con ALTERNATIVAS, no con uno.
+     *
+     * Bastaba con que hubiera un servidor publicable para dar el capítulo por resuelto y no volver
+     * a mirar en 24 h. Pero un solo servidor es justo el caso que no tiene salida: si se atasca, no
+     * hay a dónde caer. El capítulo se quedaba con el primero que se selló y los otros tres con
+     * vídeo directo seguían escondidos esperando turno para siempre.
+     *
+     * Con dos ya hay failover, que es lo que importa. Por debajo se vuelve a resolver, y esa pasada
+     * sella hasta tres (`objetivoSellados`). Se paga una vez por capítulo.
+     */
     const yaResuelto = Boolean(selloEp)
       && Date.now() - selloEp < STREAMS_FRESH_MS
-      && paraElCliente(deLaFicha?.servers).length > 0;
+      && paraElCliente(deLaFicha?.servers).length >= 2;
 
     const sourceUrls = [...(serie._source_urls || []), serie._source_url].filter(Boolean) as string[];
     const scraped = yaResuelto
@@ -1597,7 +1608,8 @@ export class CatalogService {
       // sonda, así que la segunda vez que alguien abre este capítulo no se sondea nada.
       // Mismo razonamiento que en las películas: quedarse a medias ya no entrega un servidor sin
       // comprobar, deja el capítulo vacío. Se para en cuanto uno demuestra que reproduce.
-      { presupuestoMs: 8000, maximo: 8 }
+      // Mismo motivo que en las películas: alternativas para poder caer si el primero se atasca.
+      { presupuestoMs: 8000, maximo: 8, objetivoSellados: 3 }
     );
 
     /**
@@ -1823,7 +1835,8 @@ export class CatalogService {
     if (!opts.deep && this.hasFreshStreams(result)) {
       const revisados = await revisarServidores(
         sortServersBySourcePriority(aplicarVeredictosRecordados(result.servers || [])),
-        { presupuestoMs: 9000, maximo: 8 }
+        // Tres demostrados, no uno: sin alternativas un atasco no tiene salida. Ver `objetivoSellados`.
+        { presupuestoMs: 9000, maximo: 8, objetivoSellados: 3 }
       );
       result.servers = sortServersBySourcePriority(revisados);
       result.primary_stream = getPrimaryStream(result.servers);
@@ -2073,7 +2086,7 @@ export class CatalogService {
      */
     const revisados = await revisarServidores(sortServersBySourcePriority(allServers), opts.deep
       ? { presupuestoMs: 20000, maximo: 8, hastaElPrimeroUtil: false, resucitar: 2 }
-      : { presupuestoMs: 9000, maximo: 8 });
+      : { presupuestoMs: 9000, maximo: 8, objetivoSellados: 3 });
 
     result.servers = sortServersBySourcePriority(revisados);
     if (result.servers.length > 0) {

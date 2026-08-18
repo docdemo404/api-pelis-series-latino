@@ -278,6 +278,25 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
      * un 403. Lo que sí se puede es que, cuando una ficha tiene de los dos, se entregue primero el
      * que va directo. No cambia lo que se puede ver; cambia lo que se tarda en verlo.
      */
+    /**
+     * 3.5 · LA MEJOR CALIDAD PRIMERO, y despues el que responda antes.
+     *
+     * Es la unica palanca real sobre la calidad. El reproductor solo puede elegir entre lo que el
+     * servidor ofrece; si se le entrega uno que solo tiene 480p, no hay ajuste que lo suba. Medido
+     * en Breaking Bad: su fuente tope a 720p y ningun cambio en ExoPlayer podia dar mas.
+     *
+     * Va DESPUES del sello —primero que funcione— y ANTES del coste de entrega: mas vale 1080p por
+     * proxy que 480p directo. Un servidor sin medir no se penaliza ni se premia: se queda donde
+     * estaba, que es el sesgo de siempre.
+     */
+    const altoA = a.max_height ?? 0;
+    const altoB = b.max_height ?? 0;
+    if (altoA !== altoB) return altoB - altoA;
+
+    const tA = a.ttfb_ms ?? Number.MAX_SAFE_INTEGER;
+    const tB = b.ttfb_ms ?? Number.MAX_SAFE_INTEGER;
+    if (tA !== tB) return tA - tB;
+
     const costeA = costeDeEntrega(a);
     const costeB = costeDeEntrega(b);
     if (costeA !== costeB) return costeA - costeB;

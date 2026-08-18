@@ -240,6 +240,16 @@ function hostDe(uri: string, base: string): string {
 }
 
 export interface EstadoManifiesto {
+  /**
+   * Lo mejor que ofrece este maestro, leido de `RESOLUTION` en sus `#EXT-X-STREAM-INF`.
+   *
+   * Estaba delante y se tiraba. Es el dato que decide la calidad de verdad: no la elige el
+   * reproductor, la elige QUE SERVIDOR se entrega — dos servidores del mismo capitulo pueden
+   * ofrecer 480p y 1080p, y hasta ahora se escogia sin mirarlo.
+   */
+  maxAltura?: number;
+  /** El `BANDWIDTH` mayor, para desempatar entre dos que ofrezcan la misma altura. */
+  maxBanda?: number;
   /** Ninguna de las URIs que referencia apunta a un dominio que exista. */
   muerto: boolean;
   /** Alguna resuelve y alguna no: se puede reproducir, pero no con todas las calidades. */
@@ -338,7 +348,29 @@ export async function revisarManifiesto(
     salida.push(v.absoluta);
   }
 
+  /**
+   * La calidad se lee del maestro ORIGINAL, no del filtrado: si una variante se cayo, lo que este
+   * servidor OFRECE sigue siendo lo que anunciaba. Lo reproducible hoy ya lo dice `parcial`.
+   */
+  let maxAltura: number | undefined;
+  let maxBanda: number | undefined;
+  for (const linea of lineas) {
+    if (!/^#EXT-X-STREAM-INF/i.test(linea.trim())) continue;
+    const res = linea.match(/RESOLUTION\s*=\s*\d+\s*x\s*(\d+)/i);
+    if (res) {
+      const alto = Number(res[1]);
+      if (Number.isFinite(alto) && (maxAltura === undefined || alto > maxAltura)) maxAltura = alto;
+    }
+    const bw = linea.match(/BANDWIDTH\s*=\s*(\d+)/i);
+    if (bw) {
+      const b = Number(bw[1]);
+      if (Number.isFinite(b) && (maxBanda === undefined || b > maxBanda)) maxBanda = b;
+    }
+  }
+
   return {
+    maxAltura,
+    maxBanda,
     muerto: total > 0 && vivas === 0,
     parcial: vivas > 0 && muertos.size > 0,
     cuerpo: salida.join('\n'),
