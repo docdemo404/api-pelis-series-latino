@@ -1636,19 +1636,40 @@ export class CatalogService {
     // autoriza a dejar de anunciar el capítulo, y sin él no se distingue de «aún no mirado».
     cap.checked_at = new Date().toISOString();
 
-    // El veredicto de disponibilidad se recalcula con el árbol ya actualizado: es justo lo que
-    // devuelve al catálogo una serie que estaba escondida por no tener nada guardado.
+    /**
+     * EL VEREDICTO DE LA SERIE, y aquí hay que hilar fino porque el dato está a medias.
+     *
+     * Encontrar algo reproducible basta para decir que sí: una serie con un capítulo que se ve,
+     * se ve. Es lo que devuelve al catálogo a las que estaban escondidas por no tener nada
+     * guardado.
+     *
+     * NO ENCONTRARLO NO BASTA PARA DECIR QUE NO. Los capítulos se comprueban de uno en uno y a lo
+     * ancho del catálogo, así que durante días una serie tendrá dos capítulos mirados y veinticinco
+     * sin mirar. Poner `has_streams = false` ahí esconde la serie entera por lo que se sabe de dos
+     * capítulos — y se notó: mientras el barrido corría, las series visibles cayeron de 789 a 534
+     * en unas horas, no porque dejaran de funcionar sino porque el primer capítulo vacío las
+     * enterraba.
+     *
+     * Así que solo se declara vacía cuando están TODOS comprobados y ninguno sirve. Mientras quede
+     * alguno sin mirar, no se toca: es el mismo tri-estado que usa `checked_at` por capítulo —
+     * comprobado-y-vacío no es lo mismo que sin-comprobar— aplicado a la ficha.
+     */
+    const episodios = seasons.flatMap((t: any) => t?.episodes || []);
     const reproducible = this.hasPlayableDirectStream({ servers: serie.servers, seasons } as MediaItem);
+    const todosComprobados = episodios.length > 0 && episodios.every((e: any) => e?.checked_at);
+
+    const update: Record<string, unknown> = {
+      seasons,
+      streams_updated_at: new Date().toISOString(),
+      streams_checked_at: new Date().toISOString(),
+    };
+    if (reproducible) update.has_streams = true;
+    else if (todosComprobados) update.has_streams = false;
 
     try {
       await getSupabaseAdmin()
         .from('media_items')
-        .update({
-          seasons,
-          has_streams: reproducible,
-          streams_updated_at: new Date().toISOString(),
-          streams_checked_at: new Date().toISOString(),
-        })
+        .update(update)
         .eq('id', serie.id);
 
       /**

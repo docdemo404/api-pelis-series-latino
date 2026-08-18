@@ -2429,7 +2429,19 @@ async function checkEpisodes(apply: boolean, limitArg?: number): Promise<void> {
   const visibles = pendientes.filter(p => p.visible).length;
   console.log(`   ${pendientes.length} capítulos por comprobar (${visibles} de series visibles) · se hacen ${lista.length}`);
 
-  let conVideo = 0, vacios = 0;
+  /**
+   * TRES resultados, no dos, y confundirlos da un informe que asusta sin motivo:
+   *
+   *   ready       el capítulo tiene vídeo.
+   *   unavailable se encontró su página, se miraron sus servidores y ninguno sirve. Queda sellado
+   *               y DEJA DE ANUNCIARSE.
+   *   pending     no se encontró página del capítulo. NO se sella —puede ser un fallo de red o un
+   *               slug que no existe— así que el capítulo se sigue anunciando igual que antes.
+   *
+   * Contar juntos los dos últimos hacía parecer que se iba a esconder el 75% del catálogo cuando
+   * la mayoría son `pending`, que no esconden nada.
+   */
+  let conVideo = 0, vacios = 0, sinPagina = 0;
   // Seis a la vez: cada capítulo es una página de la fuente más el sondeo de sus servidores, y con
   // 89.950 pendientes el ritmo decide si la vuelta completa son días o meses. Por encima de esto
   // las fuentes empiezan a contestar 429 y la pasada mide humo (ver `--servidores-muertos`).
@@ -2438,7 +2450,10 @@ async function checkEpisodes(apply: boolean, limitArg?: number): Promise<void> {
     await Promise.all(lista.slice(i, i + CONC).map(async c => {
       if (!apply) return;   // `getEpisode` escribe al resolver: en dry-run no se le llama
       const ep = await CatalogService.getEpisode(c.id, c.season, c.episode).catch(() => null);
-      if (ep?.streams?.status === 'ready') conVideo++; else vacios++;
+      const estado = ep?.streams?.status;
+      if (estado === 'ready') conVideo++;
+      else if (estado === 'unavailable') vacios++;
+      else sinPagina++;
     }));
     if ((i + CONC) % 80 < CONC) console.log(`   ${Math.min(i + CONC, lista.length)}/${lista.length} · ${conVideo} con vídeo · ${vacios} vacíos`);
   }
