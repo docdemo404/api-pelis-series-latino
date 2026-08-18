@@ -569,6 +569,34 @@ export class CatalogService {
   }
 
   /**
+   * Todo lo que hace falta para que una ficha se pueda ANUNCIAR, en un solo sitio.
+   *
+   * Eran dos cosas separadas y solo se aplicaba una. `has_streams` dice que hay algo que
+   * reproducir; no dice que la ficha se pueda pintar. El catálogo acabó anunciando
+   * «INVENCIBLE» de FuegoCine —sin póster, sin géneros, con la sinopsis de plantilla «Ver …
+   * online gratis» y un `tmdb_id` sintético— mientras la ficha buena de la misma serie, con su
+   * metadata de TMDB completa, estaba escondida por no tener enlaces todavía.
+   *
+   * Una fila sin póster no es un título, es un hueco: en una parrilla se ve como una tarjeta
+   * rota. Y viene siempre del mismo sitio, una ficha que no encontró su obra en TMDB y se quedó
+   * con lo poco que publicaba la fuente.
+   *
+   * Se aplica sobre la CONSULTA y no como cadena para `.or()` porque son condiciones que se
+   * suman, no alternativas. Que lo usen los cuatro caminos de listado es lo que evita que dentro
+   * de un mes haya otra vez uno que se lo salta — que es exactamente cómo llegó aquí el buscador.
+   *
+   * Y es SÍNCRONA a propósito. Un builder de Supabase es *thenable*: devolverlo desde una función
+   * `async` hace que el `await` lo EJECUTE a medio construir, y la consulta sale sin los filtros
+   * que aún faltaban por encadenar. Lo que hacía falta esperar —si la columna existe— se resuelve
+   * fuera y se pasa ya resuelto.
+   */
+  private static soloPublicables<T>(query: T, hayColumna: boolean): T {
+    if (!hayColumna) return query;
+    const q = query as any;
+    return q.eq('has_streams', true).not('poster', 'is', null) as T;
+  }
+
+  /**
    * LAS COLUMNAS QUE NECESITA UNA TARJETA, y ni una más.
    *
    * Los listados pedían `select('*')`, y eso arrastra `servers` y `seasons` —el JSON más pesado
@@ -617,8 +645,7 @@ export class CatalogService {
         .order('updated_at', { ascending: false })
         .limit(limit);
 
-      const playable = await this.playableFilter();
-      if (playable) query = query.or(playable);
+      query = this.soloPublicables(query, await this.hasAvailabilityColumn());
 
       const { data } = await query;
 
@@ -691,8 +718,7 @@ export class CatalogService {
         .not('genres', 'eq', '{}');
 
       // Los carruseles del home no anuncian títulos que ya sabemos que no se reproducen.
-      const playable = await this.playableFilter();
-      if (playable) query = query.or(playable);
+      query = this.soloPublicables(query, await this.hasAvailabilityColumn());
 
       if (spec.type) query = query.eq('type', spec.type);
       if (spec.genres && spec.genres.length > 0) query = query.overlaps('genres', spec.genres);
@@ -739,8 +765,7 @@ export class CatalogService {
         .range(from, from + safeLimit - 1);
 
       // El "ver todo" tampoco debe pasear fichas sin reproducción posible.
-      const playable = await this.playableFilter();
-      if (playable) query = query.or(playable);
+      query = this.soloPublicables(query, await this.hasAvailabilityColumn());
 
       if (type) query = query.eq('type', type);
       if (genre) query = query.contains('genres', [genre]);
@@ -772,8 +797,7 @@ export class CatalogService {
         .select(this.COLUMNAS_DE_TARJETA)
         .order('updated_at', { ascending: false })
         .limit(200);
-      const playable = await this.playableFilter();
-      if (playable) query = query.or(playable);
+      query = this.soloPublicables(query, await this.hasAvailabilityColumn());
       const { data } = await query;
       const filas = (data || []) as any[];
       if (filas.length >= 30) {
@@ -2022,7 +2046,7 @@ export class CatalogService {
      * Lo encontró el usuario con Trollhunters — fuera de la portada y del catálogo, dentro del
      * buscador—. Una regla que se aplica en cuatro sitios de cinco no es una regla.
      */
-    const playable = await this.playableFilter();
+    const hayColumna = await this.hasAvailabilityColumn();
 
     try {
       let query1 = supabase
@@ -2030,7 +2054,7 @@ export class CatalogService {
         .select('*')
         .ilike('title_normalized', `${nq}%`)
         .limit(limit);
-      if (playable) query1 = query1.or(playable);
+      query1 = this.soloPublicables(query1, hayColumna);
       const { data, error } = await query1;
       // Si la columna existe (sin error), confiar en su resultado aunque venga vacío.
       if (!error) return (data || []).map(this.mapDbItemToMediaItem);
@@ -2042,7 +2066,7 @@ export class CatalogService {
         .select('*')
         .ilike('title', `${nq}%`)
         .limit(limit);
-      if (playable) query2 = query2.or(playable);
+      query2 = this.soloPublicables(query2, hayColumna);
       const { data } = await query2;
       return (data || []).map(this.mapDbItemToMediaItem);
     } catch {}
