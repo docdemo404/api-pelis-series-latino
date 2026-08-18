@@ -1043,21 +1043,23 @@ export class CatalogService {
       rest.primary_stream = paraElCliente([rest.primary_stream])[0] || null;
     }
     /**
-     * Un capítulo que no se puede ver no se anuncia, y una temporada sin capítulos anunciables
-     * tampoco. Pero SOLO cuando consta que se comprobó (`checked_at`).
+     * SOLO SE ANUNCIA EL CAPÍTULO QUE SE HA DEMOSTRADO QUE SE VE.
      *
-     * La distinción no es un matiz: los enlaces de un episodio se resuelven al abrirlo, así que en
-     * la base de datos la inmensa mayoría están vacíos por no haberse pedido nunca. Esconder por
-     * lista vacía dejaría casi todas las series sin un solo capítulo — el mismo error que cometió
-     * la migración 007 con las fichas, ahora a escala de episodio. Sin sello, el capítulo se
-     * anuncia y al abrirlo se resuelve.
+     * La regla era la contraria —se anunciaba salvo que constara comprobado y vacío— y se puso por
+     * miedo a vaciar el catálogo: los capítulos se resuelven al abrirlos, así que la mayoría están
+     * sin comprobar y esconderlos deja las series casi sin lista.
+     *
+     * Pero ese miedo protegía al catálogo, no al espectador. Con el 9% comprobado, «se anuncia
+     * salvo prueba en contra» significa que nueve de cada diez capítulos de la lista son una
+     * promesa sin respaldo, y el que pulsa uno se encuentra con que no hay nada. Lo reportó el
+     * usuario: desapareció el 1x1 de Trollhunters, que estaba comprobado, y el 2 seguía ahí sin
+     * funcionar porque nadie lo había mirado.
+     *
+     * Un catálogo más corto y cierto es mejor que uno largo que falla al pulsar. Lo que aún no se
+     * ha comprobado no se anuncia; en cuanto el barrido le encuentra vídeo, aparece.
      */
     if (Array.isArray(rest.seasons)) {
-      const anunciable = (e: any) => {
-        if (!Array.isArray(e?.servers)) return true;          // sin resolver: se anuncia
-        if (paraElCliente(e.servers).length > 0) return true; // hay algo que reproducir
-        return !e.checked_at;                                 // vacío: solo se esconde si se miró
-      };
+      const anunciable = (e: any) => paraElCliente(e?.servers).length > 0;
       rest.seasons = rest.seasons
         .map((s: any) => {
           if (!Array.isArray(s?.episodes)) return s;

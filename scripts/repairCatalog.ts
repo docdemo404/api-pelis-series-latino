@@ -2415,15 +2415,25 @@ async function checkEpisodes(apply: boolean, limitArg?: number): Promise<void> {
   /**
    * EL ORDEN DECIDE CUÁNTO TARDA EN NOTARSE, y con 90.000 pendientes eso pesa más que el ritmo.
    *
-   *   1. Series que HOY están en el catálogo. Comprobar los capítulos de una que nadie ve no
-   *      arregla nada visible.
-   *   2. A lo ANCHO antes que a lo hondo: el 1x1 de todas las series antes que el 1x2 de ninguna.
-   *      Resolver los 289 capítulos de «El Chapulín Colorado» antes de tocar el primero de las
-   *      otras mil deja mil series rotas para arreglar una. Nadie empieza una serie por el 5x12.
-   *   3. Y entre iguales, lo más viejo primero.
+   * Se hacía a lo ANCHO —el 1x1 de todas las series antes que el 1x2 de ninguna— y tenía sentido
+   * mientras un capítulo sin comprobar se seguía anunciando: repartir el primer capítulo daba algo
+   * a todas. Desde que solo se anuncia lo demostrado, eso mismo produce el peor resultado posible:
+   * mil series enseñando UN capítulo cada una, que es lo que un espectador lee como una app rota.
+   *
+   * Ahora se va a lo HONDO, serie por serie, y empezando por las que menos les falta. Una serie
+   * termina y aparece entera; la siguiente, después. Se prefiere que veinte series estén completas
+   * a que mil estén a medias, y arrancar por las cortas hace que las primeras lleguen en minutos.
+   *
+   * Las que HOY están en el catálogo van delante: comprobar las que nadie ve no arregla nada
+   * visible.
    */
+  const faltanPorSerie = new Map<string, number>();
+  for (const p of pendientes) faltanPorSerie.set(p.id, (faltanPorSerie.get(p.id) || 0) + 1);
   pendientes.sort((a, b) =>
-    (Number(b.visible) - Number(a.visible)) || (a.orden - b.orden) || (a.edad - b.edad)
+    (Number(b.visible) - Number(a.visible)) ||
+    ((faltanPorSerie.get(a.id) || 0) - (faltanPorSerie.get(b.id) || 0)) ||
+    (a.id < b.id ? -1 : a.id > b.id ? 1 : 0) ||   // no intercalar dos series con el mismo tamaño
+    (a.orden - b.orden)
   );
   const lista = pendientes.slice(0, tope);
   const visibles = pendientes.filter(p => p.visible).length;
