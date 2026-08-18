@@ -96,6 +96,22 @@ const MARCADOR_TIPO = /\s*\[(?:v[íi]deo\s+directo|embed)\]\s*$/i;
  */
 const VERIFICADO_VIGENTE_MS = 6 * 60 * 60 * 1000;
 
+/**
+ * Lo que cuesta ENTREGAR este servidor, del más barato al más caro. Menor es mejor.
+ *
+ * `public` y `redirect` no hacen pasar ni un byte por esta API. `manifest` solo las playlists,
+ * unos KB. `proxy` reenvía el vídeo entero.
+ */
+function costeDeEntrega(s: ServerOption): number {
+  switch (s?.direct_mode) {
+    case 'public': return 0;
+    case 'redirect': return 1;
+    case 'manifest': return 2;
+    case 'proxy': return 3;
+    default: return 2;   // sin declarar: ni lo mejor ni lo peor
+  }
+}
+
 /** ¿A este servidor se le ha descargado vídeo de verdad hace poco? */
 function verificadoVigente(s: ServerOption): boolean {
   if (!s?.verified_at) return false;
@@ -249,16 +265,33 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
     const verB = verificadoVigente(b);
     if (verA !== verB) return verA ? -1 : 1;
 
-    // 4. Prioridad de Fuente (1 primero, 2 después, 3 después...)
+    /**
+     * 4. ENTRE DOS QUE FUNCIONAN, EL QUE NO PASA POR AQUÍ.
+     *
+     * `direct_mode` no es decoración: dice por dónde viajan los bytes. Un `redirect` los manda del
+     * CDN al reproductor y esta API se aparta; un `proxy` los reenvía uno a uno desde Vercel, lo
+     * que añade un salto a cada segmento y se nota sobre todo al mover la barra, que es cuando el
+     * reproductor pide muchos trozos seguidos.
+     *
+     * Medido sobre el catálogo: 2.609 servidores publicados, el 65% en `proxy` — y ahí no hay nada
+     * que negociar, porque esos hosts atan la URL a la IP que la acuñó y un 302 le daría al cliente
+     * un 403. Lo que sí se puede es que, cuando una ficha tiene de los dos, se entregue primero el
+     * que va directo. No cambia lo que se puede ver; cambia lo que se tarda en verlo.
+     */
+    const costeA = costeDeEntrega(a);
+    const costeB = costeDeEntrega(b);
+    if (costeA !== costeB) return costeA - costeB;
+
+    // 5. Prioridad de Fuente (1 primero, 2 después, 3 después...)
     const prioA = priorityMap[getSourceId(a)] ?? 99;
     const prioB = priorityMap[getSourceId(b)] ?? 99;
     if (prioA !== prioB) return prioA - prioB;
 
-    // 5. Idioma Latino preferido
+    // 6. Idioma Latino preferido
     if (a.language === 'latino' && b.language !== 'latino') return -1;
     if (b.language === 'latino' && a.language !== 'latino') return 1;
 
-    // 6. Calidad más alta
+    // 7. Calidad más alta
     const scoreA = qualityScore[a.quality] || 0;
     const scoreB = qualityScore[b.quality] || 0;
     if (scoreA !== scoreB) return scoreB - scoreA;
