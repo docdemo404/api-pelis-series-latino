@@ -262,14 +262,32 @@ export async function comprobarDestino(
  */
 export async function comprobarEmbed(
   embedUrl: string,
-  opts: { limite?: number } = {}
+  opts: {
+    limite?: number;
+    /**
+     * Este servidor se va a entregar con un 302, así que hay que sondearlo COMO LO PEDIRÁ EL
+     * CLIENTE: sin Referer.
+     *
+     * El comentario de arriba dice que el catálogo nunca marca `entregaLiteral` porque no sabe qué
+     * cliente vendrá. Es cierto en general y falso en un caso concreto: cuando el modo resuelto es
+     * `redirect`, sí se sabe — el reproductor recibe la URL del CDN y la pide a pelo, sin Referer,
+     * porque nuestra `Referrer-Policy: no-referrer` se lo quita.
+     *
+     * Sondear eso con Referer mide a alguien que no existe. «Volver al Futuro 3» pasaba la
+     * comprobación y su archive.org devolvía 503 al reproductor.
+     */
+    entregaLiteral?: boolean;
+  } = {}
 ): Promise<Comprobacion & { sinVideo?: boolean; minted?: MintedStream }> {
   if (!embedUrl) return VIVO_DESCONOCIDO;
   const minted = await mintDirect(embedUrl);
   if (!minted) return { veredicto: 'desconocido', universal: false, sinVideo: true, motivo: 'sin-acunar' };
   // El acuñado viaja de vuelta porque es lo que permite RECONSTRUIR los campos de vídeo directo
   // de un servidor al que se le quitaron por darlo por muerto. Ver `resucitar`.
-  return { ...(await comprobarDestino(minted, { limite: opts.limite, embedUrl })), minted };
+  return {
+    ...(await comprobarDestino(minted, { limite: opts.limite, embedUrl, entregaLiteral: opts.entregaLiteral })),
+    minted,
+  };
 }
 
 /**
@@ -421,7 +439,12 @@ export async function revisarServidores(
       veredicto = await veredictoConocido(servidor.embed_url);
 
       if (!veredicto) {
-        const c = await conTope(comprobarEmbed(servidor.embed_url, { limite }), queda);
+        // Si a este servidor se le va a entregar con un 302, se le sondea como lo pedirá el
+        // reproductor: sin Referer. Ver `entregaLiteral` en comprobarEmbed.
+        const c = await conTope(
+          comprobarEmbed(servidor.embed_url, { limite, entregaLiteral: servidor.direct_mode === 'redirect' }),
+          queda
+        );
         veredicto = c.veredicto;
         sinVideo = Boolean('sinVideo' in c && c.sinVideo);
         if (c.veredicto === 'muerto') {
