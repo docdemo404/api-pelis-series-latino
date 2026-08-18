@@ -1952,8 +1952,25 @@ export class CatalogService {
     if (!q) return null;
     const cacheKey = this.cacheKeyFor(q, typeHint);
 
+    /**
+     * EL ATAJO NO VALE PARA UNA FICHA QUE NO TIENE NADA QUE ENTREGAR.
+     *
+     * Este caché guarda la ficha con sus enlaces una hora, y devolverla tal cual es lo correcto
+     * mientras haya algo que reproducir. Pero cuando la última resolución acabó sin un solo
+     * servidor entregable, guardar ESO y servirlo durante una hora hace justo lo contrario de lo
+     * que hace falta: cada petición contesta «no hay nada» sin volver a mirar y, sobre todo, sin
+     * llegar nunca al sitio donde se escribe el veredicto que la retiraría del catálogo. La ficha
+     * se queda anunciándose y contestando vacío, en bucle, hasta que caduque la entrada.
+     *
+     * Así que una copia guardada que no entrega nada se trata como si no estuviera: se resuelve de
+     * cero, se sondea, y con lo que se mida se decide. Cuesta una resolución completa la primera
+     * vez — y a cambio esa ficha deja de anunciarse, que es lo que se estaba pidiendo.
+     */
     const cached = await CacheStore.get<MediaItem>(`byid:${cacheKey}`);
-    if (cached && !opts.deep) return this.conSaludAlDia(cached);
+    if (cached && !opts.deep) {
+      const alDia = this.conSaludAlDia(cached);
+      if (paraElCliente(alDia.servers).length > 0 || this.hasEpisodeServers(alDia)) return alDia;
+    }
 
     const result = await this.getMetadata(q, typeHint);
     if (!result) return null;
