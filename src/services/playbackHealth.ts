@@ -438,12 +438,29 @@ export async function revisarServidores(
       // Acuñar falla pero el host sigue en pie: se le quita el enlace directo que no lleva a
       // ninguna parte y se deja como embed. Sigue siendo utilizable, así que cuenta como cabeza.
       salida[i] = sinVideoDirecto(servidor);
-    } else if (veredicto === 'vivo' && servidor.status !== 'online') {
-      // Y la vuelta atrás, que es tan importante como la condena: un servidor marcado offline
-      // hace semanas al que hoy se le ha descargado un segmento está vivo, y sin esto se
-      // quedaría enterrado para siempre porque la lista ordenada nunca lo volvería a poner
-      // arriba para comprobarlo.
-      salida[i] = { ...servidor, status: 'online', last_checked: new Date().toISOString() };
+    } else if (veredicto === 'vivo') {
+      /**
+       * ACABA DE DEMOSTRAR QUE ENTREGA VÍDEO: SE LE RENUEVA EL SELLO.
+       *
+       * `comprobarEmbed` baja el manifiesto y se descarga un segmento real — es exactamente lo que
+       * hace `--verificar`, solo que aquí ocurre en el momento de servir. No aprovecharlo era
+       * tirar la comprobación más valiosa que existe: la de ahora mismo.
+       *
+       * Y era lo que faltaba para que el sello signifique algo. Sin esto solo lo ponía el barrido,
+       * cada muchas horas, así que se publicaba lo verificado hace rato y no lo verificado hace un
+       * segundo: «Milagro en la Celda 7» salía con su único servidor sellado hacía 3 h, ya muerto,
+       * mientras sus otros cinco quedaban escondidos por no llevar sello.
+       *
+       * Esta rama es además la VUELTA ATRÁS, tan importante como la condena: un servidor marcado
+       * `offline` hace semanas al que hoy se le acaba de descargar un segmento está vivo, y aquí
+       * recupera su `status` y su sello de una vez.
+       */
+      salida[i] = {
+        ...servidor,
+        status: 'online',
+        verified_at: new Date().toISOString(),
+        last_checked: new Date().toISOString(),
+      };
     }
 
     if (hastaElPrimeroUtil) break;

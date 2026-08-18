@@ -85,11 +85,16 @@ const MARCADOR_TIPO = /\s*\[(?:v[íi]deo\s+directo|embed)\]\s*$/i;
 /**
  * Cuánto vale un sello de verificación antes de dejar de ser una prueba.
  *
- * `--verificar` da una vuelta completa al catálogo en varias pasadas, así que la ventana tiene que
- * ser más ancha que el tiempo que tarda esa vuelta; si no, lo verificado caducaría antes de que le
- * tocara turno otra vez y el sello no ordenaría nada.
+ * Eran 48 h, calculadas para que el sello sobreviviera a una vuelta completa del barrido. Pero un
+ * sello no es un turno de mantenimiento: es una promesa de que el vídeo está ahí, y estos hosts se
+ * pudren en horas. Medido: «Milagro en la Celda 7» y «Volver al Futuro 3» se verificaron y tres
+ * horas después daban 502 y 503 — y se seguían publicando porque el sello valía dos días.
+ *
+ * Seis horas. Y lo que hace viable acortarlo es que ahora el sello también se renueva al SERVIR:
+ * cada vez que alguien abre una ficha, `revisarServidores` comprueba la cabeza de la lista y la
+ * vuelve a sellar, así que lo que más se ve es lo que más fresco está.
  */
-const VERIFICADO_VIGENTE_MS = 48 * 60 * 60 * 1000;
+const VERIFICADO_VIGENTE_MS = 6 * 60 * 60 * 1000;
 
 /** ¿A este servidor se le ha descargado vídeo de verdad hace poco? */
 function verificadoVigente(s: ServerOption): boolean {
