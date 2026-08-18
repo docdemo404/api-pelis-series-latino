@@ -1564,7 +1564,9 @@ export class CatalogService {
       // SIN comprobar, conservando su `online` viejo. Manda el presupuesto de TIEMPO, que se queda
       // en 3 s para no castigar la apertura — y lo ya sabido sale del caché compartido sin gastar
       // sonda, así que la segunda vez que alguien abre este capítulo no se sondea nada.
-      { presupuestoMs: 3000, maximo: 6 }
+      // Mismo razonamiento que en las películas: quedarse a medias ya no entrega un servidor sin
+      // comprobar, deja el capítulo vacío. Se para en cuanto uno demuestra que reproduce.
+      { presupuestoMs: 8000, maximo: 8 }
     );
 
     /**
@@ -1997,9 +1999,27 @@ export class CatalogService {
      * primero: es la pasada que deja el veredicto escrito en la DB para todas las aperturas
      * siguientes, y la única que puede resucitar lo que se marcó caído y ha vuelto.
      */
+    /**
+     * EL PRESUPUESTO TIENE QUE ALCANZAR PARA ENCONTRAR UNO QUE SIRVA, no solo para mirar tres.
+     *
+     * Eran 4 s y 3 sondas, heredados de cuando entregar un servidor sin comprobar era aceptable
+     * —se publicaba igual y el cliente se las arreglaba—. Desde que solo sale lo que ha demostrado
+     * entregar vídeo, quedarse a medias ya no significa «se entrega sin verificar»: significa que
+     * la ficha sale VACÍA y desaparece del catálogo.
+     *
+     * Medido sobre «Milagro en la Celda 7» (6 servidores) y «Volver al Futuro 3» (8): el primero
+     * de la lista estaba muerto, y con tres sondas la pasada se quedaba sin encontrar ninguno de
+     * los que sí sirven. La película desaparecía teniendo cinco o siete servidores sin mirar.
+     *
+     * 9 s y hasta 8 sondas —por debajo del techo de la función, que no admite acercarse— y se
+     * PARA en cuanto uno demuestra que reproduce: en el caso normal
+     * —el primero funciona— sigue costando una sonda y no se nota. Solo se paga entero cuando la
+     * cabeza está muerta, que es justo cuando merece la pena pagarlo. Y se paga una vez: el
+     * resultado queda sellado y cacheado.
+     */
     const revisados = await revisarServidores(sortServersBySourcePriority(allServers), opts.deep
-      ? { presupuestoMs: 15000, maximo: 5, hastaElPrimeroUtil: false, resucitar: 2 }
-      : { presupuestoMs: 4000, maximo: 3 });
+      ? { presupuestoMs: 20000, maximo: 8, hastaElPrimeroUtil: false, resucitar: 2 }
+      : { presupuestoMs: 9000, maximo: 8 });
 
     result.servers = sortServersBySourcePriority(revisados);
     if (result.servers.length > 0) {
