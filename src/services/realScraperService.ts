@@ -5,9 +5,9 @@ import { SourceManager } from './sourceManager';
 import { TmdbService } from './tmdbService';
 import { USER_AGENT, httpClient } from '../utils/httpClient';
 import { inspectEmbed, getServerName } from '../scrapers/embedHealth';
-import { nombreConTipo } from './streamSorter';
+import { nombreConTipo, getPrimaryStream } from './streamSorter';
 import { extractDirect, describeDirect, deferredDirectFields, unwrapRedirector } from '../scrapers/directStream';
-import { yearFromSlug } from '../utils/text';
+import { yearFromSlug, slugify } from '../utils/text';
 
 const BASE_URL = 'https://tioplus.app';
 const UA = USER_AGENT;
@@ -152,7 +152,8 @@ const TRAILING_YEAR_RANGE = /\((\d{4})(?:\s*[-–—/]\s*(?:\d{4}|presente|actua
  */
 const ROTULOS_DE_EPISODIO: RegExp[] = [
   // "S01 E01", "s1e3"
-  /\bS\s*(\d{1,3})\s*E\s*(\d{1,3})\b/i,
+  // El separador es opcional: TioPlus rotula «S01 E01» y Cinecalidad «S1-E1».
+  /\bS\s*(\d{1,3})\s*[-_ ]?\s*E\s*(\d{1,3})\b/i,
   // "Temporada 1 Capítulo 1", "Season 2 Episode 7". El hueco se acota para que no empareje la
   // temporada de un título con el capítulo de otra frase tres líneas más allá.
   /\b(?:Temporada|Season)\s*(\d{1,3})[^\d]{0,40}?(?:Cap[ií]tulo|Episodio|Episode)\s*(\d{1,4})\b/i,
@@ -199,6 +200,53 @@ export function esDelEpisodio(
   const rotulo = rotuloDelEpisodio(titulo);
   if (!rotulo) return !opts.exigeRotulo;
   return rotulo.season === season && rotulo.episode === episode;
+}
+
+/**
+ * Las temporadas de una serie de Cinecalidad, leídas de su lista de episodios.
+ *
+ * El número real está en `.numerando` con la forma `S1-E1`, no en el texto del enlace —que es
+ * «Episodio 1» y se repite en todas las temporadas—. Fiarse del texto mezclaría el 1x1 con el 2x1,
+ * y servir un capítulo por otro es el fallo que no da error y solo nota quien mira.
+ *
+ * El enlace del episodio (`…/ver-el-episodio/<slug>-1x1/`) se guarda en el propio episodio: es de
+ * donde saldrán sus servidores cuando alguien lo abra, sin tener que adivinar la url.
+ */
+function cinecalidadTemporadas($: cheerio.CheerioAPI): any[] {
+  const porTemporada = new Map<number, any[]>();
+
+  $('ul.episodios li').each((_, el) => {
+    // El mismo reconocedor que valida los episodios en `esDelEpisodio`, no una copia suya: es
+    // el que ya sabe leer «S1-E1», «1x1» y «Temporada 1 Capítulo 1». Escribir aquí otra regex
+    // es cómo se acaba con dos criterios que se desincronizan.
+    const rotulo = rotuloDelEpisodio($(el).find('.numerando').first().text().trim());
+    if (!rotulo) return;
+    const { season, episode } = rotulo;
+    const enlace = $(el).find('.episodiotitle a').first().attr('href') || '';
+    const nombre = $(el).find('.episodiotitle a').first().text().trim() || `Episodio ${episode}`;
+    const still = $(el).find('img').first().attr('data-src') || null;
+
+    if (!porTemporada.has(season)) porTemporada.set(season, []);
+    porTemporada.get(season)!.push({
+      episode_number: episode,
+      name: nombre,
+      overview: '',
+      still_path: still,
+      air_date: null,
+      servers: [],
+      _source_url: enlace || undefined,
+    });
+  });
+
+  return Array.from(porTemporada.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([season_number, episodes]) => ({
+      season_number,
+      name: `Temporada ${season_number}`,
+      episodes_count: episodes.length,
+      poster: null,
+      episodes: episodes.sort((a: any, b: any) => a.episode_number - b.episode_number),
+    }));
 }
 
 /** Señales de una página de origen que el emparejado con TMDB necesita para no fallar. */
@@ -505,6 +553,11 @@ export class RealScraperService {
   static async scrapeDetail(tioplusUrl: string): Promise<MediaItem | null> {
     if (tioplusUrl.includes('fuegocine.com')) {
       return this.scrapeFuegocineDetail(tioplusUrl);
+    }
+
+    // Cinecalidad publica en varios dominios (.am, .ec, .rs…) con la misma plantilla dooplay.
+    if (/cinecalidad\./i.test(tioplusUrl)) {
+      return this.scrapeCinecalidadDetail(tioplusUrl);
     }
 
     // Evitar hacer peticiones con IDs numéricos directos a tioplus.app (TioPlus usa slugs de texto, no IDs de TMDB)
@@ -979,6 +1032,112 @@ export class RealScraperService {
     }
 
     return finalResults;
+  }
+
+  /**
+   * CINECALIDAD (cinecalidad.am) — tercera fuente.
+   *
+   * Se añade porque las dos anteriores dejaron media serie sin nada cuando murió la familia upns:
+   * un catálogo con dos fuentes no tiene a dónde caer. De sus cuatro reproductores, `vimeos.net` y
+   * `goodstream.one` YA se extraen y se ha comprobado que entregan vídeo desde el datacenter —que
+   * es la prueba que no se hizo con vidhideplus y costó 57.970 servidores inservibles—.
+   *
+   * Es el tema dooplay de WordPress, así que publica lo que hace falta y en sitios fijos:
+   *
+   *   tipo        la ruta: `/ver-pelicula/` frente a `/ver-serie/`
+   *   identidad   `image.tmdb.org/t/p/w342/…` — el hash señala UNA ficha de TMDB (FUENTES.md §1)
+   *   servidores  `<li data-option="https://host/…">`
+   *   episodios   `<ul class="episodios"> … <div class="numerando">S1-E1</div>`
+   *
+   * LO QUE NO PUBLICA ES EL AÑO, ni en la url ni en el cuerpo, y conviene saberlo: el año es lo
+   * que separa homónimos de distinta época («Sin salida» son cuatro películas). Lo compensa el
+   * hash de la imagen, que es una prueba MÁS fuerte —señala la ficha exacta— pero cuando una
+   * página no traiga imagen, esa ficha se quedará sin respaldo y caerá a metadata de la fuente con
+   * id sintético. Es la degradación prevista, no un fallo.
+   */
+  static async scrapeCinecalidadDetail(url: string): Promise<MediaItem | null> {
+    try {
+      const res = await httpGet(url);
+      const html = typeof res.data === 'string' ? res.data : '';
+      if (res.status >= 400 || !html) return null;
+      const $ = cheerio.load(html);
+
+      // El <h1> es el logotipo del sitio, así que el título sale del <title>, que trae siempre la
+      // misma envoltura: «Ver [Serie] X Online Gratis HD - Cinecalidad».
+      const title = ($('title').text() || '')
+        .replace(/^\s*Ver\s+(Serie\s+)?/i, '')
+        .replace(/\s*Online\s+Gratis.*$/i, '')
+        .trim();
+      if (!title) return null;
+
+      const esSerie = /\/ver-serie\//i.test(url);
+      // La carátula es la única `w342`: las `w185` son las miniaturas de «relacionadas» y de los
+      // episodios, y quedarse con una de ésas emparejaría la ficha con OTRA obra.
+      const poster = ($('img[data-src*="image.tmdb.org/t/p/w342"]').first().attr('data-src')
+        || $('img[src*="image.tmdb.org/t/p/w342"]').first().attr('src') || '').trim() || null;
+
+      const servers: ServerOption[] = [];
+      const opciones = $('li[data-option]').map((_, el) => $(el).attr('data-option') || '').get()
+        // El tráiler de YouTube viaja como una opción más y no es un servidor de la película.
+        .filter(u => u && !/youtube\.com|youtu\.be/i.test(u));
+
+      const vistos = await Promise.allSettled(opciones.slice(0, 6).map(async embedUrl => {
+        const { status, html: embedHtml } = await inspectEmbed(embedUrl);
+        const direct = await extractDirect(embedUrl, embedHtml);
+        return { embedUrl, status, direct };
+      }));
+
+      vistos.forEach((r, i) => {
+        if (r.status !== 'fulfilled' || !r.value?.embedUrl) return;
+        const { embedUrl, status, direct } = r.value;
+        // Igual que en las otras fuentes: a un embed recién declarado muerto no se le cuelga un
+        // vídeo directo, porque publicarlo muerto es peor que no publicarlo.
+        const directo = status === 'offline'
+          ? {}
+          : direct ? describeDirect(embedUrl, direct) : deferredDirectFields(embedUrl);
+        servers.push({
+          id: `srv_cc_${i + 1}`,
+          name: nombreConTipo(getServerName(embedUrl, ''), Boolean((directo as any).direct_stream)),
+          quality: direct?.quality || '1080p',
+          language: 'latino',
+          embed_url: embedUrl,
+          ...directo,
+          status,
+          last_checked: new Date().toISOString(),
+          source_id: 'cinecalidad',
+        });
+      });
+
+      const seasons = esSerie ? cinecalidadTemporadas($) : [];
+
+      return {
+        id: slugify(url.replace(/^https?:\/\/[^/]+/i, '')),
+        tmdb_id: 0,
+        imdb_id: null,
+        type: esSerie ? 'tvseries' : 'movie',
+        title,
+        original_title: title,
+        aliases: [],
+        overview: $('meta[name="description"]').attr('content')?.trim() || '',
+        rating: 0,
+        release_date: '',
+        genres: [],
+        subcategories: ['Cinecalidad'],
+        poster,
+        backdrop: null,
+        logo: null,
+        trailer: null,
+        cast: [],
+        dubbing_cast: [],
+        servers,
+        primary_stream: getPrimaryStream(servers),
+        seasons: seasons.length ? seasons : undefined,
+        total_seasons: seasons.length || undefined,
+        _source_url: url,
+      } as MediaItem;
+    } catch {
+      return null;
+    }
   }
 
   /**

@@ -202,6 +202,10 @@ export function candidateIdsForUrl(url: string): string[] {
  */
 export function tipoDeLaRuta(url: string): ContentType | null {
   if (/\/pelicula\//i.test(url)) return 'movie';
+  // Cinecalidad: `/ver-pelicula/` y `/ver-serie/`. Se comprueba ANTES que el patrón genérico de
+  // serie para que `/ver-pelicula/` no caiga en él por contener «pelicula».
+  if (/\/ver-pelicula\//i.test(url)) return 'movie';
+  if (/\/ver-serie\//i.test(url) || /\/ver-el-episodio\//i.test(url)) return 'tvseries';
   if (/\/(serie|anime|dorama)\//i.test(url)) return 'tvseries';
   return null;
 }
