@@ -13,6 +13,7 @@ import { inicioDelTs } from '../utils/segmentBytes';
 import { destinoSirveCors } from '../services/manifestHealth';
 import { comprobarDestino } from '../services/playbackHealth';
 import { externalProxyEnabled, proxyUrlFor } from '../utils/externalProxy';
+import { getSupabaseAdmin } from '../services/supabaseService';
 
 /**
  * Streaming: resolución de tokens dinámicos, proxy con soporte de Range
@@ -826,6 +827,66 @@ router.post('/api/v1/links/report', (req: Request, res: Response) => {
     status: 'success',
     message: `Enlace ${link_id || 'solicitado'} reportado con éxito. Se ha marcado para verificación.`
   });
+});
+
+/*
+ * Telemetria de reproduccion.
+ *
+ * ESTE ENDPOINT NO EXISTIA. La app lleva tiempo llamando a `POST /api/v1/report` —lo hace
+ * `PlaybackReporter` al agotar todas las fuentes de un titulo— y recibiendo un 404, que se traga
+ * en silencio para no molestar a quien esta viendo la pelicula. O sea que el unico aviso
+ * automatico del proyecto no llegaba a ninguna parte, y no habia forma de enterarse.
+ *
+ * Se acepta la forma vieja (`channel_id` + `reason`) y la nueva con las medidas, porque hay
+ * versiones de la app instaladas que solo saben mandar la primera.
+ *
+ * Devuelve 200 pase lo que pase, incluida la tabla sin crear: esto es telemetria, y ningun fallo
+ * al anotarla puede convertirse en un error que vea el espectador.
+ */
+router.post(['/api/v1/report', '/api/v1/playback/report'], async (req: Request, res: Response) => {
+  try {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+
+    const numero = (v: unknown): number | null => {
+      const n = typeof v === 'string' ? Number(v) : v;
+      return typeof n === 'number' && Number.isFinite(n) ? Math.round(n) : null;
+    };
+    const texto = (v: unknown): string | null => {
+      const t = typeof v === 'string' ? v.trim() : '';
+      return t ? t.slice(0, 200) : null;
+    };
+
+    const evento = {
+      item_id: texto(b.item_id) ?? texto(b.channel_id),
+      episode_id: texto(b.episode_id),
+      server_host: texto(b.server_host),
+      delivery_mode: texto(b.mode),
+      outcome: texto(b.outcome) ?? texto(b.reason) ?? 'unknown',
+      ttff_ms: numero(b.ttff_ms),
+      stalls: numero(b.stalls),
+      stalled_ms: numero(b.stalled_ms),
+      failovers: numero(b.failovers),
+      avg_height: numero(b.avg_height),
+      app_version: texto(b.app_version),
+    };
+
+    // Se registra siempre, tabla o no: en los registros de Vercel se puede buscar y agrupar, y
+    // eso ya es infinitamente mas de lo que habia.
+    console.log('[playback]', JSON.stringify(evento));
+
+    const { error } = await getSupabaseAdmin().from('playback_events').insert(evento);
+
+    // 42P01 es «la tabla no existe». Se distingue a proposito: significa que falta pegar la
+    // migracion, no que el aviso venga mal, y confundirlas mandaria a buscar el fallo en la app.
+    if (error && error.code !== '42P01') {
+      console.warn('[playback] no se pudo anotar:', error.message);
+    }
+
+    res.json({ status: 'success' });
+  } catch (err) {
+    console.warn('[playback] aviso descartado:', err instanceof Error ? err.message : err);
+    res.json({ status: 'success' });
+  }
 });
 
 export default router;
