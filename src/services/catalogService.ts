@@ -246,23 +246,32 @@ export class CatalogService {
   }
 
   /**
-   * Propaga los servidores a la jerarquía de episodios de una serie.
-   * Cada episodio usa sus PROPIOS servidores (reales, por episodio) si los tiene; si no,
-   * hereda los de nivel serie como fallback reproducible en la portada. Los enlaces reales
-   * por episodio se obtienen bajo demanda vía /series/:id/season/:s/episode/:e.
-   * Consolida la lógica antes duplicada en getById y la unificación de búsqueda.
+   * Ordena los servidores de cada episodio. UN EPISODIO NO HEREDA NADA.
+   *
+   * Esta función rellenaba con los servidores de nivel serie los episodios que no tenían los
+   * suyos, «como fallback reproducible en la portada». Es el fallo que FUENTES.md §4 llama el peor
+   * sin dar error: pides el capítulo 1 y ves otro. Los servidores de nivel serie salen de scrapear
+   * la página de la SERIE, cuyo reproductor muestra un capítulo concreto —normalmente el último—,
+   * así que los 289 episodios de «El Chapulín Colorado» anunciaban todos el mismo vídeo. Y como
+   * `persistStreams` escribe `seasons`, esos enlaces prestados acababan GUARDADOS como si fueran
+   * del capítulo 1, donde ya nada delata que no lo son.
+   *
+   * No da error en ninguna capa: el enlace existe, reproduce, y entrega la obra equivocada. Solo
+   * lo nota quien está mirando.
+   *
+   * La regla es la que ya estaba escrita en la documentación y no en el código: si no hay enlaces
+   * DEL capítulo, el capítulo va sin enlaces. Los suyos se piden a
+   * /series/:id/season/:s/episode/:e, que scrapea SU página y desde `persistEpisodeServers` los
+   * deja guardados.
    */
   private static inheritServersToEpisodes(item: MediaItem | null | undefined): void {
     if (!item || !item.seasons || item.seasons.length === 0) return;
-    const seriesLevel = sortServersBySourcePriority(item.servers || []);
     for (const season of item.seasons) {
       if (!season.episodes) continue;
       for (const ep of season.episodes) {
-        const own = ep.servers && ep.servers.length > 0 ? ep.servers : seriesLevel;
-        ep.servers = sortServersBySourcePriority(own);
-        if (ep.servers.length > 0) {
-          ep.primary_stream = getPrimaryStream(ep.servers);
-        }
+        if (!ep.servers || ep.servers.length === 0) continue;
+        ep.servers = sortServersBySourcePriority(ep.servers);
+        ep.primary_stream = getPrimaryStream(ep.servers);
       }
     }
   }
