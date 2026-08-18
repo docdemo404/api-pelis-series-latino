@@ -2,7 +2,7 @@ import { MediaItem, ServerOption, ContentType } from '../types';
 import { supabase, getSupabaseAdmin } from './supabaseService';
 import { RealScraperService } from './realScraperService';
 import { TmdbService } from './tmdbService';
-import { sortServersBySourcePriority, getPrimaryStream, paraElCliente, fichaReproducible } from './streamSorter';
+import { sortServersBySourcePriority, getPrimaryStream, paraElCliente, fichaReproducible, veredictoDisponibilidad } from './streamSorter';
 import { normalizeTitle, slugify, yearFromSlug } from '../utils/text';
 import { CacheStore } from '../cache/store';
 import { unwrapRedirector } from '../scrapers/directStream';
@@ -985,7 +985,7 @@ export class CatalogService {
    * único que autoriza a anotar un veredicto de disponibilidad: que un camino barato no
    * encuentre enlaces no significa que la ficha sea un fantasma.
    */
-  private static async persistStreams(item: MediaItem, verified: boolean = false): Promise<void> {
+  private static async persistStreams(item: MediaItem, verified: boolean = false, seMiroAlgo: boolean = true): Promise<void> {
     if (!item.id) return;
 
     const hasServers = this.hasPlayableDirectStream(item);
@@ -995,13 +995,14 @@ export class CatalogService {
       source_url: item._source_url || null,
       streams_updated_at: new Date().toISOString()
     };
-    if (verified) {
-      update.has_streams = hasServers;
-      update.streams_checked_at = new Date().toISOString();
-    } else if (item.has_streams === false) {
-      // La resolución acaba de terminar sin nada que entregar (ver el veredicto en `getStreams`).
-      // Sin esto el hallazgo se quedaba en memoria y la fila seguía anunciándose.
-      update.has_streams = false;
+    /**
+     * El veredicto lo decide `veredictoDisponibilidad`, no este sitio. `verified` dice si la
+     * resolución fue exhaustiva —o sea, cuánto derecho hay a concluir— y eso es lo único que
+     * aporta aquí. `undefined` significa «no se sabe»: la columna no se toca.
+     */
+    const veredicto = veredictoDisponibilidad(item as any, !seMiroAlgo ? 'nada' : verified ? 'todo' : 'parcial');
+    if (veredicto !== undefined) {
+      update.has_streams = veredicto;
       update.streams_checked_at = new Date().toISOString();
     }
     if (item._source_urls && item._source_urls.length > 0) {
@@ -1704,17 +1705,15 @@ export class CatalogService {
      * alguno sin mirar, no se toca: es el mismo tri-estado que usa `checked_at` por capítulo —
      * comprobado-y-vacío no es lo mismo que sin-comprobar— aplicado a la ficha.
      */
-    const episodios = seasons.flatMap((t: any) => t?.episodes || []);
-    const reproducible = this.hasPlayableDirectStream({ type: serie.type, servers: serie.servers, seasons } as MediaItem);
-    const todosComprobados = episodios.length > 0 && episodios.every((e: any) => e?.checked_at);
-
     const update: Record<string, unknown> = {
       seasons,
       streams_updated_at: new Date().toISOString(),
       streams_checked_at: new Date().toISOString(),
     };
-    if (reproducible) update.has_streams = true;
-    else if (todosComprobados) update.has_streams = false;
+    // Acabamos de mirar UN capítulo: alcance parcial. Es `veredictoDisponibilidad` quien sabe que
+    // con eso solo se puede concluir «sí», o «no» si ya no queda ninguno por comprobar.
+    const veredicto = veredictoDisponibilidad({ type: serie.type, servers: serie.servers, seasons } as any, 'parcial');
+    if (veredicto !== undefined) update.has_streams = veredicto;
 
     try {
       await getSupabaseAdmin()
@@ -2026,7 +2025,8 @@ export class CatalogService {
     }
 
     /**
-     * Y SI SE ACABA DE RESOLVER Y NO SALE NADA QUE ENTREGAR, LA FICHA DEJA DE ANUNCIARSE.
+     * NOTA: quien decide es `veredictoDisponibilidad` (ver persistStreams). Aquí solo se traduce
+     * lo que se ha llegado a mirar: sin haber podido visitar ni una fuente no se concluye nada.
      *
      * `has_streams` solo se actualizaba tras una resolución EXHAUSTIVA, y el camino normal no lo
      * es. Así quedaba la peor incoherencia posible: la columna decía que sí y la respuesta llegaba
@@ -2039,10 +2039,9 @@ export class CatalogService {
      * arregla solo — `--sin-directo` y `--series-ocultas` devuelven al catálogo lo que vuelva a
      * reproducir— mientras que equivocarse hacia «sí hay» se lo come el espectador.
      */
-    if (!veredictoFiable && knownSources.size > 0 && !this.hasPlayableDirectStream(result)) {
-      result.has_streams = false;
-      result.streams_checked_at = new Date().toISOString();
-    }
+    // Sin haber podido visitar ni una fuente no se concluye nada: se deja el veredicto como estaba
+    // y `persistStreams` no lo tocará. Ver `veredictoDisponibilidad`.
+    const seMiroAlgo = knownSources.size > 0;
 
     if (result.servers.length > 0 || (result.seasons && result.seasons.length > 0)) {
       await this.cacheItem('byid', cacheKey, result, CACHE_TTL_SECONDS);
@@ -2060,7 +2059,7 @@ export class CatalogService {
     // resultado negativo el que marca la ficha como fantasma, y sin guardarlo la API
     // repetiría la fusión multifuente completa en cada petición del mismo título.
     if (result.servers.length > 0 || exhaustive) {
-      void this.persistStreams(result, veredictoFiable).catch(() => {});
+      void this.persistStreams(result, veredictoFiable, seMiroAlgo).catch(() => {});
     }
 
     return result;

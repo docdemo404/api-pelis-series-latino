@@ -75,7 +75,7 @@ import { streamClient } from '../src/utils/httpClient';
 import { inspectEmbed } from '../src/scrapers/embedHealth';
 import { bestMode, policyFor } from '../src/scrapers/hostPolicy';
 import { sinVideoDirecto, comprobarEmbed } from '../src/services/playbackHealth';
-import { nombreConTipo, paraElCliente, fichaReproducible } from '../src/services/streamSorter';
+import { nombreConTipo, paraElCliente, fichaReproducible, veredictoDisponibilidad } from '../src/services/streamSorter';
 import { MediaItem, ContentType } from '../src/types';
 
 const db = getSupabaseAdmin();
@@ -2002,7 +2002,7 @@ async function purgeDeadServers(apply: boolean, limitArg?: number, soloHost?: st
         .from('media_items')
         // `despues.length > 0` decidía sobre una SERIE mirando solo lo que cuelga de la película,
         // y con un criterio que ya no era el de salida. Ver `fichaReproducible`.
-        .update({ servers: despues, has_streams: fichaReproducible({ type: row.type, servers: despues, seasons: row.seasons }) })
+        .update({ servers: despues, has_streams: veredictoDisponibilidad({ type: row.type, servers: despues, seasons: row.seasons }, 'todo') ?? row.has_streams })
         .eq('id', row.id);
       if (error) console.warn(`   ⚠ ${row.id}: ${error.message}`);
     }
@@ -2335,7 +2335,7 @@ async function hideRowsWithoutDirect(apply: boolean): Promise<void> {
    *
    * Duplicar un criterio es apostar a que nadie lo cambiará nunca. Ahora se llama a la fuente.
    */
-  const hayDirecto = (r: any) => fichaReproducible(r);
+  const hayDirecto = (r: any) => veredictoDisponibilidad(r, 'todo') === true;
 
   const conServidores = rows.filter(r => todosLosServidores(r).length > 0);
   const aEsconder = conServidores.filter(r => !hayDirecto(r) && r.has_streams !== false);
@@ -2681,7 +2681,7 @@ async function verifyPlayableServers(apply: boolean, limitArg?: number, soloHost
       row.servers = servers; row.seasons = seasons;   // que la siguiente tanda no lo repita
       if (!apply) continue;
       marcarTocada(row);
-      const reproducible = fichaReproducible({ type: row.type, servers, seasons });
+      const reproducible = veredictoDisponibilidad({ type: row.type, servers, seasons }, 'parcial') ?? row.has_streams;
       const { error } = await db.from('media_items')
         .update({ servers, seasons, has_streams: reproducible, streams_checked_at: sello })
         .eq('id', row.id);

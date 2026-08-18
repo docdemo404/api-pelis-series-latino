@@ -346,6 +346,59 @@ export function fichaReproducible(item: {
 }
 
 /**
+ * QUÉ VALOR LE TOCA A `has_streams`, decidido en UN SOLO SITIO.
+ *
+ * `fichaReproducible` unificó el CRITERIO —qué cuenta como reproducible— y con eso se acabaron las
+ * cinco copias que se habían desincronizado. Pero quedaba la otra mitad del problema, y es la que
+ * mordió cuatro veces en la misma sesión: **cuándo hay derecho a decidir**.
+ *
+ * Siete sitios escribían el veredicto, cada uno en un momento distinto y con distinta cantidad de
+ * información delante, y cada uno resolvía a su manera qué hacer cuando no encontraba nada. Los
+ * daños fueron siempre del mismo tipo:
+ *
+ *   · La migración 007 escondió ~700 series calculando sobre capítulos que nunca se habían
+ *     resuelto, porque un capítulo sin resolver y uno vacío se ven igual en la base de datos.
+ *   · `persistEpisodeServers` enterraba una serie entera en cuanto el PRIMER capítulo comprobado
+ *     salía vacío, con los otros veinticinco sin mirar: 789 series visibles cayeron a 534.
+ *   · `--servidores-muertos` decidía sobre una serie mirando solo los servidores de la película.
+ *
+ * Ninguno era un error de criterio. Los tres eran concluir sin haber medido.
+ *
+ * La regla, ahora escrita una vez: **encontrar algo reproducible basta para decir que sí; no
+ * encontrarlo solo basta para decir que no si de verdad se ha mirado todo lo que había que
+ * mirar.** Cuando no, se devuelve `undefined` y quien llame no toca la columna — que es muy
+ * distinto de escribir `false`.
+ */
+export type Disponibilidad = true | false | undefined;
+
+export function veredictoDisponibilidad(
+  item: {
+    type?: string | null;
+    servers?: ServerOption[] | null;
+    seasons?: Array<{ episodes?: Array<{ servers?: ServerOption[] | null; checked_at?: string }> | null }> | null;
+  },
+  /**
+   * Qué se ha llegado a mirar de verdad en esta pasada:
+   *   'todo'      se revisó la ficha entera (una purga completa, un recálculo sobre lo guardado).
+   *   'parcial'   se miró una parte (un capítulo suelto, una tanda del verificador).
+   *   'nada'      no se pudo preguntar a ninguna fuente: no se concluye NADA.
+   */
+  alcance: 'todo' | 'parcial' | 'nada'
+): Disponibilidad {
+  if (fichaReproducible(item)) return true;   // basta con encontrar uno
+  if (alcance === 'nada') return undefined;
+  if (alcance === 'todo') return false;
+
+  /**
+   * Parcial y sin nada: solo se concluye si la ficha está agotada, es decir, si no queda ningún
+   * capítulo por comprobar. Es lo que impide que el primer capítulo vacío entierre la serie.
+   */
+  const episodios = (item?.seasons || []).flatMap(t => t?.episodes || []);
+  if (episodios.length === 0) return undefined;
+  return episodios.every(e => e?.checked_at) ? false : undefined;
+}
+
+/**
  * Selecciona el mejor enlace (Primary Stream) usando el servidor #1 tras ordenar por prioridad.
  * El orden ya antepone lo que está online y, dentro de eso, lo que trae vídeo directo, así que
  * el primero online es también el que mejor reproduce.
