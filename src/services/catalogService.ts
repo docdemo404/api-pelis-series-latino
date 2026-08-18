@@ -1491,6 +1491,21 @@ export class CatalogService {
     const serie = await this.getMetadata(id, 'tvseries');
     if (!serie) return null;
 
+    /**
+     * UNA PELÍCULA NO TIENE CAPÍTULOS, y hasta ahora nadie lo comprobaba.
+     *
+     * Pedir `/media/<id-de-pelicula>/season/1/episode/6` entraba igual: se resolvía como si fuera
+     * una serie y `persistEpisodeServers` le ESCRIBÍA el árbol encima. Peor todavía, la temporada
+     * salía de pedirle a TMDB `tv/<tmdb_id>`, y TMDB numera películas y series por separado — así
+     * que devolvía los capítulos de otra obra distinta. Es la colisión entre catálogos que
+     * FUENTES.md §1 avisa que no da 404, da los datos de otra cosa.
+     *
+     * Resultado medido: 25 películas con árbol de capítulos, 10 de ellas anunciándose. La película
+     * «Inseparables» salía en la app con seis capítulos llamados «Uno, Dos… Seis», y el espectador
+     * veía botones para avanzar de capítulo en una película.
+     */
+    if (serie.type === 'movie') return null;
+
     // La ficha de la temporada da nombre, imagen y sinopsis del capítulo; los ENLACES, solo la
     // página del episodio o los que ya estuvieran guardados para ESE episodio.
     const deLaFicha = (serie.seasons || [])
@@ -1642,6 +1657,10 @@ export class CatalogService {
     servers: ServerOption[]
   ): Promise<void> {
     if (!serie?.id) return;
+    // Cinturón: quien escriba capítulos tiene que ser una serie. El camino de arriba ya lo filtra,
+    // pero esta función es la que dejó 25 películas con árbol de episodios y no puede volver a
+    // depender de que la llamen bien.
+    if (serie.type === 'movie') return;
 
     // Se parte de lo que ya tenga la ficha y se sustituye SOLO este episodio. Si la temporada o el
     // episodio no estaban, se crean: una serie recién descubierta no tiene árbol todavía.
