@@ -1788,10 +1788,33 @@ export class CatalogService {
     const result = await this.getMetadata(q, typeHint);
     if (!result) return null;
 
-    // A. Enlaces persistidos y frescos: nada que scrapear.
+    /**
+     * A. Enlaces persistidos y frescos: no hay que scrapear, PERO SÍ HAY QUE COMPROBAR.
+     *
+     * Aquí estaba el fondo del asunto, y costó tres despliegues verlo. La lista guardada se
+     * devolvía tal cual porque el sello decía que alguien había demostrado que funcionaba. Pero un
+     * sello es una promesa sobre el PASADO: «Milagro en la Celda 7» y «Volver al Futuro 3» tenían
+     * el suyo de hacía tres horas y sus enlaces daban 502 y 503 en ese momento. Acortar la ventana
+     * solo mueve el problema — el vídeo se puede caer en el minuto siguiente a sellarlo.
+     *
+     * Si la regla es que lo que se entrega funciona, lo que se entrega hay que comprobarlo al
+     * entregarlo. `revisarServidores` para en cuanto uno demuestra que reproduce y lo ya sabido
+     * sale del caché de salud sin gastar sonda, así que el caso normal —la cabeza funciona, o se
+     * comprobó hace nada— sigue costando prácticamente cero. Solo se paga cuando la cabeza ha
+     * muerto, que es exactamente cuando hay que enterarse.
+     *
+     * Lo comprobado se resella, se reordena y se persiste: la siguiente apertura ya sale barata.
+     */
     if (!opts.deep && this.hasFreshStreams(result)) {
+      const revisados = await revisarServidores(
+        sortServersBySourcePriority(aplicarVeredictosRecordados(result.servers || [])),
+        { presupuestoMs: 9000, maximo: 8 }
+      );
+      result.servers = sortServersBySourcePriority(revisados);
+      result.primary_stream = getPrimaryStream(result.servers);
+      void this.persistStreams(result, false, true).catch(() => {});
       await this.cacheItem('byid', cacheKey, result, CACHE_TTL_SECONDS);
-      return this.conSaludAlDia(result);
+      return result;
     }
 
     const allServers: ServerOption[] = [...(result.servers || [])];
