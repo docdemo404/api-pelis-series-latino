@@ -1640,6 +1640,23 @@ export class RealScraperService {
    * Scrapea el listado de películas, series o animes recorriendo páginas reales del índice.
    */
   static async scrapeLatest(type: 'peliculas' | 'series' | 'animes' = 'peliculas', limit = 20): Promise<MediaItem[]> {
+    /**
+     * TODAS LAS FUENTES, no solo TioPlus.
+     *
+     * Esta función es la puerta por la que el crawl descubre títulos, y estaba atada a un solo
+     * sitio. Añadir una fuente y no engancharla aquí la deja escrita pero muda: sabe leer una
+     * ficha y nadie le pasa nunca una url. Le pasó a Cinecalidad hasta que el usuario preguntó por
+     * qué no aparecía Breaking Bad —que esa fuente sí tiene— y resultó que el catálogo no la
+     * estaba recorriendo.
+     *
+     * Se piden en paralelo y lo de Cinecalidad va al final de la lista: no compite con lo de
+     * TioPlus, se suma. La deduplicación por id la hace quien recibe (`unifyItems`).
+     */
+    const deCinecalidad = this.scrapeCinecalidadLatest(
+      type === 'peliculas' ? 'movie' : 'tvseries',
+      Math.max(10, Math.floor(limit / 2))
+    ).catch(() => [] as MediaItem[]);
+
     const items: MediaItem[] = [];
     const seen = new Set<string>();
     const maxPages = Math.max(1, Math.ceil(limit / 10) + 2);
@@ -1717,6 +1734,21 @@ export class RealScraperService {
       }
     }
 
-    return items;
+    /**
+     * Y lo de Cinecalidad, con SITIO RESERVADO.
+     *
+     * La primera versión lo añadía solo si quedaba hueco bajo el `limit`, y como TioPlus llena el
+     * cupo por sí solo, la segunda fuente aportaba CERO: quedaba enganchada y seguía sin
+     * descubrirse ni un título suyo. Una fuente que solo entra cuando la otra falla no es una
+     * fuente, es un repuesto.
+     *
+     * Se le reserva un tercio del cupo. Si trae menos, lo que sobre se queda para la otra.
+     */
+    const extra = await deCinecalidad;
+    const vistos = new Set(items.map(x => x.id));
+    const nuevos = extra.filter(it => !vistos.has(it.id));
+    const reservado = Math.min(nuevos.length, Math.max(1, Math.ceil(limit / 3)));
+    const salida = items.slice(0, Math.max(0, limit - reservado)).concat(nuevos.slice(0, reservado));
+    return salida;
   }
 }
