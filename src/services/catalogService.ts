@@ -1001,6 +1001,45 @@ export class CatalogService {
   }
 
   /**
+   * ESCRIBE EN LA FILA Y COMPRUEBA QUE DE VERDAD SE HA ESCRITO.
+   *
+   * Un UPDATE de PostgREST contra una fila que RLS no deja tocar NO da error: contesta 204 y sin
+   * `error`, porque desde su punto de vista la consulta fue perfecta — simplemente no había
+   * ninguna fila que casara. Medido contra esta misma base con la clave anónima: `204 sin error`,
+   * y la fila intacta.
+   *
+   * Ese detalle es el que dejó al catálogo sin poder corregirse durante quién sabe cuánto. La API
+   * en producción no tiene `SUPABASE_SERVICE_ROLE_KEY` —solo la tienen los trabajos de GitHub—,
+   * así que `getSupabaseAdmin()` degrada a la clave anónima y TODAS las escrituras del camino de
+   * petición eran un no-op silencioso: los enlaces resueltos, los sellos de los capítulos y los
+   * veredictos de disponibilidad. El código creía que había escrito. Nadie podía enterarse.
+   *
+   * Pedir `select('id')` obliga a PostgREST a devolver las filas que ha tocado. Cero filas
+   * significa que no se escribió, y eso ya se puede decir en voz alta.
+   */
+  private static async escribirFila(update: Record<string, unknown>, id: string, etiqueta: string): Promise<boolean> {
+    try {
+      const { data, error } = await getSupabaseAdmin()
+        .from('media_items')
+        .update(update)
+        .eq('id', id)
+        .select('id');
+      if (error) {
+        console.warn(`[persist] ${etiqueta} ${id}: ${error.message}${error.code ? ` (${error.code})` : ''}`);
+        return false;
+      }
+      if (!data || data.length === 0) {
+        console.warn(`[persist] ${etiqueta} ${id}: 0 filas escritas — sin permiso de escritura (¿falta SUPABASE_SERVICE_ROLE_KEY?)`);
+        return false;
+      }
+      return true;
+    } catch (e) {
+      console.warn(`[persist] ${etiqueta} ${id}: ${e instanceof Error ? e.message : e}`);
+      return false;
+    }
+  }
+
+  /**
    * ESCRIBE EL VEREDICTO, Y SI ES EL QUE ESCONDE LA FICHA, ESPERA A QUE LLEGUE.
    *
    * `persistStreams` iba siempre lanzado y olvidado, y sobre Vercel eso significa muchas veces
@@ -1141,19 +1180,14 @@ export class CatalogService {
       update.source_urls = item._source_urls;
     }
 
-    try {
-      const { error } = await getSupabaseAdmin().from('media_items').update(update).eq('id', item.id);
-      if (!error) return;
-    } catch {}
+    if (await this.escribirFila(update, item.id, 'enlaces')) return;
 
     // Sin la migración 005 las columnas nuevas no existen y el update entero se rechaza:
     // se reintenta con el conjunto de campos de la 004 para no perder los enlaces.
-    try {
-      delete update.has_streams;
-      delete update.streams_checked_at;
-      delete update.source_urls;
-      await getSupabaseAdmin().from('media_items').update(update).eq('id', item.id);
-    } catch {}
+    delete update.has_streams;
+    delete update.streams_checked_at;
+    delete update.source_urls;
+    await this.escribirFila(update, item.id, 'enlaces (reintento 004)');
   }
 
   /** ¿Algún episodio de la serie tiene enlaces propios? (una serie se reproduce por episodio). */
@@ -1873,10 +1907,7 @@ export class CatalogService {
     if (veredicto !== undefined) update.has_streams = veredicto;
 
     try {
-      await getSupabaseAdmin()
-        .from('media_items')
-        .update(update)
-        .eq('id', serie.id);
+      await this.escribirFila(update, serie.id, 'capítulo');
 
       /**
        * Y SE TIRA EL DETALLE CACHEADO DE LA SERIE, porque acaba de cambiar su árbol de temporadas.
