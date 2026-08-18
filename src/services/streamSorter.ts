@@ -312,6 +312,31 @@ export function paraElCliente<T extends ServerOption>(servers: T[] | undefined |
 }
 
 /**
+ * ¿Esta ficha tiene algo que el cliente pueda reproducir?
+ *
+ * ÚNICA FUENTE DE VERDAD DE `has_streams`. No es una comodidad: es la respuesta a que ese valor se
+ * escribía desde cinco sitios con cinco criterios distintos, todos copias del de `paraElCliente`
+ * hechas en momentos distintos. Mientras el criterio no cambió, las copias coincidían y nadie lo
+ * notó; en cuanto `paraElCliente` empezó a exigir verificación, se separaron en silencio y el
+ * catálogo empezó a anunciar fichas que no podían enseñar ni un capítulo. Una de las copias
+ * —`despues.length > 0`, en la purga de servidores muertos— ni siquiera miraba los episodios, así
+ * que decidía sobre una serie mirando solo lo que cuelga de la película.
+ *
+ * Lo que se copia se desincroniza. Lo que se llama, no.
+ *
+ * Una película necesita un directo propio; una serie, uno en cualquiera de sus capítulos.
+ */
+export function fichaReproducible(item: {
+  servers?: ServerOption[] | null;
+  seasons?: Array<{ episodes?: Array<{ servers?: ServerOption[] | null }> | null }> | null;
+}): boolean {
+  if (paraElCliente(item?.servers).length > 0) return true;
+  return (item?.seasons || []).some(t =>
+    (t?.episodes || []).some(e => paraElCliente(e?.servers).length > 0)
+  );
+}
+
+/**
  * Selecciona el mejor enlace (Primary Stream) usando el servidor #1 tras ordenar por prioridad.
  * El orden ya antepone lo que está online y, dentro de eso, lo que trae vídeo directo, así que
  * el primero online es también el que mejor reproduce.

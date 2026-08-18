@@ -2,7 +2,7 @@ import { MediaItem, ServerOption, ContentType } from '../types';
 import { supabase, getSupabaseAdmin } from './supabaseService';
 import { RealScraperService } from './realScraperService';
 import { TmdbService } from './tmdbService';
-import { sortServersBySourcePriority, getPrimaryStream, paraElCliente } from './streamSorter';
+import { sortServersBySourcePriority, getPrimaryStream, paraElCliente, fichaReproducible } from './streamSorter';
 import { normalizeTitle, slugify, yearFromSlug } from '../utils/text';
 import { CacheStore } from '../cache/store';
 import { unwrapRedirector } from '../scrapers/directStream';
@@ -1001,9 +1001,9 @@ export class CatalogService {
     );
   }
 
-  /** Una película necesita un directo propio; una serie, uno en cualquiera de sus episodios. */
+  /** Delega en la única fuente de verdad. Ver `fichaReproducible` en streamSorter. */
   private static hasPlayableDirectStream(item: Pick<MediaItem, 'servers' | 'seasons'>): boolean {
-    return paraElCliente(item.servers).length > 0 || this.hasEpisodeServers(item as MediaItem);
+    return fichaReproducible(item as any);
   }
 
   /**

@@ -75,7 +75,7 @@ import { streamClient } from '../src/utils/httpClient';
 import { inspectEmbed } from '../src/scrapers/embedHealth';
 import { bestMode, policyFor } from '../src/scrapers/hostPolicy';
 import { sinVideoDirecto, comprobarEmbed } from '../src/services/playbackHealth';
-import { nombreConTipo, paraElCliente } from '../src/services/streamSorter';
+import { nombreConTipo, paraElCliente, fichaReproducible } from '../src/services/streamSorter';
 import { MediaItem, ContentType } from '../src/types';
 
 const db = getSupabaseAdmin();
@@ -1899,7 +1899,7 @@ function motivoAutorizaBorrar(motivo?: string): boolean {
 
 async function purgeDeadServers(apply: boolean, limitArg?: number, soloHost?: string): Promise<void> {
   console.log(`💀 Buscando servidores muertos${apply ? '' : ' (dry-run: no se escribe nada)'}...`);
-  const rows = (await fetchAllRows(['servers', 'has_streams'])).filter(r => (r.servers || []).length > 0);
+  const rows = (await fetchAllRows(['servers', 'seasons', 'has_streams'])).filter(r => (r.servers || []).length > 0);
   console.log(`   ${rows.length} fichas con servidores guardados`);
 
   const hostDe = (url: string) => {
@@ -2000,7 +2000,9 @@ async function purgeDeadServers(apply: boolean, limitArg?: number, soloHost?: st
       marcarTocada(row);
       const { error } = await db
         .from('media_items')
-        .update({ servers: despues, has_streams: despues.length > 0 })
+        // `despues.length > 0` decidía sobre una SERIE mirando solo lo que cuelga de la película,
+        // y con un criterio que ya no era el de salida. Ver `fichaReproducible`.
+        .update({ servers: despues, has_streams: fichaReproducible({ servers: despues, seasons: row.seasons }) })
         .eq('id', row.id);
       if (error) console.warn(`   ⚠ ${row.id}: ${error.message}`);
     }
@@ -2333,7 +2335,7 @@ async function hideRowsWithoutDirect(apply: boolean): Promise<void> {
    *
    * Duplicar un criterio es apostar a que nadie lo cambiará nunca. Ahora se llama a la fuente.
    */
-  const hayDirecto = (r: any) => paraElCliente(todosLosServidores(r)).length > 0;
+  const hayDirecto = (r: any) => fichaReproducible(r);
 
   const conServidores = rows.filter(r => todosLosServidores(r).length > 0);
   const aEsconder = conServidores.filter(r => !hayDirecto(r) && r.has_streams !== false);
@@ -2679,8 +2681,7 @@ async function verifyPlayableServers(apply: boolean, limitArg?: number, soloHost
       row.servers = servers; row.seasons = seasons;   // que la siguiente tanda no lo repita
       if (!apply) continue;
       marcarTocada(row);
-      const reproducible = [...servers, ...seasons.flatMap((t: any) => (t.episodes || []).flatMap((e: any) => e.servers || []))]
-        .some((s: any) => s?.direct_stream && s.status !== 'offline');
+      const reproducible = fichaReproducible({ servers, seasons });
       const { error } = await db.from('media_items')
         .update({ servers, seasons, has_streams: reproducible, streams_checked_at: sello })
         .eq('id', row.id);
