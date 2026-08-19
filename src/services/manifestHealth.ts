@@ -389,15 +389,30 @@ export async function revisarManifiesto(
 const pareceVideo = bytesReproducibles;
 
 /**
- * Baja hasta un SEGMENTO de verdad y comprueba que se puede descargar.
+ * Baja hasta SEGMENTOS de verdad y comprueba que se pueden descargar.
  *
  * Es el escalón que faltaba. Comprobar el maestro y sus variantes deja fuera el fallo más
  * frecuente de todos —la playlist está perfecta y los segmentos dan 404 o 403—, y ese fallo llega
  * al cliente de la peor manera: la API contesta 200, el reproductor arranca, y la reproducción se
  * cae cuando ya nadie va a intentar otro servidor.
  *
- * Se pide solo el primer kilobyte con `Range`, así que cuesta lo que una cabecera aunque el
- * segmento pese megabytes. Y se hace UNA vez por acuñado, porque el veredicto se cachea.
+ * UNO NO BASTA, Y ESO SE APRENDIÓ MIRANDO. Con un solo segmento se sellaron servidores que el
+ * espectador veía morir a los pocos segundos: «El show de Truman» cargaba el maestro y la
+ * variante —por eso salía la duración— y reventaba al pedir vídeo. El primer segmento es el más
+ * fácil de servir: suele estar caliente en el borde del CDN. Los SIGUIENTES son los que
+ * demuestran que el host aguanta, y son justo los que el reproductor va a pedir a continuación.
+ *
+ * Por eso `cuantos`, y CONSECUTIVOS, que es como los pide el reproductor. Un host que sirve el
+ * primero y falla el segundo es exactamente el que rompe la reproducción a los diez segundos.
+ *
+ * SIGUE COSTANDO POCO: de cada segmento se piden 8 KB con `Range`, no el fichero entero, así que
+ * tres segmentos son 24 KB aunque pesen megabytes. Lo que crece es el número de peticiones —dos
+ * más—, y por eso el camino de REPRODUCCIÓN se queda en uno: allí hay alguien esperando. Quien
+ * sube la exigencia es el barrido, que puede permitirse los segundos.
+ *
+ * NO SE CONDENA POR LENTITUD, a propósito. Este proyecto ya tumbó su catálogo entero con una
+ * regla que daba por muerto lo que tardara más de 12 s, y resulta que `goodstream` tarda 26 y
+ * reproduce. Aquí decide el 404, no el cronómetro.
  *
  * Devuelve `true` también cuando no hay nada que comprobar (un manifiesto sin segmentos a la
  * vista): lo que no se ha podido medir no se condena.
@@ -405,32 +420,57 @@ const pareceVideo = bytesReproducibles;
 export async function segmentoDescargable(
   manifiesto: string,
   urlBase: string,
-  referer: string
+  referer: string,
+  opts: { cuantos?: number; limite?: number } = {}
 ): Promise<boolean> {
   const uris = manifiesto.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('#'));
   if (!uris.length) return true;
 
-  let objetivo: string;
+  let lista = uris;
+  let base = urlBase;
+
+  // Si el primer nivel es otra playlist, se baja un escalón más para llegar a los segmentos.
+  let primero: string;
   try {
-    objetivo = new URL(uris[0], urlBase).toString();
+    primero = new URL(uris[0], urlBase).toString();
   } catch {
     return true;
   }
-
-  // Si el primer nivel es otra playlist, se baja un escalón más para llegar al segmento.
-  if (/\.m3u8(\?|$)/i.test(objetivo)) {
-    const variante = await bajarManifiesto(objetivo, referer);
+  if (/\.m3u8(\?|$)/i.test(primero)) {
+    const variante = await bajarManifiesto(primero, referer);
     if (!variante) return true;
     const hijos = variante.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('#'));
     if (!hijos.length) return true;
     try {
-      objetivo = new URL(hijos[0], objetivo).toString();
+      if (/\.m3u8(\?|$)/i.test(new URL(hijos[0], primero).toString())) return true; // tres niveles
     } catch {
       return true;
     }
-    if (/\.m3u8(\?|$)/i.test(objetivo)) return true; // tres niveles: se deja pasar
+    lista = hijos;
+    base = primero;
   }
 
+  const cuantos = Math.max(1, Math.min(opts.cuantos ?? 1, lista.length));
+  for (let i = 0; i < cuantos; i++) {
+    /**
+     * El presupuesto manda sobre la exigencia, y esto no es una concesión: quedarse sin tiempo NO
+     * es un suspenso. Lo ya demostrado vale y lo que no dio tiempo a mirar se deja pasar — la
+     * misma regla de toda esta casa, no condenar lo que no se ha podido medir.
+     */
+    if (opts.limite && Date.now() > opts.limite) return true;
+    let objetivo: string;
+    try {
+      objetivo = new URL(lista[i], base).toString();
+    } catch {
+      continue;
+    }
+    if (!(await unSegmentoDescargable(objetivo, referer))) return false;
+  }
+  return true;
+}
+
+/** Un segmento suelto: se pide su cabecera y se comprueba que lo que llega es vídeo. */
+async function unSegmentoDescargable(objetivo: string, referer: string): Promise<boolean> {
   try {
     const res = await streamClient.get(objetivo, {
       // 8 KB, no 1. Con 1 KB no cabía la comprobación del disfraz: el MPEG-TS de emturbovid

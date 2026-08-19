@@ -2780,7 +2780,17 @@ async function verifyPlayableServers(apply: boolean, limitArg?: number, soloHost
   for (let i = 0; i < lista.length; i += CONCURRENCIA) {
     await Promise.all(lista.slice(i, i + CONCURRENCIA).map(async url => {
       try {
-        const c = await comprobarEmbed(url, { limite: Date.now() + 30000 });
+        /**
+         * TRES SEGMENTOS CONSECUTIVOS, no uno. El barrido es quien pone el sello, y un sello
+         * puesto sobre un solo segmento sellaba hosts que el espectador veía morir enseguida:
+         * el primero suele estar caliente en el borde del CDN y se sirve solo. Aquí sí se puede
+         * pagar —son dos peticiones más de 8 KB— porque no hay nadie esperando delante.
+         *
+         * El presupuesto sube de 30 a 40 s para que quepan: quedarse sin tiempo no suspende a
+         * nadie (`segmentoDescargable` deja pasar lo que no le dio tiempo a mirar), pero sí
+         * desaprovecha la comprobación.
+         */
+        const c = await comprobarEmbed(url, { limite: Date.now() + 40000, segmentosExigidos: 3 });
         if (c.veredicto === 'vivo') { veredictos.set(url, 'vivo'); vivos++; }
         else if (c.veredicto === 'muerto' && c.universal) { veredictos.set(url, 'muerto'); muertos++; }
         else dudosos++;

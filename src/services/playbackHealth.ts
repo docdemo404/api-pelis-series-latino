@@ -173,6 +173,12 @@ export async function comprobarDestino(
     limite?: number;
     /** Embed del que salió: si se pasa, el veredicto universal queda anotado para el catálogo. */
     embedUrl?: string;
+    /**
+     * Cuántos segmentos CONSECUTIVOS tiene que entregar para aprobar. Uno por defecto, que es lo
+     * que aguanta el camino de reproducción; el barrido pide tres, que es donde se caza al host
+     * que sirve el primero —caliente en el borde del CDN— y falla el segundo.
+     */
+    segmentosExigidos?: number;
   } = {}
 ): Promise<Comprobacion> {
   const entregaLiteral = Boolean(opts.entregaLiteral);
@@ -263,7 +269,10 @@ export async function comprobarDestino(
   // Y la prueba de fuego: que un segmento de verdad se deje descargar. Sin esto se cuela el
   // fallo más común —playlist impecable, segmentos en 404— que además es el que peor llega al
   // cliente: la API dice 200, el reproductor arranca y se cae cuando ya nadie prueba otra cosa.
-  if (hayTiempo() && !(await segmentoDescargable(estado.cuerpo, minted.url, minted.referer))) {
+  if (hayTiempo() && !(await segmentoDescargable(estado.cuerpo, minted.url, minted.referer, {
+    cuantos: opts.segmentosExigidos ?? 1,
+    limite,
+  }))) {
     return guardar(muerto('segmentos-no-descargables'));
   }
 
@@ -309,6 +318,8 @@ export async function comprobarEmbed(
      * comprobación y su archive.org devolvía 503 al reproductor.
      */
     entregaLiteral?: boolean;
+    /** Cuántos segmentos consecutivos se exigen. Ver `comprobarDestino`. */
+    segmentosExigidos?: number;
   } = {}
 ): Promise<Comprobacion & { sinVideo?: boolean; minted?: MintedStream }> {
   if (!embedUrl) return VIVO_DESCONOCIDO;
@@ -317,7 +328,12 @@ export async function comprobarEmbed(
   // El acuñado viaja de vuelta porque es lo que permite RECONSTRUIR los campos de vídeo directo
   // de un servidor al que se le quitaron por darlo por muerto. Ver `resucitar`.
   return {
-    ...(await comprobarDestino(minted, { limite: opts.limite, embedUrl, entregaLiteral: opts.entregaLiteral })),
+    ...(await comprobarDestino(minted, {
+      limite: opts.limite,
+      embedUrl,
+      entregaLiteral: opts.entregaLiteral,
+      segmentosExigidos: opts.segmentosExigidos,
+    })),
     minted,
   };
 }
