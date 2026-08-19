@@ -69,7 +69,7 @@ import { getSupabaseAdmin } from '../src/services/supabaseService';
 import { canonicalTitle, normalizeTitle, searchIndexKey, dedupeTitles, sourceTitleFromSlug, slugify } from '../src/utils/text';
 // La puerta de identidad de las fuentes vive en catalogService: el script y la API tienen que
 // decidir lo MISMO sobre qué página pertenece a qué ficha.
-import { CatalogService, esPaginaPropia, candidateIdsForUrl, tipoDeLaRuta } from '../src/services/catalogService';
+import { CatalogService, esPaginaPropia, candidateIdsForUrl, tipoDeLaRuta, duenoDeLaPagina } from '../src/services/catalogService';
 import { CacheStore } from '../src/cache/store';
 import { streamClient } from '../src/utils/httpClient';
 import { inspectEmbed } from '../src/scrapers/embedHealth';
@@ -1595,8 +1595,7 @@ async function purgeIntruderSources(apply: boolean, limitArg?: number): Promise<
 
   // Índice de "quién es el dueño de cada página", para la llave 0 (ver más abajo).
   const byId = new Map<string, any>(rows.map(r => [String(r.id), r]));
-  const ownerOf = (url: string): any =>
-    candidateIdsForUrl(url).map(c => byId.get(c)).find(Boolean);
+  const ownerOf = (url: string): any => duenoDeLaPagina(url, byId);
 
   // Se revisa toda ficha con alguna fuente que NO sea su propia página. Suele ser una fusión
   // legítima (la misma película en las dos fuentes), pero es el único sitio donde puede haberse

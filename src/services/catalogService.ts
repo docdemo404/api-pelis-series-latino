@@ -230,6 +230,44 @@ export function esPaginaPropia(id: string | undefined, url: string, type?: Conte
   return !type || !tipoUrl || tipoUrl === type;
 }
 
+/**
+ * ¿De qué ficha del catálogo es ESTA página? — la llave más fuerte de FUENTES.md §1.
+ *
+ * Que el slug de una url case con el id de otra fila, y esa fila tenga otro `tmdb_id`, es la
+ * prueba definitiva de que la página no es tuya, y sale gratis: no hay que visitarla. Es además
+ * la única que separa homónimos del MISMO año.
+ *
+ * POR QUÉ NO BASTA CON BUSCAR EL ID EN EL MAPA. `candidateIdsForUrl` devuelve varios moldes, y
+ * el primero es el último segmento pelado —`sakamoto-days`—, que es justo la forma que usan los
+ * ids de TioPlus. Así que la página de Cinecalidad `/ver-pelicula/sakamoto-days/` encontraba como
+ * «dueña» a la ficha de TioPlus `sakamoto-days`, que es OTRA obra: la serie de 2025, no la
+ * película de 2026. Medido el 2026-08-19: los tres únicos cruces que denunciaba la auditoría del
+ * crawl eran de esta clase —Sakamoto Days, Gintama y «Una historia real»—, cada ficha con UNA
+ * sola fuente y esa fuente siendo su propia página. Ninguna servía contenido ajeno.
+ *
+ * No era inofensivo: ponía en rojo la corrida diaria del crawl, y un trabajo que siempre falla
+ * deja de avisar de nada. Y crece con el catálogo — cualquier título que exista en dos webs con
+ * el mismo slug cae aquí.
+ *
+ * La condición correcta es la simétrica de `esPaginaPropia`: alguien es dueño de una url solo si
+ * esa url es SU propia página, con la clase de la ruta incluida (`/ver-pelicula/` frente a
+ * `/ver-serie/`). Eso conserva entera la detección de verdad —si una fila apunta a la página de
+ * otra, esa otra sigue reconociéndola como suya— y descarta la coincidencia de nombre.
+ *
+ * Vive aquí, y no copiada en la auditoría y en la purga, porque justo eso es lo que hizo que
+ * `checkCatalog` denunciara tres fichas que `repairCatalog --fuentes` se negaba a tocar: dos
+ * respuestas distintas a la misma pregunta.
+ */
+export function duenoDeLaPagina<T extends { id: string; type?: string | null }>(
+  url: string,
+  porId: Map<string, T>
+): T | undefined {
+  return candidateIdsForUrl(url)
+    .map(c => porId.get(c))
+    .find((r): r is T =>
+      !!r && esPaginaPropia(r.id, url, r.type === 'tvseries' ? 'tvseries' : 'movie'));
+}
+
 export class CatalogService {
   private static dedupeById(items: MediaItem[]): MediaItem[] {
     const seen = new Set<string>();

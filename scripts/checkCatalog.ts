@@ -12,7 +12,7 @@
  */
 import 'dotenv/config';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
-import { candidateIdsForUrl } from '../src/services/catalogService';
+import { duenoDeLaPagina } from '../src/services/catalogService';
 import { TmdbService, tmdbImagePath } from '../src/services/tmdbService';
 import { RealScraperService } from '../src/services/realScraperService';
 import { ContentType } from '../src/types';
@@ -62,10 +62,10 @@ async function auditCrossedContent(): Promise<{ cruzadas: number; ejemplos: stri
 
   const byId = new Map<string, any>(rows.map(r => [String(r.id), r]));
 
-  // Los moldes con los que cada fuente forma el id de su fila viven en catalogService, para que
-  // la auditoría y las purgas no puedan discrepar sobre quién es el dueño de una página.
-  const ownerOf = (url: string): any =>
-    candidateIdsForUrl(url).map(c => byId.get(c)).find(Boolean);
+  // Quién es el dueño de una página lo decide catalogService, para que la auditoría y las purgas
+  // no puedan discrepar — que es exactamente lo que pasaba mientras cada una lo resolvía a su
+  // manera: esto denunciaba tres cruces que `--fuentes` se negaba a tocar, y tenía razón la purga.
+  const ownerOf = (url: string): any => duenoDeLaPagina(url, byId);
 
   let cruzadas = 0;
   const ejemplos: string[] = [];
