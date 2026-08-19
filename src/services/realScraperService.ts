@@ -1228,13 +1228,29 @@ export class RealScraperService {
    * Sus archivos son `/ver-pelicula/` y `/ver-serie/`, y pagina con `/page/N/`. Se para en cuanto
    * una página no aporta nada nuevo: seguir pidiendo páginas vacías es lo que convertía un crawl en
    * una hora de peticiones inútiles.
+   *
+   * EL TOPE SALE DEL `limit`, NO DE UN 6 ESCRITO AQUÍ.
+   *
+   * Había un `page <= 6` fijo, y eso contradecía en silencio al único que llama a esto de verdad:
+   * el crawl completo pide 10.000 títulos y se llevaba 96. Medido contra el sitio el 2026-08-19,
+   * `/ver-serie/` pagina de verdad hasta la 99 —cada página trae 16 tarjetas distintas y la 100
+   * responde 404—, o sea unas 1.580 series, de las que el catálogo estaba leyendo el 6 %. Es el
+   * mismo fallo que tuvo TioPlus con `/page/2`: un límite escrito a mano que convierte una fuente
+   * viva en una portada.
+   *
+   * Y no hace falta más guarda que la que ya había, porque está probada: `/ver-pelicula/` NO
+   * pagina —devuelve las mismas 16 tarjetas en la página 2 y en la 200—, y ahí el corte por
+   * «ninguna nueva» para en la segunda petición. Lo que se quita es el techo, no el freno.
    */
   static async scrapeCinecalidadLatest(tipo: 'movie' | 'tvseries', limit = 20): Promise<MediaItem[]> {
     const archivo = tipo === 'tvseries' ? 'ver-serie' : 'ver-pelicula';
     const items: MediaItem[] = [];
     const vistos = new Set<string>();
 
-    for (let page = 1; items.length < limit && page <= 6; page++) {
+    // 16 tarjetas por página (medido), +2 de margen para que el corte lo dé el sitio y no la cuenta.
+    const maxPaginas = Math.max(2, Math.ceil(limit / 16) + 2);
+
+    for (let page = 1; items.length < limit && page <= maxPaginas; page++) {
       const url = page === 1
         ? `${CINECALIDAD_BASE}/${archivo}/`
         : `${CINECALIDAD_BASE}/${archivo}/page/${page}/`;

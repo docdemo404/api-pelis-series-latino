@@ -872,9 +872,27 @@ export function canExtractWithoutFetch(embedUrl: string): boolean {
  *
  * Hay que AÑADIR aquí cualquier host cuyo extractor se escriba en el futuro. Es la diferencia
  * entre que el arreglo alcance a las 14 000 fichas viejas o solo a las nuevas.
+ *
+ * Y HAY QUE DESCONTAR LOS QUE LA POLÍTICA NO DEJA PUBLICAR, que es la mitad que faltaba.
+ *
+ * Tener extractor escrito no es lo mismo que poder entregar el vídeo. La familia upns está en la
+ * lista de abajo —su descifrado AES sigue funcionando— y a la vez marcada `noSePuedeServirDirecto`
+ * desde que dejó de servir vídeo, así que `deferredDirectFields` no le pone `direct_stream` por
+ * mucho que se la vuelva a mirar. Resultado: esas fichas nunca dejaban de ser candidatas y volvían
+ * a la cabeza de la cola en cada corrida, para siempre.
+ *
+ * Lo que costaba, medido el 2026-08-19 sobre las 40 primeras de la cola por el camino de
+ * producción: 1 acierto. El registro era una lista de `pelisplus.upns.pro embed caído`. Con 900
+ * fichas por corrida y tres corridas al día, ese hueco es todo el caudal de extracción que tiene
+ * el catálogo, y se estaba yendo en repasar hosts apagados.
+ *
+ * Un host solo desaparece de aquí mientras esté apagado: el día que vuelva a servir vídeo se le
+ * quita la marca en hostPolicy y sus fichas vuelven a entrar solas, sin tocar esta función.
  */
 export function mereceRepasoDeExtraccion(embedUrl: string): boolean {
   if (!embedUrl) return false;
+  // Si no se puede servir, extraerlo no cambia nada: la ficha saldría igual de muda.
+  if (policyFor(embedUrl).noSePuedeServirDirecto) return false;
   if (canExtractWithoutFetch(embedUrl)) return true;
 
   // Envoltorio con otro embed dentro: el salto anidado puede resolverlo.
