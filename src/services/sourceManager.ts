@@ -26,15 +26,35 @@ let currentSources: SourceConfig[] = [...DEFAULT_SOURCES];
  */
 function fusionarConLosPorDefecto(guardadas: SourceConfig[]): SourceConfig[] {
   const porId = new Map(guardadas.map(s => [s.id, s]));
-  const fusionadas = DEFAULT_SOURCES.map(porDefecto => {
+  const fusionadas = DEFAULT_SOURCES.map((porDefecto, orden) => {
     const guardada = porId.get(porDefecto.id);
     porId.delete(porDefecto.id);
-    return guardada
-      ? { ...porDefecto, enabled: guardada.enabled, priority: guardada.priority }
-      : { ...porDefecto };
+    return {
+      fuente: guardada
+        ? { ...porDefecto, enabled: guardada.enabled, priority: guardada.priority }
+        : { ...porDefecto },
+      orden,
+    };
   });
   // Y las que solo estén en el almacén (alguien las añadió por el panel) se conservan.
-  return [...fusionadas, ...porId.values()];
+  const extras = Array.from(porId.values()).map((fuente, i) => ({ fuente, orden: DEFAULT_SOURCES.length + i }));
+
+  /**
+   * Y SE RENUMERAN, para que no queden dos fuentes con la misma prioridad.
+   *
+   * Una fuente nueva llega con la prioridad que le puso el código y las guardadas con la suya, así
+   * que se pisan: al añadir Cinecalidad, producción quedó con `cinecalidad: 1` y `tioplus: 1` a la
+   * vez. No rompe el orden de la lista —el desempate es el orden de `DEFAULT_SOURCES`— pero sí
+   * empata el mapa de `sortServersBySourcePriority`, que es quien decide qué servidor intenta
+   * primero el cliente. Un empate ahí deja la decisión al azar del resto de criterios.
+   *
+   * Renumerar 1..n conserva el orden RELATIVO que el usuario guardó desde el panel y solo mete a
+   * la nueva en su sitio, que es exactamente lo que se quiere: nadie pierde su configuración y la
+   * fuente añadida ocupa el lugar que el código pedía.
+   */
+  return [...fusionadas, ...extras]
+    .sort((a, b) => (a.fuente.priority - b.fuente.priority) || (a.orden - b.orden))
+    .map(({ fuente }, i) => ({ ...fuente, priority: i + 1 }));
 }
 
 export class SourceManager {
