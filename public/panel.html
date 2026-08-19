@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="es" data-bs-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -31,6 +31,57 @@
       border-radius: 20px;
       box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
     }
+    /*
+     * Las etiquetas apagadas se fijan aquí y no se dejan al tema de Bootstrap.
+     * `data-bs-theme="dark"` ya arregla `.text-secondary` (antes salía del tema CLARO, o sea gris
+     * oscuro sobre fondo oscuro), pero el valor que trae sigue siendo bajo para texto pequeño.
+     * #94a3b8 sobre el fondo de estas tarjetas da un contraste de ~7:1, muy por encima del 4,5:1
+     * que pide AA — y estas etiquetas son justamente lo que hay que leer para entender el número
+     * que tienen al lado.
+     */
+    .text-secondary { color: #94a3b8 !important; }
+
+    /*
+     * El azul de marca de Bootstrap (#0d6efd) sobre este fondo se queda por debajo del 4,5:1 que
+     * pide AA. El tono «emphasis» del tema oscuro (#6ea8fe) lo sube sin cambiar el color de marca.
+     */
+    .text-primary { color: #6ea8fe !important; }
+
+    /*
+     * `bg-opacity-20` y `border-opacity-30` NO EXISTEN en Bootstrap — solo hay 10, 25, 50, 75 y
+     * 100—, así que la insignia de la cabecera se quedaba con `bg-primary` a opacidad 1: azul
+     * SÓLIDO con texto del mismo azul encima, o sea invisible (contraste 1,0). Se leía por el
+     * borde y poco más.
+     *
+     * Se definen aquí en vez de cambiar las clases del HTML porque la intención del autor era
+     * clara —una pastilla azul translúcida— y así cualquier otro sitio de la página que las use
+     * también funciona, en lugar de arreglar solo esta insignia.
+     */
+    .bg-opacity-20 { --bs-bg-opacity: 0.2; }
+    .border-opacity-30 { --bs-border-opacity: 0.3; }
+
+    /*
+     * Los bloques del estado van MÁS CLAROS que la tarjeta, no más oscuros. Un `bg-dark` encima
+     * de un fondo ya oscuro se lee como un agujero y hunde el texto; un velo blanco al 4% se lee
+     * como una superficie elevada y mantiene el contraste del texto que lleva dentro.
+     */
+    .stat-box {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 14px;
+      padding: 1rem;
+      height: 100%;
+    }
+    .stat-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      padding: 0.35rem 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    .stat-row:last-child { border-bottom: 0; }
+    .stat-row .val { color: #f1f5f9; font-weight: 700; }
+
     .source-card {
       background: rgba(15, 23, 42, 0.6);
       border: 1px solid rgba(255, 255, 255, 0.06);
@@ -300,10 +351,30 @@
     // Un número que no se pudo medir NO se pinta como cero: se dice que no se pudo.
     const num = (n) => (typeof n === 'number' && n >= 0) ? n.toLocaleString('es-ES') : '—';
 
-    function fila(etiqueta, valor, nota) {
-      return '<div class="d-flex justify-content-between align-items-baseline py-1 border-bottom border-secondary border-opacity-10">' +
+    /*
+     * Un trabajo con su referencia al lado. Sin el «cada N h», el «hace 8 h» del crawl no se
+     * puede interpretar: en el crawl es lo normal (corre una vez al día) y en la verificación
+     * sería una avería (va cada 2 h). Se marca en ámbar solo cuando pasa de vez y media su
+     * cadencia, que deja margen para una corrida larga sin dar una falsa alarma.
+     */
+    function trabajo(etiqueta, iso, cad) {
+      const cada = cad && cad.cada_horas;
+      const horas = iso ? (Date.now() - new Date(iso).getTime()) / 3600000 : Infinity;
+      const tarde = cada ? horas > cada * 1.5 : false;
+      const punto = '<span style="color:' + (tarde ? '#fbbf24' : '#4ade80') + '">●</span> ';
+      const nota = cada ? 'cada ' + cada + ' h' : '';
+      return '<div class="stat-row">' +
         '<span class="text-secondary small">' + etiqueta + '</span>' +
-        '<span class="fw-bold ms-3">' + valor + (nota ? ' <span class="text-secondary fw-normal small">' + nota + '</span>' : '') + '</span>' +
+        '<span class="val ms-3">' + punto + haceCuanto(iso) +
+          (nota ? ' <span class="text-secondary fw-normal small">· ' + nota + '</span>' : '') +
+        '</span>' +
+        '</div>';
+    }
+
+    function fila(etiqueta, valor, nota) {
+      return '<div class="stat-row">' +
+        '<span class="text-secondary small">' + etiqueta + '</span>' +
+        '<span class="val ms-3">' + valor + (nota ? ' <span class="text-secondary fw-normal small">' + nota + '</span>' : '') + '</span>' +
         '</div>';
     }
 
@@ -313,7 +384,7 @@
         '<div class="row g-4">' +
 
           '<div class="col-12 col-lg-4">' +
-            '<div class="p-3 rounded-3 bg-dark bg-opacity-50 h-100">' +
+            '<div class="stat-box">' +
               '<div class="text-secondary small mb-1">Lo que ve la app</div>' +
               '<div class="display-6 fw-bold text-info m-0">' + num(c.anunciables) + '</div>' +
               '<div class="text-secondary small mb-3">de ' + num(c.total) + ' fichas' +
@@ -324,7 +395,7 @@
           '</div>' +
 
           '<div class="col-12 col-lg-4">' +
-            '<div class="p-3 rounded-3 bg-dark bg-opacity-50 h-100">' +
+            '<div class="stat-box">' +
               '<div class="text-secondary small mb-2">Por qué el resto no se anuncia</div>' +
               fila('Reproducible', num(esc.reproducible)) +
               fila('Comprobada y sin enlaces', num(esc.sin_enlaces)) +
@@ -336,7 +407,7 @@
           '</div>' +
 
           '<div class="col-12 col-lg-4">' +
-            '<div class="p-3 rounded-3 bg-dark bg-opacity-50 h-100">' +
+            '<div class="stat-box">' +
               '<div class="text-secondary small mb-2">Trabajo pendiente</div>' +
               fila('Nunca resueltas', num(pen.nunca_resueltas)) +
               fila('Con servidores, sin anunciar', num(pen.con_servidores_sin_anunciar)) +
@@ -348,14 +419,14 @@
           '</div>' +
 
           '<div class="col-12">' +
-            '<div class="p-3 rounded-3 bg-dark bg-opacity-50">' +
+            '<div class="stat-box">' +
               '<div class="text-secondary small mb-2">Última vez que cada trabajo escribió algo</div>' +
               '<div class="row g-3">' +
-                '<div class="col-12 col-md-4">' + fila('Crawl (catálogo)', haceCuanto(act.crawl)) + '</div>' +
-                '<div class="col-12 col-md-4">' + fila('Extracción (vídeo directo)', haceCuanto(act.extraccion)) + '</div>' +
-                '<div class="col-12 col-md-4">' + fila('Verificación (sellos)', haceCuanto(act.verificacion)) + '</div>' +
+                '<div class="col-12 col-md-4">' + trabajo('Crawl (catálogo)', act.crawl, (e.cadencia || {}).crawl) + '</div>' +
+                '<div class="col-12 col-md-4">' + trabajo('Extracción (vídeo directo)', act.extraccion, (e.cadencia || {}).extraccion) + '</div>' +
+                '<div class="col-12 col-md-4">' + trabajo('Verificación (sellos)', act.verificacion, (e.cadencia || {}).verificacion) + '</div>' +
               '</div>' +
-              '<div class="text-secondary small mt-2">Se deduce de la propia huella en la base, no de GitHub: mide cuándo escribió, no si arrancó.</div>' +
+              '<div class="text-secondary small mt-2">Se deduce de la propia huella en la base, no de GitHub: mide cuándo escribió, no si arrancó. El crawl escribe al final, así que mientras corre este número sigue subiendo.</div>' +
             '</div>' +
           '</div>' +
 

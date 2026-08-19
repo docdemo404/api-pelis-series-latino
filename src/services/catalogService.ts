@@ -1247,6 +1247,24 @@ export class CatalogService {
         tioplus: total >= 0 && deFuegocine >= 0 && deCinecalidad >= 0 ? total - deFuegocine - deCinecalidad : -1,
       },
       ultima_actividad: { crawl, extraccion, verificacion },
+      /**
+       * CADA CUÁNTO DEBERÍA CORRER CADA UNO, para que «hace 8 h» signifique algo.
+       *
+       * Un tiempo sin referencia no dice si algo va bien o mal: 8 h es lo normal en el crawl
+       * —corre una vez al día— y sería una avería en la verificación, que va cada 2 h porque el
+       * sello dura 6. Sale de los `cron` de .github/workflows; si allí cambian, hay que cambiarlo
+       * aquí, y por eso va con el nombre del fichero al lado.
+       *
+       * OJO CON EL CRAWL: escribe al FINAL, después de recolectar y enriquecer ~15.000 títulos,
+       * lo que son unas 3 h. O sea que puede estar corriendo ahora mismo y este número seguir
+       * subiendo hasta que termine. No es un fallo del medidor: es que hasta que no escribe, no
+       * hay nada que medir.
+       */
+      cadencia: {
+        crawl: { cada_horas: 24, workflow: 'scraper.yml', tarda_horas: 3 },
+        extraccion: { cada_horas: 8, workflow: 'reproducible.yml', tarda_horas: 2 },
+        verificacion: { cada_horas: 2, workflow: 'verificar.yml', tarda_horas: 1.5 },
+      },
       medido_en: new Date().toISOString(),
     };
 
