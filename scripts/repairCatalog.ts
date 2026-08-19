@@ -235,18 +235,41 @@ function isSameTitleStrict(sourceTitle: string, twin: any, sourceYear?: string):
 
 async function fetchAllRows(extraColumns: string[] = []): Promise<any[]> {
   const rows: any[] = [];
-  const PAGE = 1000;
   const columns = ['id', 'tmdb_id', 'type', 'title', 'original_title', 'aliases', 'release_date', 'source_url', 'poster']
     .concat(extraColumns)
     .join(',');
-  for (let from = 0; ; from += PAGE) {
-    const { data, error } = await db
-      .from('media_items')
-      .select(columns)
-      .range(from, from + PAGE - 1);
+
+  /**
+   * MIL FILAS SON MUCHAS CUANDO CADA UNA TRAE `servers` Y `seasons` DENTRO.
+   *
+   * Son las dos columnas más pesadas de la tabla —decenas de servidores y todos los capítulos de
+   * cada serie—, y ya está medido en catalogService: 800 filas así pesan 23,7 MB. Pedirlas de mil
+   * en mil es lo que reventó `--verificar`, que llevaba días muriendo con «canceling statement due
+   * to statement timeout» sin comprobar UN SOLO servidor. Doscientas cuando vienen esas columnas.
+   */
+  const pesada = extraColumns.some(c => c === 'servers' || c === 'seasons');
+  const PAGE = pesada ? 200 : 1000;
+
+  /**
+   * Y SE PAGINA POR CLAVE, NO POR DESPLAZAMIENTO.
+   *
+   * `range(from, …)` obliga a Postgres a recorrer y descartar las `from` filas anteriores en cada
+   * página, así que cada una cuesta más que la última: con 14.723 fichas, las últimas se pasaban
+   * del tope de tiempo aunque las primeras fueran de sobra. Pedir «las N siguientes a este id»
+   * cuesta lo mismo en la página 1 que en la 70, porque entra por el índice de la clave primaria.
+   *
+   * El orden por `id` no es un capricho: es lo que hace que «la siguiente» esté definida. Ninguna
+   * de las reparaciones depende del orden en que lleguen las filas.
+   */
+  let ultimo = '';
+  for (;;) {
+    let q = db.from('media_items').select(columns).order('id', { ascending: true }).limit(PAGE);
+    if (ultimo) q = q.gt('id', ultimo);
+    const { data, error } = await q;
     if (error) throw new Error(error.message);
     if (!data || data.length === 0) break;
     rows.push(...data);
+    ultimo = (data[data.length - 1] as any).id;
     if (data.length < PAGE) break;
   }
   return rows;
