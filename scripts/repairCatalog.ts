@@ -886,9 +886,26 @@ function marcarTocada(row: any): void {
   if (row && row.id) tocadas.push({ id: String(row.id), tmdb_id: row.tmdb_id });
 }
 
-/** Retira del caché todo lo que se haya tocado. Se llama una vez, al final. */
+/**
+ * Retira del caché todo lo que se haya tocado. Se llama una vez, al final.
+ *
+ * Y DESDE AHORA TAMBIÉN LOS LISTADOS, que era el último sitio por donde se colaba lo retirado.
+ *
+ * Esto purgaba la ficha (`meta:`, `byid:`) y sus capítulos (`ep:`), pero no la portada ni las
+ * búsquedas — y ahí es donde el espectador ve el catálogo. La portada se guarda hasta 12 h y las
+ * búsquedas una hora, así que una película que el barrido acababa de retirar de la base de datos
+ * seguía apareciendo en el inicio media jornada, con su ficha ya diciendo que no hay nada.
+ *
+ * Medido al final de todo el trabajo, cuando ya no quedaba ninguna otra causa: de los cinco
+ * títulos que aún salían sin fuente, «Caminando Con Dinosaurios» y «La La Land» tenían
+ * `has_streams = false` desde hacía minutos. No era un fallo de criterio: era una foto vieja.
+ *
+ * Se purga TODO el listado, no las entradas que contengan la ficha: no hay forma de saber en qué
+ * consultas sale, y reconstruirlos cuesta una lectura a la base. Ver `invalidateListings`.
+ */
 async function purgarCacheDeTocadas(apply: boolean): Promise<void> {
   if (!apply || tocadas.length === 0) return;
+  await CatalogService.invalidateListings().catch(() => {});
   const vistas = new Set<string>();
   const unicas = tocadas.filter(t => (vistas.has(t.id) ? false : (vistas.add(t.id), true)));
   const claves = unicas.flatMap(t => CatalogService.cacheKeysFor(t));
