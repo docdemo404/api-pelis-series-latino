@@ -323,22 +323,82 @@ npm run repair:catalog -- --unfuse           # retira alias que pertenecen a otr
 npm run repair:catalog -- --verify --ids=a,b # solo esas fichas
 ```
 
-Y lo que corre **solo** todos los días (`.github/workflows/scraper.yml`), en este orden: crawl →
-purga de fuentes intrusas → repaso de 700 fichas con ventana rotatoria (da la vuelta al catálogo
-cada ~21 días y vuelve a empezar) → servidores muertos → sinopsis → **extracción de vídeo directo
-(900 fichas) → retirada de directos que dan 502 → ajuste de qué fichas se anuncian** → auditoría
-que falla en rojo si algo se cuela.
+Y lo que corre solo, repartido en **cuatro** workflows (actualizado 2026-08-19):
 
-> Los tres pasos en negrita van **en ese orden y al final**, y no es casual: la extracción rescata
-> fichas, la retirada de falsos deja otras mudas, y solo cuando ambas han terminado tiene sentido
-> decidir cuáles se anuncian. Al revés, se escondería lo que la misma corrida acaba de arreglar.
+| workflow | cada | qué hace |
+|---|---|---|
+| `scraper.yml` | 24 h | crawl completo → purga de fuentes intrusas → carátulas → servidores muertos → sinopsis → auditoría que falla en rojo. Lleva `--verify=1500`, que resuelve fichas **nunca resueltas** |
+| `reproducible.yml` | 8 h | extracción de vídeo directo (2.000 fichas) → retirada de directos que dan 502 → comprobación → series ocultas → capítulos → **ajuste de qué se anuncia** |
+| `verificar.yml` | 2 h | sella TODOS los servidores publicados (el sello dura 6 h) → comprueba que la API puede entregar cada host → ajusta qué se anuncia |
+| `episodios.yml` | 4 h | resuelve capítulos por adelantado |
+
+> El ajuste de qué se anuncia va **el último**, y no es casual: la extracción rescata fichas, la
+> retirada de falsos deja otras mudas, y solo cuando ambas han terminado tiene sentido decidir
+> cuáles se anuncian. Al revés, se escondería lo que la misma corrida acaba de arreglar.
 >
-> La extracción **no estaba en el workflow**: `fillDirectStreams` solo corre con `--direct`, y el
-> paso de crawl no lo llevaba, así que no se ejecutaba nunca sin que alguien la lanzara a mano.
+> `reproducible.yml` son **seis trabajos y no seis pasos**: cuando eran pasos, la muerte de uno se
+> llevaba por delante a los siguientes —incluido el que ajusta qué se anuncia—. Con un trabajo por
+> tarea, cada uno corre en su runner y el encadenado es `needs` + `if: always()`.
 
 > La ventana es **rotatoria** porque el punto de guardado es un archivo local y en un runner de CI se
 > pierde en cada corrida: sin `--rotar` se repasaban eternamente las mismas primeras fichas y el
 > resto del catálogo no se revisaba nunca.
+
+---
+
+## 6 bis. Antes de escribir nada: ¿merece la pena ESTA fuente?
+
+Medido el 2026-08-19 sobre el catálogo entero: 14.972 fichas y solo ~2.100 que la app puede
+anunciar. **No faltaban títulos: faltaban hosts que entreguen vídeo.** De 160.899 servidores
+guardados, 84.364 están en hosts que no se pueden servir —48.587 de la familia upns, que dejó de
+publicar vídeo, y ~35.800 detrás de captcha o huella de navegador—.
+
+O sea que el número de títulos de una web candidata **no dice nada**. Lo que decide es en qué
+reproductores publica. Cinecalidad se añadió por eso y no por su tamaño (544 títulos): de sus
+cuatro reproductores, `vimeos.net` y `goodstream.one` ya se extraían y estaba comprobado que
+entregan desde el datacenter.
+
+La comprobación cuesta diez minutos y va ANTES del scraper:
+
+1. Abre 5-10 fichas suyas a mano y apunta los hosts de sus `<iframe>` / `data-option`.
+2. Pásalos por el inventario: `npx ts-node -T scripts/dev/diag_extraible.ts` dice cuáles ya se
+   extraen, cuáles son imposibles y cuáles no tienen extractor.
+3. Para uno que no esté en la lista, `scripts/dev/probe_inventario_hosts.ts` lo clasifica
+   (borrado / captcha / packer / a la vista / API / opaco).
+4. Y si sale bien, `scripts/dev/probe_entrega_vercel.ts <host>` comprueba lo único que importa de
+   verdad: **que entregue bytes desde donde servimos**, no solo desde tu casa.
+
+Si sus hosts caen todos en «captcha» o «sin extractor», la fuente añade carátulas que no
+reproducen — que es exactamente lo que este proyecto lleva un mes quitando.
+
+## 6 ter. Dónde engancha una fuente nueva (verificado sobre Cinecalidad)
+
+Diez sitios, y el que más se olvida es el 4: **una fuente sin puerta de descubrimiento queda
+escrita y muda**. Le pasó a Cinecalidad hasta que el usuario preguntó por qué no salía Breaking
+Bad.
+
+| # | Dónde | Qué |
+|---|---|---|
+| 1 | `src/config/sources.ts` | registrarla con su prioridad |
+| 2 | `realScraperService.ts` — constante `<FUENTE>_BASE` | el dominio |
+| 3 | `parse<Fuente>Cards()` | tarjeta de listado → `MediaItem` |
+| 4 | **`scrapeLatest()`** | **la puerta del crawl.** Sin esto no se recorre nunca |
+| 5 | `scrape<Fuente>Latest()` | paginación del archivo. El tope sale del `limit`, nunca un número a mano |
+| 6 | `scrape<Fuente>Detail()` | ficha + servidores + temporadas |
+| 7 | `scrapeDetail()` | reparto por dominio hacia el detalle |
+| 8 | `fetchSourceSignals()` | las señales de identidad (§2.1) |
+| 9 | `tipoDeLaRuta()` en `catalogService.ts` | qué parte de la url dice película o serie |
+| 10 | `scrape<Fuente>Search()` + el reparto en la búsqueda | buscar en vivo |
+
+Y dos trampas que ya han mordido con las fuentes existentes:
+
+- **El tope de páginas sale del `limit`.** Cinecalidad tenía un `page <= 6` escrito a mano que
+  contradecía en silencio al crawl —que pide 10.000 y se llevaba 96—. El freno correcto es «parar
+  cuando una página no aporta nada nuevo», que además detecta los archivos que no paginan.
+- **El id de tu fuente colisiona con el de otra.** `candidateIdsForUrl` devuelve el último segmento
+  pelado, que es la forma de los ids de TioPlus: `/ver-serie/animal/` casaba con la ficha
+  `animal` de otra web. Por eso `duenoDeLaPagina` prueba de la forma más específica a la más
+  general. Si tu molde url→id es nuevo, corre `scripts/dev/diag_dueno_regress.ts`.
 
 ---
 
