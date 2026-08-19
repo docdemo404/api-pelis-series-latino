@@ -1000,6 +1000,77 @@ export class CatalogService {
   }
 
   /**
+   * UN REPRODUCTOR DE VERDAD DICE QUE NO SE VE: QUE DESAPAREZCA YA.
+   *
+   * La app manda `outcome: failed` cuando ha agotado TODAS las fuentes que le dimos —es el «Se
+   * probaron todas las fuentes de este contenido» que ve el espectador—. No hay señal mejor en
+   * todo el proyecto: un aparato real, con un reproductor real, acaba de demostrar que lo que
+   * anunciamos no se ve.
+   *
+   * Hasta ahora eso solo purgaba el caché, y el título SEGUÍA ANUNCIÁNDOSE hasta que un barrido
+   * de la nube pasara por él —hasta ocho horas—. Ese es el problema real que se reportó: no que
+   * un enlace se muera (eso es inevitable), sino que siga ofreciéndose después de haberse muerto.
+   *
+   * LO QUE SE HACE ES REVOCAR EL SELLO, no marcar la ficha como muerta, y la diferencia es toda:
+   *
+   *   · `paraElCliente` solo publica servidores con un `verified_at` vigente. Sin sello, la ficha
+   *     sale de los listados en cuanto se purga el caché — instantáneo, sin esperar a nadie.
+   *   · No se borra nada: el `direct_stream` y el `embed_url` siguen ahí. `--verificar` recorre
+   *     TODAS las filas (no solo las anunciadas) y sella lo que entregue, así que si esto era cosa
+   *     de una wifi mala, la próxima pasada lo demuestra y el título vuelve solo.
+   *   · Y no lo puede deshacer el barrido por accidente: `--sin-directo` recalcula el veredicto
+   *     con `paraElCliente`, que exige el sello. Marcar `has_streams = false` a secas SÍ se
+   *     habría revertido en la siguiente vuelta, porque los servidores seguían sellados.
+   *
+   * O sea: esconder es inmediato y barato; devolver exige prueba. Que es exactamente la regla de
+   * la casa —retirar solo con prueba en contra, y todo lo que esconde catálogo tiene que saber
+   * devolverlo— aplicada en el único punto del sistema que ve la verdad.
+   */
+  static async revocarSelloPorFalloDeReproduccion(id: string): Promise<boolean> {
+    const { data } = await supabase
+      .from('media_items').select('id,type,servers,seasons').eq('id', id).maybeSingle();
+    if (!data) return false;
+
+    const desellar = (s: any) => {
+      if (!s || !s.verified_at) return s;
+      const { verified_at, ...resto } = s;
+      return resto;
+    };
+    const servers = Array.isArray((data as any).servers) ? (data as any).servers.map(desellar) : [];
+    const seasons = Array.isArray((data as any).seasons)
+      ? (data as any).seasons.map((t: any) => ({
+          ...t,
+          episodes: Array.isArray(t?.episodes)
+            ? t.episodes.map((e: any) => ({
+                ...e,
+                servers: Array.isArray(e?.servers) ? e.servers.map(desellar) : e?.servers,
+              }))
+            : t?.episodes,
+        }))
+      : [];
+
+    /**
+     * El veredicto lo sigue decidiendo `veredictoDisponibilidad` sobre lo que queda, no este
+     * sitio: sin sellos no hay nada publicable, así que dirá que no — pero se le pregunta a él
+     * para no acabar con dos criterios distintos, que es como este proyecto se ha roto ya cinco
+     * veces.
+     */
+    const veredicto = veredictoDisponibilidad(
+      { type: (data as any).type, servers, seasons } as any, 'todo'
+    );
+
+    const update: Record<string, unknown> = { servers, seasons };
+    if (seasons.length === 0) delete update.seasons;
+    if (veredicto !== undefined) update.has_streams = veredicto;
+
+    const escrito = await this.escribirFila(update, id, 'aviso de reproducción');
+    // El caché de la ficha Y el de los listados: es en los listados donde se sigue viendo.
+    await this.invalidateItem({ id });
+    await this.invalidateListings();
+    return escrito;
+  }
+
+  /**
    * Retira del caché las listas y las búsquedas, que son las que enseñan la ficha ANTES de que
    * nadie la abra.
    *

@@ -948,11 +948,22 @@ router.post(['/api/v1/report', '/api/v1/playback/report'], async (req: Request, 
      * no queda nada, ahi es donde se escribe el veredicto y el titulo sale de los listados; si era
      * cosa del aparato, la sonda lo demuestra y no se esconde nada.
      *
-     * Sin `await`: esto es telemetria y no puede retrasar ni un milisegundo lo que ve nadie.
+     * Y SE HACE CON `await`, aunque sea telemetria. Dos motivos, los dos aprendidos a golpes:
+     *
+     *   · En Vercel la lambda se CONGELA al responder, asi que un `void` sin esperar no termina:
+     *     la escritura no llega y el titulo sigue anunciandose. Es el mismo fallo que dejo el
+     *     catalogo anunciando fichas sin fuente durante semanas.
+     *   · Y aqui no hay prisa que valga: este aviso llega cuando el espectador YA esta mirando
+     *     "Se probaron todas las fuentes". Nadie espera un video; esperan un mensaje de error que
+     *     ya esta en pantalla. Un segundo mas de respuesta no lo ve nadie.
      */
     if (evento.outcome.startsWith('failed') || evento.outcome.startsWith('playback_failed')) {
       if (evento.item_id) {
-        void CatalogService.invalidateItem({ id: evento.item_id }).catch(() => {});
+        try {
+          await CatalogService.revocarSelloPorFalloDeReproduccion(evento.item_id);
+        } catch (e) {
+          console.warn('[playback] no se pudo retirar la ficha:', e instanceof Error ? e.message : e);
+        }
       }
     }
 
