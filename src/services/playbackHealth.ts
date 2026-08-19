@@ -486,19 +486,30 @@ export async function revisarServidores(
         }
         continue;
       }
+      /**
+       * EL CACHÉ COMPARTIDO SE MIRA ANTES QUE EL PRESUPUESTO, y ese orden importa.
+       *
+       * Estaba al revés: primero se comprobaba si quedaban sondas y solo entonces se preguntaba
+       * a Redis. Pero preguntar a Redis NO gasta una sonda —es lo único aquí que no toca al
+       * host—, así que gatearlo detrás del cupo tiraba a la basura lo ya sabido justo cuando más
+       * falta hace: con el presupuesto agotado, un servidor que otra petición acaba de demostrar
+       * muerto seguía entregándose como bueno.
+       *
+       * Es exactamente el mismo razonamiento que ya está escrito unas líneas más arriba para los
+       * embed sin vídeo directo. Aquí faltaba, y con él se caía el único aviso que llega desde la
+       * ENTREGA real: cuando `/stream/direct` agota su plazo anota el veredicto, y si esta
+       * consulta no lo mira, ese aviso no sirve de nada.
+       */
+      veredicto = await veredictoConocido(servidor.embed_url);
+
       const queda = limite - Date.now();
       // Agotado el cupo o el tiempo se deja de SONDEAR, pero se sigue recorriendo la lista: lo
       // que ya esté en memoria se aplica igual y no cuesta nada. Cortar aquí dejaba sin corregir
       // a un servidor de más abajo que se acababa de demostrar muerto en otra petición.
-      if (sondeados >= maximo || queda < MINIMO_PARA_SONDEAR_MS) continue;
-      sondeados++;
-
-      // Antes de gastar una sonda, preguntar al caché COMPARTIDO. En Vercel cada petición puede
-      // caer en una instancia distinta, así que sin esto cada lambda vuelve a descubrir por su
-      // cuenta lo que la de al lado ya sabe. Solo se paga en los pocos que se iban a sondear.
-      veredicto = await veredictoConocido(servidor.embed_url);
+      if (!veredicto && (sondeados >= maximo || queda < MINIMO_PARA_SONDEAR_MS)) continue;
 
       if (!veredicto) {
+        sondeados++;
         // Si a este servidor se le va a entregar con un 302, se le sondea como lo pedirá el
         // reproductor: sin Referer. Ver `entregaLiteral` en comprobarEmbed.
         const c = await conTope(

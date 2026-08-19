@@ -12,7 +12,7 @@ import { CatalogService } from '../services/catalogService';
 import { USER_AGENT, streamClient } from '../utils/httpClient';
 import { inicioDelTs } from '../utils/segmentBytes';
 import { destinoSirveCors } from '../services/manifestHealth';
-import { comprobarDestino } from '../services/playbackHealth';
+import { comprobarDestino, anotarVeredicto } from '../services/playbackHealth';
 import { externalProxyEnabled, proxyUrlFor } from '../utils/externalProxy';
 import { getSupabaseAdmin } from '../services/supabaseService';
 
@@ -607,6 +607,32 @@ router.get([DIRECT_BASE, `${DIRECT_BASE}/v.mp4`, `${DIRECT_BASE}/v.m3u8`], async
     if (!res.headersSent) {
       console.warn(`[direct] plazo agotado (${RUTA_MAX_MS} ms): ${String(req.query.e || '').slice(0, 40)}`);
       sendErrorResponse(res, 502, 'DIRECT_UNAVAILABLE', 'El servidor no respondió a tiempo. Prueba otro servidor.');
+
+      /**
+       * Y SE ANOTA, QUE ES LO QUE FALTABA. Aquí arriba pone que lo aprendido queda guardado «para
+       * la próxima», y es verdad de todo menos del caso que más importa: cuando el host no
+       * contesta EN ABSOLUTO no se aprende nada. Ninguna comprobación llega a concluir, el tope
+       * de tiempo devuelve «no consta» —que a propósito no condena a nadie— y el servidor sale
+       * de aquí exactamente igual de sano que entró. El siguiente espectador repite el fallo.
+       *
+       * Que un servidor tarde más de RUTA_MAX_MS en dar el primer byte NO es una opinión sobre
+       * si el vídeo existe: es que desde aquí no se puede entregar, que es lo único que le
+       * importa a quien está mirando una pantalla negra.
+       *
+       * ESTO ES ADEMÁS EL ÚNICO CONTRAPESO A UN DESAJUSTE DE FONDO: el verificador corre en
+       * GitHub y la entrega en Vercel. Un host que sirve a uno y no al otro pasa la verificación
+       * con nota y falla en el reproductor — «Borrón y Vida Nueva» estaba sellada hacía SEIS
+       * MINUTOS, con un trozo de vídeo descargado de verdad, y su vidnest.io daba 502 aquí. Sin
+       * esta anotación no hay forma de que el catálogo se entere nunca, porque quien lo comprueba
+       * no es quien lo sirve.
+       *
+       * El veredicto vive una hora en el caché de salud compartido, así que `revisarServidores` lo
+       * ve en la siguiente petición y retira ese servidor; si la ficha se queda sin ninguno, deja
+       * de anunciarse. Y se cae solo: al expirar se vuelve a sondear, de modo que un mal rato del
+       * host no entierra nada para siempre.
+       */
+      const embed = decodeEmbedParam(String(req.query.e || ''));
+      if (embed) void anotarVeredicto(embed, 'muerto').catch(() => {});
     }
   }, RUTA_MAX_MS);
 
