@@ -252,12 +252,41 @@ async function prewarmStreams(items: MediaItem[], max: number): Promise<void> {
  * Se prioriza lo NO comprobado y se avanza por lotes: pensada para ejecutarse a diario
  * y ir cubriendo el catálogo, no para verificarlo entero de una sentada.
  */
+/**
+ * `--verify[=N]`: resuelve las fichas que todavía no se han mirado.
+ *
+ * SE ELIGEN POR «NUNCA SE RESOLVIÓ», NO POR «NO TIENE VEREDICTO», y esa es toda la corrección.
+ *
+ * Antes pedía `has_streams IS NULL`, o sea «nadie ha dictado todavía si esta ficha reproduce».
+ * Suena bien y dejaba fuera justo a las que más falta hacía mirar, porque en este catálogo el
+ * veredicto se escribe por OTRO camino: `repairCatalog --sin-directo` recorre el catálogo entero
+ * y marca `has_streams = false` a todo lo que no tiene vídeo directo. Una ficha recién crawleada,
+ * con su página y sus enlaces esperando y sin que nadie los haya ido a buscar, no tiene vídeo
+ * directo — así que la condena, con razón formal y sin haber mirado nada. Y a partir de ahí:
+ *
+ *   · `--verify` ya no la coge, porque su `has_streams` ha dejado de ser NULL;
+ *   · `--direct-only` tampoco, porque salta las de `servers: []` («son trabajo de --verify»);
+ *   · y `--sin-directo` vuelve a confirmarle la condena en cada vuelta.
+ *
+ * Nadie vuelve nunca. Medido el 2026-08-19: 2.434 fichas —el 16 % del catálogo— condenadas sin
+ * haberse resuelto una sola vez, y `--verify` alcanzaba a CUATRO. Entre ellas, Transformers,
+ * Akira, Aladdin o Bee Movie; sobre 8 muestras de FuegoCine, el scraper les saca hoy entre 3 y 5
+ * servidores a las 8. No era contenido muerto: era contenido sin abrir.
+ *
+ * `streams_updated_at IS NULL` es la señal exacta: la escribe `persistStreams` cada vez que se
+ * resuelve una ficha, así que su ausencia significa «aquí no ha entrado nadie todavía» — un hecho,
+ * no una opinión. Es la misma regla que ya está escrita en `veredictoDisponibilidad`: no
+ * encontrar algo solo basta para decir que no si de verdad se ha mirado.
+ *
+ * Primero las nunca resueltas y después las que no tienen veredicto, porque las primeras son las
+ * que pueden APARECER en el catálogo y las segundas solo confirman lo que ya se sabe.
+ */
 async function verifyAvailability(max: number): Promise<void> {
   const { data, error } = await db
     .from('media_items')
     .select('id,type,title')
-    .is('has_streams', null)
-    .order('updated_at', { ascending: false })
+    .or('streams_updated_at.is.null,has_streams.is.null')
+    .order('streams_updated_at', { ascending: true, nullsFirst: true })
     .limit(max);
 
   if (error) {

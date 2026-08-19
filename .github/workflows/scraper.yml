@@ -33,10 +33,22 @@ jobs:
       # para que su ficha emergente abra con los servidores ya listos (requiere la
       # migración 004; sin ella el paso se omite con un aviso).
       #
-      # --verify=500 comprueba a fondo 500 fichas nunca verificadas y anota si tienen
-      # enlaces reales (`has_streams`). Las que no los tienen dejan de anunciarse en el
-      # home y en la búsqueda. Al ir por tandas, cada corrida diaria avanza sobre lo que
-      # queda sin comprobar en vez de repetir el catálogo entero (requiere la migración 005).
+      # --verify=1500 resuelve a fondo las fichas que NUNCA se han resuelto y anota si tienen
+      # enlaces reales (`has_streams`). Las que no los tienen dejan de anunciarse en el home y
+      # en la búsqueda. Al ir por tandas, cada corrida avanza sobre lo que queda en vez de
+      # repetir el catálogo entero (requiere la migración 005).
+      #
+      # SUBE DE 500 A 1.500 PORQUE HAY UN ATRASO QUE NADIE ESTABA TOCANDO. Este paso elegía sus
+      # fichas por `has_streams IS NULL` —«sin veredicto»—, y el veredicto lo escribe otro
+      # camino: `repairCatalog --sin-directo` condena a todo lo que no tiene vídeo directo, y una
+      # ficha recién crawleada y sin resolver no lo tiene. Quedaban condenadas sin haberse
+      # abierto, y ya no volvían a entrar aquí. Medido el 2026-08-19: 2.434 fichas así —el 16 %
+      # del catálogo— y este paso alcanzaba a CUATRO. Ahora se eligen por «nunca resuelta»
+      # (`streams_updated_at IS NULL`), que es un hecho y no una opinión.
+      #
+      # Sobre 25 de ellas, 8 recuperaron enlaces (32 %). A 1.500 por corrida el atraso se vacía
+      # en dos vueltas y esto queda otra vez en mantenimiento. Cabe: el trabajo tarda 2h51m de
+      # las 6 h que tiene por defecto.
       - name: Refrescar catálogo pre-scrapeado en Supabase
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
@@ -44,7 +56,7 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           # Necesaria para escribir en media_items (la tabla tiene RLS activado)
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: npx ts-node scripts/refreshCatalog.ts --streams=300 --verify=500
+        run: npx ts-node scripts/refreshCatalog.ts --streams=300 --verify=1500
 
       # RED DE SEGURIDAD — que ninguna ficha sirva el vídeo de otra película.
       #
