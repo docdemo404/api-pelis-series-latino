@@ -590,6 +590,23 @@ function conPlazo<T>(promesa: Promise<T>, ms: number, respaldo: T): Promise<T> {
  * fichero es decorativo y no se mira. La forma vieja sigue funcionando: nada de lo ya publicado
  * deja de valer.
  */
+/**
+ * Anota que la ENTREGA de este embed se quedó sin tiempo, y condena solo a la segunda.
+ *
+ * Ver la nota larga en el plazo de ruta: un fallo suelto puede ser lentitud, dos en media hora
+ * ya no. El primer golpe deja una marca; el segundo escribe el veredicto que retira el servidor.
+ */
+async function anotarFalloDeEntrega(embedUrl: string): Promise<void> {
+  const clave = `fallo-entrega:${Buffer.from(embedUrl, 'utf8').toString('base64url').slice(0, 60)}`;
+  const previo = await CacheStore.get<number>(clave);
+  if (!previo) {
+    await CacheStore.set(clave, 1, 30 * 60);
+    return;
+  }
+  console.warn(`[direct] segundo fallo de entrega, se retira: ${embedUrl.slice(0, 70)}`);
+  await anotarVeredicto(embedUrl, 'muerto');
+}
+
 router.get([DIRECT_BASE, `${DIRECT_BASE}/v.mp4`, `${DIRECT_BASE}/v.m3u8`], async (req: Request, res: Response, next: NextFunction) => {
   /**
    * PLAZO PARA TODA LA RUTA — la red de seguridad que no depende de acertar con cada await.
@@ -626,13 +643,26 @@ router.get([DIRECT_BASE, `${DIRECT_BASE}/v.mp4`, `${DIRECT_BASE}/v.m3u8`], async
        * esta anotación no hay forma de que el catálogo se entere nunca, porque quien lo comprueba
        * no es quien lo sirve.
        *
-       * El veredicto vive una hora en el caché de salud compartido, así que `revisarServidores` lo
-       * ve en la siguiente petición y retira ese servidor; si la ficha se queda sin ninguno, deja
-       * de anunciarse. Y se cae solo: al expirar se vuelve a sondear, de modo que un mal rato del
-       * host no entierra nada para siempre.
+       * PERO HACEN FALTA DOS GOLPES, y esto es una corrección de algo que hice mal.
+       *
+       * La primera versión condenaba a la primera: un plazo agotado y el servidor quedaba muerto
+       * una hora, para todo el mundo. Es demasiado, y se ve en una medición propia — `goodstream`
+       * tardó 26 SEGUNDOS en entregar y entregó: vídeo real al final de la cadena. Con la regla de
+       * un golpe, ese host quedaba condenado en cada intento por ser lento, no por estar roto. Es
+       * exactamente el principio que el resto de este archivo respeta y yo me salté: `conTope`
+       * devuelve «no consta» a propósito cuando se acaba el tiempo, porque lento no es muerto.
+       *
+       * Con dos golpes, un mal rato aislado no condena a nadie y un servidor de verdad roto cae
+       * igual de rápido — el segundo que lo intente basta, y con un servidor roto siempre hay un
+       * segundo. Los golpes viven media hora, así que dos fallos lejanos en el tiempo tampoco
+       * suman.
+       *
+       * Lo que sí condena a la primera sigue siendo lo de siempre: un veredicto CONCLUYENTE
+       * (`comprobarEmbed` demostrando que no hay vídeo), que se anota por su cuenta. Aquí solo se
+       * trata el caso en que no se concluyó nada.
        */
       const embed = decodeEmbedParam(String(req.query.e || ''));
-      if (embed) void anotarVeredicto(embed, 'muerto').catch(() => {});
+      if (embed) void anotarFalloDeEntrega(embed).catch(() => {});
     }
   }, RUTA_MAX_MS);
 
