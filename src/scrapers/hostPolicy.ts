@@ -143,10 +143,36 @@ export const CONSERVATIVE: HostPolicy = {
 const POLICIES: HostPolicy[] = [
   // ── Ata por IP: es el único que TIENE que seguir pasando por el proxy ──────────────
   {
-    // Segmentos sin medir: da igual, `ipBound` corta la cascada antes de llegar a ellos.
+    /**
+     * VIDHIDEPLUS VUELVE, Y ES EL HOST MÁS NUMEROSO DEL CATÁLOGO (33.195 servidores).
+     *
+     * Estuvo vetado con `noSePuedeServirDirecto` desde el 2026-07-25, y el motivo era bueno
+     * ENTONCES: medido sobre "4Ever" T1E1, entregaba 507 KB en 60 s —unos 10 KB/s— a una IP de
+     * datacenter, mientras emturbovid daba 441 KB/s en la misma pasada. A esa velocidad, diez
+     * segundos de vídeo tardan casi cuatro minutos.
+     *
+     * Re-medido el 2026-08-19 con `scripts/dev/probe_vidhide_vercel.ts`, que hace la pregunta
+     * desde los dos sitios que importan —esta red y la API DESPLEGADA, que es quien sirve—,
+     * bajando hasta un segmento real:
+     *
+     *     entregan desde Vercel   8 de 8      media 233 KB/s
+     *     entregan desde casa     7 de 8      media 244 KB/s
+     *
+     * Ya no estrangula. Y no es un matiz: era el 71 % de los servidores sin vídeo directo del
+     * catálogo, apagados por una medición que había dejado de ser cierta.
+     *
+     * `ipBound` SE QUEDA, y a propósito. Lo que se ha demostrado es que el host entrega bien
+     * cuando los bytes pasan por aquí; el veto que se levanta es el de «no hay nada que hacer»,
+     * no la decisión de proxear. Si algún día se quiere probar el 302 al cliente, es otra
+     * medición distinta (`probe_hosts.ts`) y otro día — de momento, lo medido es el proxy.
+     *
+     * LA LECCIÓN, porque este proyecto ya la ha pagado dos veces: una medición de un host caduca.
+     * `measuredAt` está en la tabla justo para esto, y un veto total merece re-medirse antes de
+     * heredarse otro mes. Los segmentos siguen sin medir; da igual mientras `ipBound` corte la
+     * cascada antes de llegar a ellos.
+     */
     match: ['vidhideplus', 'vidhide'],
     ipBound: true,
-    noSePuedeServirDirecto: true,
     refererRequired: false,
     refererChecked: false,
     cors: true,
@@ -155,7 +181,7 @@ const POLICIES: HostPolicy[] = [
     segmentRefererChecked: true,
     segmentCors: false,
     tokenTtlSeconds: null,
-    measuredAt: MEASURED_AT,
+    measuredAt: '2026-08-19',
   },
 
   {

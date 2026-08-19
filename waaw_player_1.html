@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en-US" prefix="og: http://ogp.me/ns#" data-cast-api-enabled="true">
+  <head>
+    <title>Video player</title>
+    <meta name="robots" content="noindex">
+    <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
+    <meta name="description" content="Netu.tv free videohosting with affilate program." />
+    <style>
+        @media screen and (max-height: 700px){
+        #rc-imageselect, .g-recaptcha {transform:scale(0.5) !important;-webkit-transform:scale(0.5) !important;transform-origin:0 0 !important;-webkit-transform-origin:0 0 !important;}
+        }
+    </style>
+    <script data-cfasync="false" src="//waaw.to/js/video.counters.2.js?117" defer async></script>
+    <script data-cfasync="false" src="//cdnjs.cloudflare.com/ajax/libs/jquery/1.11.2/jquery.min.js"></script>
+    <script data-cfasync="false">
+    
+        var verifyCallback = function(response) {
+            //document.getElementById("btn").style.display = 'block';
+            my_form.submit();
+            html_element.style.display = 'none';
+        };
+/*
+        var onloadCallback = function() {
+            grecaptcha.render('html_element', {
+                'sitekey' : '6LfCmh4TAAAAAKog9f8wTyEOc0U8Ms2RTuDFyYP_',
+                'callback' : verifyCallback
+        });
+      };
+      */
+    </script>
+<link href="//waaw.to/styles/cbv2new/theme/main.css?120" rel="stylesheet" type="text/css" />
+<link href="//waaw.to/styles/cbv2new/theme/bootstrap.css?17" rel="stylesheet" type="text/css" />
+
+  </head>
+  <body>
+<script data-cfasync="false">
+var m = 1;
+function checkIOSVersion () {
+    var agent = window.navigator.userAgent,
+    start = agent.indexOf( 'OS ' );
+    if( ( agent.indexOf( 'iPhone' ) > -1 || agent.indexOf( 'iPad' ) > -1 ) && start > -1 ){
+        return window.Number( agent.substr( start + 3, 3 ).replace( '_', '.' ) );
+    }
+    return 12;
+}
+
+function checkw(){
+    console.log("document.body.scrollHeight: "+document.body.scrollHeight+", window.innerHeight: "+window.innerHeight+", document.body.offsetHeight:"+document.body.offsetHeight+", self.innerHeight:"+self.innerHeight+", document.body.clientHeight:"+document.body.clientHeight);
+    console.log("document.documentElement.scrollHeight: "+document.documentElement.scrollHeight+", document.documentElement.clientHeight: "+document.documentElement.clientHeight);
+    console.log("document.body.scrollWidth: "+document.body.scrollWidth+", window.innerWidth: "+window.innerWidth+", document.body.offsetWidth:"+document.body.offsetWidth+", self.innerWidth:"+self.innerWidth+", document.body.clientWidth:"+document.body.clientWidth);
+    console.log("document.documentElement.scrollWidth: "+document.documentElement.scrollWidth+", document.documentElement.clientWidth: "+document.documentElement.clientWidth);
+
+    var scrollHeight = Math.max(
+        document.body.scrollHeight, document.documentElement.scrollHeight,
+        document.body.offsetHeight, document.documentElement.offsetHeight,
+        document.body.clientHeight, document.documentElement.clientHeight
+    );
+    if(scrollHeight > window.innerHeight){
+        var n = ((window.innerHeight)/scrollHeight).toFixed(2);
+        n = n-0.05;
+        if(m > n){
+            if(checkIOSVersion()<12){
+                $('html').css({'position':'absolute'});
+                $('html').css({'top':document.body.scrollHeight*m});
+            }
+            $('html').css({'transform-origin': '0 0'});
+            $('html').css({'transform': 'scale('+n+','+n+')'});
+            var x = (window.innerHeight/scrollHeight).toFixed(2);
+            m = x;
+        }
+    }else{
+        //$('html').css({'transform': 'unset'});
+    }
+    
+}
+
+window.setInterval(function() {
+  checkw();
+}, 2000);
+
+</script>
+    <form action="/player/embed_player.php" method="POST" id="my_form" target="_self">
+      <input name="vid" type="text" value="c3BrUngwaWwrU3RDa1JuTmFId1d0Zz09" style="display:none;">
+      <input name="need_captcha" type="text" value="1" style="display:none;">
+      <input name="pop" type="text" value="0" style="display:none;">
+        <input name="t" type="text" value="1" style="display:none;">
+        <input name="http_referer" type="text" value="https%3A%2F%2Fwaaw.to%2Fe%2Fc3BrUngwaWwrU3RDa1JuTmFId1d0Zz09%3Fhttp_referer%3Dhttps%253A%252F%252Fwaaw.to%252Ff%252F17qlg22yU2e5%26autoplay%3Dno%26embed_from%3Dembed_from" style="display:none;">
+                    <div style="display: flex; align-items: center; justify-content: center;height: 100%;">
+            <div>
+                <!--div id="html_element" class="g-recaptcha" style="transform:scale(0.77);-webkit-transform:scale(0.77);transform-origin:0 0;-webkit-transform-origin:0 0;"></div-->
+                <div id="html_element" class="h-captcha" data-sitekey="a7323b39-a0d6-43f8-8121-eb9e32b2fb4e" data-callback="verifyCallback" style="transform:scale(0.77);-webkit-transform:scale(0.77);transform-origin:0 0;-webkit-transform-origin:0 0;"></div>
+                <br>
+                <a href="javascript:void(0);" onclick="my_form.submit();" class="btn btn-primary btn-lg selectFiles" style="display:none;width:300px;" id="btn">Watch video</a>
+            </div>
+        </div>
+    </form>
+    <script src="https://hcaptcha.com/1/api.js" type="text/javascript" async defer></script>
+    <!--script data-cfasync="false" src="https://www.recaptcha.net/recaptcha/api.js?onload=onloadCallback&render=explicit" -->
+    </script>
+    </div>
+  </body>
+</html>
+

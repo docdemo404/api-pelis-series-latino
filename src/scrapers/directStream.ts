@@ -921,6 +921,12 @@ export function mereceRepasoDeExtraccion(embedUrl: string): boolean {
  * arreglar también las 14.000 fichas que ya están guardadas.
  */
 const HOSTS_CON_EXTRACTOR = [
+  // El más numeroso del catálogo. Estuvo vetado en hostPolicy por estrangular a las IP de
+  // datacenter y no hacía falta nombrarlo aquí; al levantarse el veto el 2026-08-19 (entrega
+  // 8/8 desde Vercel, 233 KB/s) hay 33.195 servidores guardados como simple embed que SÍ se
+  // saben extraer —su `eval(function(p,a,c,k,e,d))` trae `var links={"hls2":"…master.m3u8"}`—
+  // y que sin esta línea nadie volvería a mirar.
+  'vidhideplus', 'vidhide',
   'emturbovid', 'turbovidhls',                       // HLS con segmentos disfrazados de PNG
   'upns.', 'strp2p', '4meplayer', 'rpmstream',       // familia upns (API cifrada)
   'blogspot', 'blogfc',                              // envoltorio de FuegoCine (`link=`)

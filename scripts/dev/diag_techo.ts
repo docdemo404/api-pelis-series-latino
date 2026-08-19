@@ -9,8 +9,10 @@ import 'dotenv/config';
 import { supabase } from '../../src/services/supabaseService';
 
 // Medido con scripts/dev/probe_extraccion.ts el 2026-08-19 (12 muestras por host).
-const EXTRAEN_HOY = ['emturbovid', 'turbovidhls', 'blogspot', 'blogfc', 'gscdn', 'goodstream', 'drive.google', 'voe.sx', 'unlimplay', 'vimeos'];
-const APAGADOS_POR_POLITICA = ['vidhideplus', 'vidhide', 'upns.', 'strp2p', '4meplayer', 'rpmstream'];
+// vidhideplus entra aquí desde que se levantó su veto el 2026-08-19: entrega 8/8 desde Vercel a
+// 233 KB/s (probe_vidhide_vercel.ts) y su packer trae el m3u8 a la vista.
+const EXTRAEN_HOY = ['vidhideplus', 'vidhide', 'emturbovid', 'turbovidhls', 'blogspot', 'blogfc', 'gscdn', 'goodstream', 'drive.google', 'voe.sx', 'unlimplay', 'vimeos'];
+const APAGADOS_POR_POLITICA = ['upns.', 'strp2p', '4meplayer', 'rpmstream'];
 const MUERTOS = ['vudeo.co', 'ahvsh.com'];
 
 (async () => {
