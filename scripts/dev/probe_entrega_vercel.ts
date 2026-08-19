@@ -18,9 +18,9 @@ import { httpClient, USER_AGENT } from '../../src/utils/httpClient';
 import { extractDirect } from '../../src/scrapers/directStream';
 
 const db = getSupabaseAdmin();
-const API = process.argv[2] || 'https://api-pelis-series-latino-gilt.vercel.app';
+const MARCA = process.argv[2] || 'vidhide';
 const N = Number(process.argv[3]) || 8;
-const MARCA = 'vidhide';
+const API = process.argv[4] || 'https://api-pelis-series-latino-gilt.vercel.app';
 
 const get = (u: string, ref: string, tipo: 'text' | 'arraybuffer' = 'text', ms = 60000) =>
   httpClient.get(u, {

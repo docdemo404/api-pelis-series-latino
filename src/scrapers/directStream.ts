@@ -65,21 +65,41 @@ function esFicheroDirecto(url: string): boolean {
 }
 
 /**
- * Hosts cuyo HTML contiene URLs SEÑUELO que el extractor genérico se tragaría.
+ * Hosts de los que NO se extrae, y por qué. Aquí no se publica `direct_stream` ni se intenta.
  *
- * Netu/waaw deja a la vista un `…/secip/…/1606597200/…` con marca de tiempo de 2020, y encima
- * dentro de un bloque comentado: se extrae sin problema y luego no reproduce. Publicar un
- * `direct_stream` muerto es peor que no publicar ninguno, porque el cliente pierde el tiempo
- * antes de caer al embed.
+ * Publicar un `direct_stream` muerto es peor que no publicar ninguno: el cliente lo elige PRIMERO
+ * por estar mejor rotulado, pierde el tiempo y solo entonces cae al embed.
  *
- * Su URL buena NO se va a extraer, y es una decisión, no una carencia: se obtiene con un POST
- * a `/ajax.php?mode=increment_video` que exige `adbact` (resultado de su detección de
- * bloqueadores), `adscore`, `popcount` de pop-unders realmente abiertos, coordenadas de clic y
- * un token que su código solo asigna tras un `mousemove` con `isTrusted`. Replicar eso es
- * fabricar prueba de interacción humana y falsear señales anti-adblock; queda fuera. Lo mismo
- * vale para listeamed.net, cuyo segundo salto es un muro de huella de canvas/WebGL.
+ * ── INVENTARIO MEDIDO EL 2026-08-19 (scripts/dev/probe_inventario_hosts.ts, muestras reales) ──
+ *
+ * Todos estos guardan el vídeo detrás de una comprobación de que hay una PERSONA al otro lado.
+ * Saltárselas es fabricar prueba de interacción humana, y eso queda fuera de este proyecto: no es
+ * una carencia del extractor, es una decisión, y conviene que esté escrita para no volver a
+ * gastar una tarde en ella.
+ *
+ *   waaw.to / netu.tv / hqq   23.381 servidores. Su cadena es /f/ → /watch_video.php → /e/<token>
+ *                             → /player/embed_player.php, y ahí sirve hCaptcha o reCAPTCHA.
+ *                             Sobre 40 embeds del catálogo: 30 acaban en captcha (75 %) y 10 dan
+ *                             "We can't find the file you are looking for" (25 %). CERO
+ *                             alcanzables. Medir esto es lo que da `probe_waaw_vivos.ts`.
+ *   listeamed.net              6.894. Salta a `?ch=1&js=<JWT>` y de ahí a una capa de consentimiento;
+ *                             su siguiente muro es huella de canvas/WebGL.
+ *   vudeo.co                   9.089. Cada petición devuelve una página de 1 KB que carga
+ *                             `/js/fingerprint/iife.min.js` y se redirige a sí misma con un
+ *                             `tr_uuid` nuevo. Sin ejecutar su huella, el bucle no termina.
+ *   filemoon.to / .sx          1.074. SPA de React; su `/api/videos/stream/<code>` contesta
+ *                             `{"error":"invalid or expired token"}`, y el token sale de un
+ *                             *proof-of-work* (`pow_nonce`/`pow_difficulty`) más una limpieza de
+ *                             captcha guardada como `byse:captcha-clearance:`.
+ *   doodstream.com                26. Reto de Cloudflare ("Just a moment…") antes de la página.
+ *
+ * OJO AL COMENTARIO VIEJO, por si vuelve la tentación de fiarse de uno: aquí ponía que waaw dejaba
+ * a la vista un señuelo `…/secip/…` y que su URL buena salía de un POST a
+ * `/ajax.php?mode=increment_video` con `adbact`, `popcount` y un `mousemove` con `isTrusted`. Nada
+ * de eso aparece hoy en sus páginas. La conclusión seguía siendo la correcta y el mecanismo
+ * descrito ya no existía: un comentario que explica un CÓMO caduca; el QUÉ y el POR QUÉ duran.
  */
-const DECOY_HOSTS = ['waaw.to', 'netu.tv', 'hqq.'];
+const DECOY_HOSTS = ['waaw.to', 'netu.tv', 'hqq.', 'vudeo.co', 'filemoon.', 'doodstream'];
 
 /** Reproductores SPA de la familia upns: el id va en el hash y el vídeo lo sirve su API. */
 const UPNS_HOSTS = ['upns.pro', 'upns.', 'rpmstream', '4meplayer', 'strp2p'];
