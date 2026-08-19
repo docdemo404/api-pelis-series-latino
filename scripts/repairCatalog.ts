@@ -2643,20 +2643,49 @@ async function verifyPlayableServers(apply: boolean, limitArg?: number, soloHost
     ...(r.seasons || []).flatMap((t: any) => (t.episodes || []).flatMap((e: any) => e.servers || [])),
   ];
 
-  // Un mismo embed aparece en muchas fichas y en muchos episodios: se comprueba UNA vez.
-  const pendientes = new Set<string>();
+  /**
+   * Un mismo embed aparece en muchas fichas y en muchos episodios: se comprueba UNA vez. Se
+   * guarda además su sello MÁS FRESCO, que es lo que decide si hoy se puede publicar.
+   */
+  const pendientes = new Map<string, number>();
   for (const row of rows) {
     for (const s of servidoresDe(row)) {
       if (!s?.embed_url || !s.direct_stream) continue;
       if (soloHost && !hostDe(s.embed_url).includes(soloHost)) continue;
-      pendientes.add(s.embed_url);
+      const sello = s.verified_at ? Date.parse(s.verified_at) : 0;
+      const previo = pendientes.get(s.embed_url);
+      const valido = Number.isFinite(sello) ? sello : 0;
+      if (previo === undefined || valido > previo) pendientes.set(s.embed_url, valido);
     }
   }
   console.log(`   ${pendientes.size} embeds distintos publicados como vídeo directo`);
 
-  // Turnos entre hosts + ventana rotatoria, igual que en `--servidores-muertos`.
+  /**
+   * PRIMERO LO QUE ESTÁ A PUNTO DE CADUCAR. Aquí estaba el fallo, y era de orden.
+   *
+   * Esto recorría la lista con `.sort()`, o sea POR ORDEN ALFABÉTICO DE URL, que no tiene nada
+   * que ver con la urgencia. Mientras la vuelta entera quepa en el tiempo disponible da igual —
+   * pero en cuanto una corrida se queda corta (el tope de 170 min, el runner que se apaga, un
+   * host lento), la parte que se queda sin comprobar es SIEMPRE LA MISMA COLA DEL ALFABETO. Esos
+   * sellos caducan, la ficha desaparece del catálogo, reaparece cuando por fin le toca el turno,
+   * y vuelve a caducar. Un título que va y viene es peor que uno que no está: quien lo vio ayer
+   * no entiende por qué hoy no existe.
+   *
+   * Ordenando por sello —lo más viejo delante, y lo que no se ha comprobado nunca el primero de
+   * todos— el fallo deja de ser un agujero y pasa a ser un retraso: una vuelta a medias hace
+   * exactamente la mitad que corría peligro, y lo que se queda sin mirar es lo que se selló hace
+   * un rato y aún tiene horas de validez por delante. Ninguna corrida parcial deja caducar nada
+   * mientras el atraso quepa dentro de la ventana del sello.
+   *
+   * El reparto por turnos entre hosts se conserva ENCIMA de este orden, y no es opcional: diez
+   * sondas seguidas al mismo sitio devuelven 429 y la pasada mide humo.
+   */
+  const porUrgencia = Array.from(pendientes.entries())
+    .sort((a, b) => a[1] - b[1])
+    .map(([url]) => url);
+
   const porHostCola = new Map<string, string[]>();
-  for (const url of Array.from(pendientes).sort()) {
+  for (const url of porUrgencia) {
     const h = hostDe(url);
     (porHostCola.get(h) || porHostCola.set(h, []).get(h)!).push(url);
   }
@@ -2664,15 +2693,25 @@ async function verifyPlayableServers(apply: boolean, limitArg?: number, soloHost
   for (let fila = 0; todos.length < pendientes.size; fila++) {
     for (const cola of porHostCola.values()) if (fila < cola.length) todos.push(cola[fila]);
   }
+
   const lote = Number.isFinite(limitArg as number) ? (limitArg as number) : 0;
   let lista = todos;
   if (lote > 0 && lote < todos.length) {
-    const vueltas = Math.max(1, Math.ceil(todos.length / lote));
-    const desde = (Math.floor(Date.now() / 86400000) % vueltas) * lote;
-    lista = todos.slice(desde, desde + lote);
-    console.log(`   ventana rotatoria: ${desde}–${desde + lista.length} de ${todos.length} (vuelta completa cada ${vueltas} pasadas)`);
+    /**
+     * Y con `--limit` se cogen LOS PRIMEROS, no una ventana que va rotando por días.
+     *
+     * La ventana rotatoria existía para garantizar que, a base de corridas, se acabara pasando
+     * por todos. Con la lista ordenada por urgencia eso ya está garantizado, y mejor: los que más
+     * lo necesitan van delante en CADA corrida, sin esperar a que el calendario les dé su turno.
+     * La ventana tenía además el defecto de siempre — un día le tocaba un tramo con los sellos
+     * recién puestos y gastaba la corrida entera comprobando lo ya comprobado.
+     */
+    lista = todos.slice(0, lote);
   }
-  console.log(`   ${lista.length} por comprobar\n`);
+
+  const desdeSello = (ms: number) => ms === 0 ? 'nunca' : `hace ${((Date.now() - ms) / 3600000).toFixed(1)} h`;
+  const masViejo = porUrgencia.length ? pendientes.get(porUrgencia[0])! : 0;
+  console.log(`   ${lista.length} por comprobar · el más atrasado se selló ${desdeSello(masViejo)}\n`);
 
   /**
    * El tope era 20 y se midió en producción que no llega: 4.547 servidores tardaron 95 minutos y

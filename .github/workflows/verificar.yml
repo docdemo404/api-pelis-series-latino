@@ -25,7 +25,19 @@ name: Que nada del catálogo esté sin comprobar
 
 on:
   schedule:
-    - cron: '0 */3 * * *'
+    # CADA DOS HORAS, Y EL MOTIVO ES SOBREVIVIR A UNA CORRIDA PERDIDA.
+    #
+    # Eran tres, y con la vuelta en ~95 min salían las cuentas por poco: el sello más viejo
+    # llegaba a 3 h + 95 min ≈ 4,6 h, justo por debajo de las 6 que dura. Pero eso solo se
+    # sostiene si NINGUNA corrida falla. Con una sola que se pierda —y se perdieron cuatro
+    # seguidas— el atraso salta a 7,6 h, los sellos caducan, y los títulos empiezan a
+    # desaparecer del catálogo y a volver. Ese ir y venir es peor que no estar.
+    #
+    # A dos horas, una corrida perdida deja el peor caso en 5,6 h: sigue dentro de la ventana.
+    # El repositorio es público, así que los minutos de runner no cuestan nada, y la guarda de
+    # concurrencia impide que dos se pisen — si una tarda más de dos horas, la siguiente espera
+    # en vez de duplicar las peticiones a los hosts.
+    - cron: '0 */2 * * *'
   workflow_dispatch:
 
 concurrency:
