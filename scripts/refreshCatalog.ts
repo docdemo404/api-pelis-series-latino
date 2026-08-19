@@ -412,7 +412,32 @@ async function fillDirectStreams(max: number): Promise<void> {
   let conDirecto = 0;
   let servidoresDirectos = 0;
 
+  /**
+   * SE PARA SOLA ANTES DE QUE LA MATEN.
+   *
+   * El tope de fichas no controla el tiempo: cuánto tarda una depende de cuántos servidores
+   * tenga y de lo que respondan sus hosts, así que elegir el N correcto es adivinar. El
+   * 2026-08-19 se lanzó con 3.000 y el runner la canceló a los 170 minutos a medio camino —y,
+   * peor, su trabajo siguiente se quedó ocupando el grupo de concurrencia casi siete horas, así
+   * que la extracción NO VOLVIÓ A CORRER en todo ese rato y el catálogo se quedó plano.
+   *
+   * Lo que se pierde al morir así no es el trabajo hecho —`getStreams` escribe ficha a ficha—,
+   * es el tiempo de la cola: mientras un trabajo agoniza, el siguiente espera.
+   *
+   * Con un presupuesto propio, pasarse en el N deja de ser un error: se hace lo que cabe, se dice
+   * cuánto quedó fuera y el trabajo termina LIMPIO, liberando la cola. El valor por defecto deja
+   * media hora de margen bajo los 170 minutos del trabajo `extraer` (reproducible.yml).
+   */
+  const minutosTope = Number((process.argv.find(a => a.startsWith('--direct-minutos=')) || '').split('=')[1]) || 140;
+  const limite = Date.now() + minutosTope * 60_000;
+  let procesadas = 0;
+
   for (let i = 0; i < pending.length; i += CONCURRENCY) {
+    if (Date.now() > limite) {
+      console.log(`   ⏱ agotado el presupuesto de ${minutosTope} min: ${procesadas}/${pending.length} hechas.`);
+      console.log(`      Las ${pending.length - procesadas} restantes salen en la próxima corrida (se ordena por antigüedad, así que se avanza).`);
+      break;
+    }
     const chunk = pending.slice(i, i + CONCURRENCY);
     const resolved = await Promise.all(
       chunk.map(r => CatalogService.getStreams(r.id, r.type, { deep: true }).catch(() => null))
@@ -422,10 +447,11 @@ async function fillDirectStreams(max: number): Promise<void> {
       if (directos > 0) conDirecto++;
       servidoresDirectos += directos;
     }
-    console.log(`   ${Math.min(i + CONCURRENCY, pending.length)}/${pending.length}…`);
+    procesadas = Math.min(i + CONCURRENCY, pending.length);
+    console.log(`   ${procesadas}/${pending.length}…`);
   }
 
-  console.log(`   ${conDirecto}/${pending.length} fichas con vídeo directo · ${servidoresDirectos} servidores directos en total`);
+  console.log(`   ${conDirecto}/${procesadas} fichas con vídeo directo · ${servidoresDirectos} servidores directos en total`);
 }
 
 /** `--direct` / `--direct=N`: cuántas fichas guardadas se repasan para extraerles el vídeo. */
