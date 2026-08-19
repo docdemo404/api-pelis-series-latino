@@ -21,7 +21,8 @@ import { CatalogService } from '../src/services/catalogService';
 import { TmdbService } from '../src/services/tmdbService';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
 import { canonicalTitle, searchIndexKey, yearFromSlug } from '../src/utils/text';
-import { mereceRepasoDeExtraccion } from '../src/scrapers/directStream';
+import { mereceRepasoDeExtraccion, hasVolatileToken } from '../src/scrapers/directStream';
+import { streamClient } from '../src/utils/httpClient';
 import { MediaItem } from '../src/types';
 
 // Con RLS activado en media_items, escribir requiere la SUPABASE_SERVICE_ROLE_KEY
@@ -62,6 +63,22 @@ function toRow(item: MediaItem, withNormalized: boolean, withMetadataSource: boo
     trailer: item.trailer,
     cast_data: (item.cast_details && item.cast_details.length ? item.cast_details : item.cast) || [],
     dubbing_cast_data: item.dubbing_cast || [],
+    /**
+     * LOS ENLACES SE ESCRIBEN AQUÍ, con la ficha, y no en una pasada posterior.
+     *
+     * `toRow` no los guardaba: la fila se creaba con metadata y los servidores llegaban después,
+     * en otro barrido. Eso es exactamente lo que llenaba el catálogo de títulos anunciados sin
+     * vídeo — la ficha existía desde el minuto uno y su enlace no aparecía nunca.
+     *
+     * Ahora el scraper ya trae la url directa comprobada (ver `quedarseConLoQueReproduce`), así
+     * que se guarda con ella o no se guarda: sin esta línea, todo lo extraído se tiraba al
+     * escribir y la fila nacía muda otra vez.
+     */
+    servers: item.servers || [],
+    seasons: (item as any).seasons || [],
+    has_streams: item.has_streams === true,
+    streams_updated_at: new Date().toISOString(),
+    streams_checked_at: new Date().toISOString(),
     total_seasons: item.total_seasons || 0,
     total_episodes: item.total_episodes || 0,
     updated_at: new Date().toISOString()
@@ -514,6 +531,161 @@ function parseVerifyFlag(argv: string[]): number {
   return Number.isFinite(value) && value > 0 ? value : 500;
 }
 
+
+/** Hosts cuya url ES el fichero de vídeo: se piden y devuelven bytes, sin firma que caduque. */
+const FICHERO_PERMANENTE = [
+  /pixeldrain\.com\/api\/file\//i,
+  /archive\.org\/download\//i,
+  /1a-\d+\.com\/video\//i,
+  /cdn\.rumble\.cloud\/video\//i,
+  /remux\.unlimplay\.com\/remux/i,
+  /\.(mp4|mkv|webm)(\?|$)/i,
+];
+
+/** La dirección real que un envoltorio lleva dentro de sus parámetros (`?link=…`). */
+function urlDentroDelEnvoltorio(embed: string): string | null {
+  try {
+    for (const [, v] of new URL(embed).searchParams) {
+      if (!v) continue;
+      if (/^https?:\/\//i.test(v)) return v;
+      if (/^[\w.-]+\.[a-z]{2,}\//i.test(v)) return `https://${v}`;
+    }
+  } catch { /* no es una url con parámetros */ }
+  return null;
+}
+
+/**
+ * ¿Devuelve bytes de vídeo, y a qué velocidad? 64 KB bastan para ver la cabecera del contenedor.
+ *
+ * Devuelve los KB/s además del sí/no porque con eso se ORDENAN los respaldos: una ficha puede
+ * tener varios enlaces buenos y el cliente debe recibir primero el que mejor va. No se descarta a
+ * nadie por lento —este proyecto ya se tumbó entero con una regla así, y `goodstream` tarda 26 s
+ * y reproduce—: se ordena, que es distinto de condenar.
+ */
+async function entregaVideo(url: string): Promise<{ ok: boolean; kbs: number }> {
+  const t0 = Date.now();
+  try {
+    const r = await streamClient.get(url, {
+      headers: { Range: 'bytes=0-65535' },
+      responseType: 'arraybuffer',
+      timeout: 25000,
+      validateStatus: () => true,
+      maxRedirects: 5,
+    });
+    if (r.status >= 400) return { ok: false, kbs: 0 };
+    if (/text\/html/i.test(String(r.headers['content-type'] || ''))) return { ok: false, kbs: 0 };
+    const kb = ((r.data as ArrayBuffer)?.byteLength ?? 0) / 1024;
+    if (kb <= 8) return { ok: false, kbs: 0 };
+    return { ok: true, kbs: kb / Math.max((Date.now() - t0) / 1000, 0.001) };
+  } catch {
+    return { ok: false, kbs: 0 };
+  }
+}
+
+/**
+ * TODAS las urls permanentes y funcionales de una lista de servidores, ordenadas de mejor a peor.
+ *
+ * No se queda con la primera que funcione: una película o un capítulo puede tener varios enlaces
+ * buenos, y el cliente los quiere TODOS — el mejor para reproducir y los demás como respaldo, que
+ * es lo único que le permite recuperarse solo si uno se cae a mitad.
+ */
+async function urlsBuenasDe(servidores: any[], fuente: string): Promise<any[]> {
+  const salida: Array<{ sv: any; kbs: number }> = [];
+  for (const sv of servidores || []) {
+    const embed = String(sv?.embed_url || '');
+    if (!embed) continue;
+    // Un mismo servidor puede ofrecer la url por el envoltorio y a pelo: se miran las dos.
+    for (const cand of [urlDentroDelEnvoltorio(embed), embed]) {
+      if (!cand) continue;
+      if (!FICHERO_PERMANENTE.some(re => re.test(cand))) continue;
+      if (hasVolatileToken(cand)) continue;
+      if (salida.some(x => x.sv.direct_stream === cand)) continue;
+      const medida = await entregaVideo(cand);
+      if (!medida.ok) continue;
+      salida.push({
+        kbs: medida.kbs,
+        sv: {
+          ...sv,
+          direct_stream: cand,
+          direct_mode: 'public',
+          direct_kind: /\.m3u8(\?|$)/i.test(cand) ? 'hls' : 'mp4',
+          status: 'online',
+          verified_at: new Date().toISOString(),
+          source_id: fuente,
+        },
+      });
+    }
+  }
+  // El mejor primero; los demás quedan detrás como respaldo.
+  return salida.sort((a, b) => b.kbs - a.kbs).map(x => x.sv);
+}
+
+/** De qué web viene la ficha. Se guarda para poder verlo en el panel. */
+function fuenteDeLaUrl(url: string): string {
+  if (/cinecalidad/i.test(url)) return 'cinecalidad';
+  if (/fuegocine|blogfc|repfuegocinefree/i.test(url)) return 'fuegocine';
+  return 'tioplus';
+}
+
+/**
+ * Baja a la página de cada título, saca las urls de fichero, comprueba que entregan vídeo y
+ * devuelve SOLO los títulos que se pueden reproducir, ya con sus servidores puestos.
+ */
+async function quedarseConLoQueReproduce(items: MediaItem[]): Promise<MediaItem[]> {
+  console.log(`🎬 Extrayendo la url directa de ${items.length} títulos (solo entra lo que reproduzca)...`);
+  const buenos: MediaItem[] = [];
+  const CONC = 8;
+  // Presupuesto: el trabajo tiene 6 h y el crawl ya gastó las suyas. Lo que no dé tiempo a
+  // comprobar sale en la corrida siguiente, igual que en el resto de pasadas de este proyecto.
+  const limite = Date.now() + 200 * 60_000;
+  let mirados = 0;
+
+  for (let i = 0; i < items.length; i += CONC) {
+    if (Date.now() > limite) {
+      console.log(`   ⏱ agotado el presupuesto: ${mirados}/${items.length} mirados.`);
+      break;
+    }
+    await Promise.all(items.slice(i, i + CONC).map(async item => {
+      mirados++;
+      const pagina = (item as any)._tioplus_url || item._source_url;
+      if (!pagina) return;
+      const detalle = await RealScraperService.scrapeDetail(pagina).catch(() => null);
+      if (!detalle?.servers?.length) return;
+
+      const fuente = fuenteDeLaUrl(pagina);
+      const servidores = await urlsBuenasDe(detalle.servers as any[], fuente);
+
+      /**
+       * Y LOS CAPÍTULOS, que es donde vive el vídeo de una serie. Una serie no se reproduce por
+       * la ficha: se reproduce por capítulo, así que mirar solo `servers` la dejaría fuera entera
+       * aunque tuviera veinte capítulos buenos.
+       */
+      const temporadas: any[] = [];
+      for (const t of ((detalle as any).seasons || [])) {
+        const capitulos: any[] = [];
+        for (const e of (t?.episodes || [])) {
+          const suyos = await urlsBuenasDe(e?.servers || [], fuente);
+          if (suyos.length) capitulos.push({ ...e, servers: suyos });
+        }
+        if (capitulos.length) temporadas.push({ ...t, episodes: capitulos });
+      }
+
+      // Una película necesita url propia; una serie, al menos un capítulo con url.
+      const hayCapitulos = temporadas.some(t => (t.episodes || []).length > 0);
+      if (!servidores.length && !hayCapitulos) return;
+
+      item.servers = servidores;
+      if (temporadas.length) (item as any).seasons = temporadas;
+      item.has_streams = true;
+      buenos.push(item);
+    }));
+    if ((i + CONC) % 400 < CONC) {
+      console.log(`   ${Math.min(i + CONC, items.length)}/${items.length} · ${buenos.length} con vídeo`);
+    }
+  }
+  return buenos;
+}
+
 async function main() {
   const positional = process.argv.slice(2).filter(a => !a.startsWith('--'));
   const limitArg = parseInt(positional[0] || '', 10);
@@ -686,6 +858,32 @@ async function main() {
   if (!withMultiSource) {
     console.warn('   ⚠ Columnas source_urls/has_streams ausentes — ejecuta src/db/migrations/005_multisource_and_availability.sql para unificar fuentes y ocultar fichas sin enlaces.');
   }
+
+  /**
+   * ═════════════════════════════════════════════════════════════════════════════════════════
+   * SOLO ENTRA LO QUE TIENE URL DIRECTA Y FUNCIONA.
+   *
+   * Antes el crawl guardaba la ficha y los enlaces venían después, en otras pasadas. Eso es lo
+   * que llenaba el catálogo de títulos que se anunciaban y al abrirlos no reproducían: la ficha
+   * existía desde el minuto uno y su vídeo no aparecía nunca.
+   *
+   * Ahora el scraper baja a la página de cada título, le saca la url del fichero, COMPRUEBA que
+   * devuelve vídeo, y solo entonces se escribe la fila. Lo que no pasa, no entra en la base — no
+   * se esconde con un filtro: no existe.
+   *
+   * Se exige que la url sea PERMANENTE (sin firma ni caducidad dentro). Las urls firmadas de
+   * vidhideplus y compañía —`?e=129600`, `?expires=…`— no se pueden guardar: a las pocas horas
+   * devuelven 403 aunque el fichero siga ahí, y son las que obligaban a acuñar y resellar cada
+   * seis horas. Aquí la url que se guarda es la que el reproductor pide, hoy y dentro de un mes.
+   *
+   * El precio, dicho claro: el catálogo será mucho más pequeño. Es lo pedido — menos contenido,
+   * pero que funcione seguro.
+   * ═════════════════════════════════════════════════════════════════════════════════════════
+   */
+  const conDirecto = await quedarseConLoQueReproduce(all);
+  console.log(`   ${conDirecto.length}/${all.length} títulos tienen url directa permanente y funcional`);
+  all.length = 0;
+  all.push(...conDirecto);
 
   const rows = all.map(it => toRow(it, withNormalized, withMetadataSource, withRichMetadata, withMultiSource));
   let ok = 0;
