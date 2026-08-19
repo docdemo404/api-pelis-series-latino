@@ -1187,6 +1187,68 @@ export class CatalogService {
   }
 
   /**
+   * EL CATÁLOGO COMO UNA HOJA DE CÁLCULO, para el panel.
+   *
+   * Una fila por título con lo único que hace falta para juzgarlo de un vistazo: qué es, de qué
+   * web salió, y TODAS sus urls directas — la primera es la que se entrega para reproducir y las
+   * demás son el respaldo que la app usa si esa falla.
+   *
+   * Se pagina y se filtra en Postgres, no en memoria: la tabla puede tener miles de filas y el
+   * panel pide cincuenta.
+   */
+  static async contenidoParaPanel(opts: {
+    tipo?: 'movie' | 'tvseries';
+    q?: string;
+    pagina?: number;
+    porPagina?: number;
+  } = {}): Promise<{ total: number; pagina: number; filas: Array<Record<string, unknown>> }> {
+    const porPagina = Math.min(Math.max(opts.porPagina ?? 50, 1), 200);
+    const pagina = Math.max(opts.pagina ?? 1, 1);
+    const desde = (pagina - 1) * porPagina;
+
+    let q = supabase
+      .from('media_items')
+      .select('id,title,type,release_date,servers,seasons', { count: 'exact' })
+      .order('title');
+    if (opts.tipo) q = q.eq('type', opts.tipo);
+    if (opts.q) q = q.ilike('title', `%${opts.q}%`);
+
+    const { data, count, error } = await q.range(desde, desde + porPagina - 1);
+    if (error) return { total: 0, pagina, filas: [] };
+
+    /** De qué web salió un enlace. Se mira el `source_id` que guardó el crawl y, si falta, la url. */
+    const fuenteDe = (sv: any): string => {
+      const id = String(sv?.source_id || '').toLowerCase();
+      if (id) return id;
+      const u = String(sv?.embed_url || sv?.direct_stream || '');
+      if (/cinecalidad/i.test(u)) return 'cinecalidad';
+      if (/fuegocine|blogfc|repfuegocinefree/i.test(u)) return 'fuegocine';
+      return 'tioplus';
+    };
+
+    const filas = (data || []).map((r: any) => {
+      const deLaFicha: any[] = Array.isArray(r.servers) ? r.servers : [];
+      const deCapitulos: any[] = (Array.isArray(r.seasons) ? r.seasons : [])
+        .flatMap((t: any) => Array.isArray(t?.episodes) ? t.episodes : [])
+        .flatMap((e: any) => Array.isArray(e?.servers) ? e.servers : []);
+      // Ya vienen ordenadas de mejor a peor por el crawl; aquí no se reordena nada.
+      const publicables = [...deLaFicha, ...deCapitulos].filter(sv => sv?.direct_stream);
+      return {
+        id: r.id,
+        titulo: r.title,
+        tipo: r.type === 'tvseries' ? 'Serie' : 'Película',
+        anio: String(r.release_date || '').slice(0, 4),
+        fuentes: Array.from(new Set(publicables.map(fuenteDe))),
+        urls: publicables.map(sv => sv.direct_stream),
+        // Cuántas de esas urls son de capítulos: en una serie el vídeo vive ahí.
+        de_capitulos: deCapitulos.filter(sv => sv?.direct_stream).length,
+      };
+    });
+
+    return { total: count ?? filas.length, pagina, filas };
+  }
+
+  /**
    * EL ESTADO DEL CATÁLOGO EN NÚMEROS, para el panel.
    *
    * Todo lo que este proyecto ha ido descubriendo a base de correr scripts a mano —cuánto se

@@ -83,6 +83,28 @@ router.get('/api/v1/panel/estado', async (_req: Request, res: Response, next: Ne
   }
 });
 
+/**
+ * EL CATÁLOGO EN FORMA DE TABLA, para verlo como una hoja de cálculo desde el panel.
+ * Filtra por tipo, busca por título y pagina en Postgres.
+ */
+router.get('/api/v1/panel/contenido', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const tipoCrudo = String(req.query.tipo || '').toLowerCase();
+    const tipo = tipoCrudo === 'movie' || tipoCrudo === 'tvseries' ? tipoCrudo : undefined;
+    res.json({
+      status: 'success',
+      ...(await CatalogService.contenidoParaPanel({
+        tipo,
+        q: String(req.query.q || '').trim() || undefined,
+        pagina: Number(req.query.page) || 1,
+        porPagina: Number(req.query.limit) || 50,
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Actualizar fuentes y su orden de prioridad
 router.post('/api/v1/panel/sources', async (req: Request, res: Response, next: NextFunction) => {
   try {
