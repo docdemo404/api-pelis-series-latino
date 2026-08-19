@@ -1192,6 +1192,7 @@ export class CatalogService {
       conPoster, reproducible, sinEnlaces, sinComprobar,
       selloVigente, sello24h, nuncaResueltas, conServidoresSinAnunciar,
       anunciables,
+      reproducibleConPoster,
       // Las fuentes se reconocen por el molde del id, que ES el slug de su página (FUENTES.md §2.3).
       deFuegocine, deCinecalidad,
     ] = await enTandas<number>([
@@ -1207,6 +1208,10 @@ export class CatalogService {
       () => cuantas(q => q.is('streams_updated_at', null)),
       () => cuantas(q => q.eq('has_streams', false).neq('servers', '[]')),
       () => cuantas(q => q.eq('has_streams', true).not('poster', 'is', null).gt('streams_checked_at', vigente)),
+      // El escalón de en medio. Sin él, el panel enseñaba «reproducible» y «lo que ve la app»
+      // como si fueran cosas distintas cuando uno es subconjunto del otro, y no se veía cuál de
+      // las dos exigencias que faltan —carátula o sello— está dejando fuera a cada ficha.
+      () => cuantas(q => q.eq('has_streams', true).not('poster', 'is', null)),
       () => cuantas(q => q.or('id.like.fc-%,id.like.2%-%-%')),
       () => cuantas(q => q.like('id', 'ver-%')),
     ]);
@@ -1226,9 +1231,15 @@ export class CatalogService {
        * Verlos juntos es lo que distingue «no hay catálogo» de «el catálogo está ahí sin sellar»,
        * que son problemas distintos con arreglos distintos.
        */
+      /**
+       * EL EMBUDO, en orden y cada uno subconjunto del anterior. Se pintan así a propósito: la
+       * primera versión enseñaba «reproducible» y «lo que ve la app» como dos cifras sueltas, y
+       * con 2.798 y 2.791 delante es imposible adivinar que la segunda sale de la primera.
+       */
       escalones: {
         con_poster: conPoster,
         reproducible,
+        reproducible_con_poster: reproducibleConPoster,
         sin_enlaces: sinEnlaces,
         sin_comprobar: sinComprobar,
         sello_vigente: selloVigente,

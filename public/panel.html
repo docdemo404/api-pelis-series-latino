@@ -383,7 +383,7 @@
       estadoBox.innerHTML =
         '<div class="row g-4">' +
 
-          '<div class="col-12 col-lg-4">' +
+          '<div class="col-12 col-lg-6">' +
             '<div class="stat-box">' +
               '<div class="text-secondary small mb-1">Lo que ve la app</div>' +
               '<div class="display-6 fw-bold text-info m-0">' + num(c.anunciables) + '</div>' +
@@ -396,17 +396,30 @@
 
           '<div class="col-12 col-lg-4">' +
             '<div class="stat-box">' +
-              '<div class="text-secondary small mb-2">Por qué el resto no se anuncia</div>' +
-              fila('Reproducible', num(esc.reproducible)) +
-              fila('Comprobada y sin enlaces', num(esc.sin_enlaces)) +
-              fila('Sin comprobar todavía', num(esc.sin_comprobar)) +
-              fila('Con sello vigente', num(esc.sello_vigente), '(' + (esc.ventana_sello_horas || 6) + ' h)') +
-              fila('Sellada en 24 h', num(esc.sello_ultimas_24h)) +
-              '<div class="text-secondary small mt-2">Una ficha se anuncia solo si cumple las tres: reproducible, con carátula y con el sello al día.</div>' +
+              '<div class="text-secondary small mb-2">De dónde sale ese número</div>' +
+              // Cada línea es un SUBCONJUNTO de la de arriba. Se sangran y se marca la última
+              // porque con 2.798 y 2.791 seguidos es imposible adivinar que uno sale del otro.
+              fila('Fichas del catálogo', num(c.total)) +
+              fila('↳ reproducibles', num(esc.reproducible)) +
+              fila('&nbsp;&nbsp;↳ y con carátula', num(esc.reproducible_con_poster)) +
+              fila('&nbsp;&nbsp;&nbsp;&nbsp;↳ y con el sello al día', '<span class="text-info">' + num(c.anunciables) + '</span>', '← lo que ve la app') +
+              '<div class="text-secondary small mt-2">Las tres condiciones se suman: cada línea es parte de la de arriba.</div>' +
             '</div>' +
           '</div>' +
 
           '<div class="col-12 col-lg-4">' +
+            '<div class="stat-box">' +
+              '<div class="text-secondary small mb-2">Lo que queda fuera</div>' +
+              fila('Comprobadas y sin enlaces', num(esc.sin_enlaces)) +
+              fila('Sin comprobar todavía', num(esc.sin_comprobar)) +
+              fila('Sin carátula', num(c.total >= 0 && esc.con_poster >= 0 ? c.total - esc.con_poster : -1)) +
+              '<div class="text-secondary small mt-3 mb-2">Sellos de verificación</div>' +
+              fila('Vigentes', num(esc.sello_vigente), '(' + (esc.ventana_sello_horas || 6) + ' h)') +
+              fila('Sellados en 24 h', num(esc.sello_ultimas_24h)) +
+            '</div>' +
+          '</div>' +
+
+          '<div class="col-12 col-lg-6">' +
             '<div class="stat-box">' +
               '<div class="text-secondary small mb-2">Trabajo pendiente</div>' +
               fila('Nunca resueltas', num(pen.nunca_resueltas)) +
