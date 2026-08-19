@@ -75,6 +75,7 @@ import { streamClient } from '../src/utils/httpClient';
 import { inspectEmbed } from '../src/scrapers/embedHealth';
 import { bestMode, policyFor } from '../src/scrapers/hostPolicy';
 import { sinVideoDirecto, comprobarEmbed } from '../src/services/playbackHealth';
+import { directEndpointUrl } from '../src/scrapers/directStream';
 import { nombreConTipo, paraElCliente, fichaReproducible, veredictoDisponibilidad } from '../src/services/streamSorter';
 import { MediaItem, ContentType } from '../src/types';
 
@@ -3076,6 +3077,181 @@ async function repairFakeDirects(apply: boolean, limitArg?: number, soloHost?: s
   await purgarCacheDeTocadas(apply);
 }
 
+/**
+ * ¿SE PUEDE ENTREGAR DESDE DONDE SE SIRVE? (`--entrega`)
+ *
+ * EL EXAMEN SE HACÍA EN UN SITIO Y LA ENTREGA OCURRE EN OTRO, y ese desajuste es la última razón
+ * por la que un título podía anunciarse y no reproducirse.
+ *
+ * `--verificar` corre en GitHub Actions y comprueba el host DIRECTAMENTE: se descarga un segmento
+ * y lo sella. La reproducción de verdad no va por ahí —va del móvil a Vercel y de Vercel al
+ * host—, así que un host que atiende a GitHub y no a Vercel aprueba con nota y falla en el
+ * reproductor. Ningún filtro del catálogo puede verlo, porque quien lo comprueba no es quien lo
+ * sirve.
+ *
+ * Lo reportó el usuario con «Borrón y Vida Nueva»: sellada hacía SEIS MINUTOS, con vídeo real
+ * descargado, y su vidnest.io devolviendo 502 al pedirla por el camino bueno.
+ *
+ * Aquí se pregunta por el camino BUENO: se piden los primeros 64 KB a `/api/v1/stream/direct` de
+ * la API de producción, que es exactamente lo que hace ExoPlayer al pulsar Reproducir.
+ *
+ * Y SE PREGUNTA POR HOST, NO POR SERVIDOR. Que Vercel alcance o no a un sitio es propiedad del
+ * sitio, no de cada fichero: da igual cuál de los 1.126 emturbovid se pruebe. Son 15 hosts, así
+ * que la vuelta entera cuesta unas pocas peticiones en vez de 4.281 — y sin esa reducción no
+ * sería viable, porque cada una mueve bytes de verdad por la API.
+ *
+ * Se prueban varios representantes por host antes de condenarlo: un fichero puede estar roto sin
+ * que lo esté el sitio. Solo si NINGUNO entrega se da el host por inalcanzable.
+ *
+ * QUÉ SE HACE CON UN HOST INALCANZABLE: se le quita el SELLO a sus servidores, no el
+ * `direct_stream`. La diferencia es deliberada — no se destruye nada de lo scrapeado, solo se
+ * retira la prueba, que es lo que `paraElCliente` exige para publicar. Las fichas que se quedan
+ * sin nada dejan de anunciarse, y en cuanto el host vuelva a atender, la siguiente pasada de
+ * `--verificar` los sella otra vez y regresan solos.
+ *
+ *   npm run repair:catalog -- --entrega
+ *   npm run repair:catalog -- --entrega --apply
+ */
+async function checkDeliveryByHost(apply: boolean): Promise<void> {
+  const API = (process.env.API_BASE_URL || 'https://api-pelis-series-latino-gilt.vercel.app').replace(/\/+$/, '');
+  console.log(`🚚 Comprobando la entrega REAL por host, contra ${API}${apply ? '' : ' (dry-run)'}...`);
+
+  const rows = await fetchAllRows(['servers', 'seasons', 'has_streams']);
+  const hostDe = (u: string) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return '(ilegible)'; } };
+  const servidoresDe = (r: any): any[] => [
+    ...(r.servers || []),
+    ...(r.seasons || []).flatMap((t: any) => (t.episodes || []).flatMap((e: any) => e.servers || [])),
+  ];
+
+  /** Candidatos por host: solo los que HOY se publicarían, que son los que importa poder servir. */
+  const porHost = new Map<string, any[]>();
+  for (const row of rows) {
+    for (const s of servidoresDe(row)) {
+      if (!s?.embed_url || !s.direct_stream || !s.verified_at) continue;
+      if (Date.now() - Date.parse(s.verified_at) > 6 * 60 * 60 * 1000) continue;
+      const h = hostDe(s.embed_url);
+      if (!porHost.has(h)) porHost.set(h, []);
+      const lista = porHost.get(h)!;
+      if (lista.length < 4 && !lista.some(x => x.embed_url === s.embed_url)) lista.push(s);
+    }
+  }
+  console.log(`   ${porHost.size} hosts con servidores publicados\n`);
+
+  /**
+   * Una petición idéntica a la del reproductor, Y HASTA EL FINAL.
+   *
+   * El primer intento se quedaba en la primera respuesta y daba por malo todo lo que no llegara a
+   * 1 KB. Falso: en HLS la primera respuesta es el MANIFIESTO, y un manifiesto son cuatro líneas
+   * de texto. Medido — emturbovid devolvía 583 bytes de `#EXTM3U` impecable con sus dos calidades,
+   * y la regla lo condenaba junto con dropload y turbovidhls. Habría escondido 720 fichas por
+   * confundir «pesa poco» con «está roto».
+   *
+   * Un manifiesto tampoco demuestra nada por sí solo: dice qué calidades hay, no que los trozos
+   * de vídeo lleguen. Así que se sigue la cadena igual que ExoPlayer —maestro → variante →
+   * SEGMENTO— y solo cuentan como entrega los BYTES DE VÍDEO del final. Es la misma prueba que
+   * hace `--verificar` contra el host, solo que por el camino que usa el espectador.
+   */
+  async function entrega(s: any): Promise<{ ok: boolean; detalle: string }> {
+    const t = Date.now();
+    const pasos: string[] = [];
+    let url = API + directEndpointUrl(s.embed_url, s.direct_kind === 'mp4' ? 'mp4' : 'hls');
+
+    try {
+      // Como mucho tres saltos: maestro, variante y segmento. Con eso se llega a vídeo siempre.
+      for (let salto = 0; salto < 3; salto++) {
+        const r = await streamClient.get(url, {
+          headers: { Range: 'bytes=0-65535' },
+          responseType: 'arraybuffer',
+          maxRedirects: 5,
+          timeout: 30000,
+          validateStatus: () => true,
+        });
+        const buf: Buffer = Buffer.from((r.data as any) || []);
+        pasos.push(`${r.status}/${buf.length}B`);
+
+        if (r.status !== 200 && r.status !== 206) {
+          return { ok: false, detalle: `${pasos.join('→')}/${((Date.now() - t) / 1000).toFixed(1)}s` };
+        }
+
+        const texto = buf.slice(0, 16).toString('utf8');
+        if (!texto.startsWith('#EXTM3U')) {
+          // Ya no es una lista: esto son bytes de vídeo. Con que lleguen unos pocos KB basta —
+          // lo que se está midiendo es si el camino entrega, no cuánto pesa la película.
+          const ok = buf.length > 2048;
+          return { ok, detalle: `${pasos.join('→')}/${((Date.now() - t) / 1000).toFixed(1)}s` };
+        }
+
+        // Es una lista: se sigue por su primera entrada real (las líneas con `#` son cabeceras).
+        const siguiente = buf.toString('utf8').split(/\r?\n/).map(l => l.trim())
+          .find(l => l && !l.startsWith('#'));
+        if (!siguiente) {
+          return { ok: false, detalle: `${pasos.join('→')}/lista-vacía/${((Date.now() - t) / 1000).toFixed(1)}s` };
+        }
+        url = /^https?:\/\//i.test(siguiente) ? siguiente : API + (siguiente.startsWith('/') ? '' : '/') + siguiente;
+      }
+      return { ok: false, detalle: `${pasos.join('→')}/sin-llegar-al-vídeo/${((Date.now() - t) / 1000).toFixed(1)}s` };
+    } catch (e) {
+      return { ok: false, detalle: `${pasos.join('→')}/${e instanceof Error ? e.message : e}/${((Date.now() - t) / 1000).toFixed(1)}s` };
+    }
+  }
+
+  const caidos: string[] = [];
+  for (const [host, muestras] of porHost) {
+    let vivo = false;
+    const detalles: string[] = [];
+    for (const s of muestras) {
+      const r = await entrega(s);
+      detalles.push(r.detalle);
+      if (r.ok) { vivo = true; break; }
+    }
+    console.log(`   ${vivo ? 'OK ' : 'NO '} ${host.padEnd(32)} ${detalles.join(' | ')}`);
+    if (!vivo) caidos.push(host);
+  }
+
+  if (caidos.length === 0) {
+    console.log('\n✅ todos los hosts publicados se pueden entregar desde la API');
+    return;
+  }
+  console.log(`\n❌ ${caidos.length} host(s) que la API NO puede entregar: ${caidos.join(', ')}`);
+
+  const condenados = new Set(caidos);
+  let fichasTocadas = 0, sellosRetirados = 0, seEsconden = 0;
+
+  for (const row of rows) {
+    let cambio = false;
+    /** Se retira la PRUEBA, no el enlace. Ver la nota de arriba. */
+    const desellar = (s: any) => {
+      if (!s?.embed_url || !s.verified_at || !condenados.has(hostDe(s.embed_url))) return s;
+      cambio = true; sellosRetirados++;
+      const { verified_at, ...resto } = s;
+      return resto;
+    };
+    const servers = (row.servers || []).map(desellar);
+    const seasons = (row.seasons || []).map((t: any) => ({
+      ...t,
+      episodes: (t.episodes || []).map((e: any) => (
+        Array.isArray(e?.servers) ? { ...e, servers: e.servers.map(desellar) } : e
+      )),
+    }));
+    if (!cambio) continue;
+
+    fichasTocadas++;
+    const veredicto = veredictoDisponibilidad({ type: row.type, servers, seasons }, 'todo');
+    if (veredicto === false && row.has_streams !== false) seEsconden++;
+    if (!apply) continue;
+
+    marcarTocada(row);
+    const { error } = await db.from('media_items')
+      .update({ servers, seasons, has_streams: veredicto ?? row.has_streams })
+      .eq('id', row.id);
+    if (error) console.warn(`   ⚠ ${row.id}: ${error.message}`);
+  }
+
+  console.log(`\n🚫 ${sellosRetirados} sellos retirados en ${fichasTocadas} fichas · ${seEsconden} dejan de anunciarse ${apply ? '' : '(se harían)'}`);
+  console.log(apply ? '   ✅ aplicado' : '   (dry-run: repite con --apply)');
+  await purgarCacheDeTocadas(apply);
+}
+
 async function main() {
   const apply = process.argv.includes('--apply');
   // Elimina las filas duplicadas cuya versión correcta ya existe en el catálogo.
@@ -3159,6 +3335,11 @@ async function main() {
 
   if (process.argv.includes('--sin-directo')) {
     await hideRowsWithoutDirect(apply);
+    return;
+  }
+
+  if (process.argv.includes('--entrega')) {
+    await checkDeliveryByHost(apply);
     return;
   }
 

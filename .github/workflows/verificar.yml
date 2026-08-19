@@ -71,6 +71,28 @@ jobs:
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
         run: npx ts-node scripts/repairCatalog.ts --verificar --apply
 
+      # LO QUE SE ACABA DE SELLAR, ¿SE PUEDE ENTREGAR DESDE DONDE SE SIRVE?
+      #
+      # El paso de arriba comprueba el host DIRECTAMENTE desde este runner. La reproducción real no
+      # va por ahí: va del móvil a Vercel y de Vercel al host. Un host que atiende a GitHub y no a
+      # Vercel aprueba con nota y falla en el reproductor, y ningún filtro del catálogo puede verlo
+      # — quien lo comprueba no es quien lo sirve. Lo reportó el usuario con «Borrón y Vida Nueva»:
+      # sellada hacía seis minutos, con vídeo real descargado, y 502 al pedirla por el camino bueno.
+      #
+      # Esto pregunta por el camino bueno, bajando hasta un segmento igual que ExoPlayer. Va por
+      # HOST y no por servidor —que Vercel alcance un sitio es propiedad del sitio—, así que son
+      # ~15 peticiones y cabe de sobra aquí. Antes de «Ajustar qué se anuncia», que es quien cobra
+      # el resultado.
+      - name: Comprobar que la API puede entregar cada host
+        if: always()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+        run: npx ts-node scripts/repairCatalog.ts --entrega --apply
+
       # Y que el catálogo diga lo que se acaba de demostrar. Va en los dos sentidos: esconde lo que
       # se quedó sin nada y devuelve lo que ha vuelto a reproducir.
       - name: Ajustar qué se anuncia
