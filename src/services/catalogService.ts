@@ -1531,6 +1531,34 @@ export class CatalogService {
       update.streams_checked_at = new Date().toISOString();
       // Y que se note YA, sin esperar a que caduquen los listados cacheados. Ver `anotarDisponibilidad`.
       await this.anotarDisponibilidad(item, veredicto);
+    } else {
+      /**
+       * NO PODER CONCLUIR NO ES MOTIVO PARA SEGUIR ANUNCIÁNDOLA.
+       *
+       * Aquí estaba el resto de los títulos que salen en la app y no reproducen. `veredicto`
+       * queda en `undefined` cuando la resolución fue PARCIAL —el presupuesto de 9 s se agota
+       * antes de mirarlo todo, que es lo normal cuando los servidores están muertos y tardan en
+       * fallar—, y entonces no se tocaba nada: ni la columna, ni el conjunto de retirados. La
+       * ficha seguía en el home y en la búsqueda, y quien la abría se comía el «se probaron todas
+       * las fuentes».
+       *
+       * Y son dos cosas distintas que aquí se confundían:
+       *
+       *   · el VEREDICTO («esta ficha no tiene nada») es una afirmación sobre su salud, y para eso
+       *     sí hace falta haberlo mirado todo. Se sigue sin tocar.
+       *   · el conjunto de RETIRADOS es una afirmación sobre AHORA MISMO: «no tengo nada que
+       *     entregar de esto en este instante». Eso no necesita exhaustividad ninguna — lo acabo
+       *     de comprobar intentándolo.
+       *
+       * Es además la única vía que se salta el caché: los listados descuentan este conjunto AL
+       * SERVIR, así que el título desaparece del home y de la búsqueda al momento, sin esperar a
+       * que caduque una lista de hace una hora ni a que pase un barrido de la nube.
+       *
+       * Se cae solo: el conjunto caduca a las 3 h y, en cuanto la ficha vuelva a entregar algo,
+       * este mismo sitio la da de baja por la rama de arriba. Esconder es inmediato; devolver
+       * exige prueba.
+       */
+      await this.anotarDisponibilidad(item, fichaReproducible(item as any));
     }
     if (item._source_urls && item._source_urls.length > 0) {
       update.source_urls = item._source_urls;
