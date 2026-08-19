@@ -14,9 +14,15 @@ export const DEFAULT_SOURCES: SourceConfig[] = [
   // extraen y se ha COMPROBADO que entregan vídeo desde el datacenter, que es donde upns murió y
   // vidhideplus estrangula. La prioridad ordena los servidores de una ficha, así que ponerla
   // delante hace que lo primero que intenta el cliente venga de la fuente que mejor se sirve.
-  { id: 'cinecalidad', name: 'Cinecalidad', enabled: true, priority: 1 },
-  { id: 'tioplus', name: 'TioPlus / PelisPlus Latino', enabled: true, priority: 2 },
-  { id: 'fuegocine', name: 'FuegoCine', enabled: true, priority: 3 },
+  /**
+   * La fuente propia va PRIMERA, y no por capricho: es la única que no depende de que una web
+   * ajena siga viva, siga publicando y no cambie su plantilla. Si un título tiene una url puesta
+   * a mano y otra scrapeada, la de casa es la que más probabilidades tiene de seguir ahí mañana.
+   */
+  { id: 'manual', name: 'Fuente propia (panel)', enabled: true, priority: 1 },
+  { id: 'cinecalidad', name: 'Cinecalidad', enabled: true, priority: 2 },
+  { id: 'tioplus', name: 'TioPlus / PelisPlus Latino', enabled: true, priority: 3 },
+  { id: 'fuegocine', name: 'FuegoCine', enabled: true, priority: 4 },
 ];
 
 /**

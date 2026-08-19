@@ -105,6 +105,35 @@ router.get('/api/v1/panel/contenido', async (req: Request, res: Response, next: 
   }
 });
 
+/**
+ * AÑADIR UNA FICHA A MANO — la fuente propia.
+ *
+ * Se elige un título de TMDB (con `/panel/media/search`) y se pegan una o varias urls directas.
+ * La metadata la pone TMDB entera, así que la identidad está resuelta antes de empezar; las urls
+ * se COMPRUEBAN una a una antes de guardarlas y se contesta cuáles pasaron y cuáles no.
+ */
+router.post('/api/v1/panel/manual', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const tmdbId = Number(b.tmdb_id);
+    const tipo = String(b.type) === 'tvseries' ? 'tvseries' : 'movie';
+    const urls = Array.isArray(b.urls)
+      ? (b.urls as unknown[]).map(u => String(u))
+      : String(b.urls || '').split(/[\s,;]+/);
+
+    if (!Number.isFinite(tmdbId) || tmdbId <= 0) {
+      return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'Se requiere un tmdb_id válido');
+    }
+    const r = await CatalogService.anadirFichaManual({ tmdbId, tipo: tipo as any, urls });
+    if (!r.ok) {
+      return res.status(422).json({ status: 'error', message: r.error, aceptadas: r.aceptadas, rechazadas: r.rechazadas });
+    }
+    res.json({ status: 'success', ...r });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Actualizar fuentes y su orden de prioridad
 router.post('/api/v1/panel/sources', async (req: Request, res: Response, next: NextFunction) => {
   try {

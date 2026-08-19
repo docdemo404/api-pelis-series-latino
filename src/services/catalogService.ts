@@ -3,7 +3,8 @@ import { supabase, getSupabaseAdmin } from './supabaseService';
 import { RealScraperService } from './realScraperService';
 import { TmdbService } from './tmdbService';
 import { sortServersBySourcePriority, getPrimaryStream, paraElCliente, fichaReproducible, veredictoDisponibilidad, VERIFICADO_VIGENTE_MS } from './streamSorter';
-import { normalizeTitle, slugify, yearFromSlug } from '../utils/text';
+import { normalizeTitle, slugify, yearFromSlug, searchIndexKey } from '../utils/text';
+import { httpClient } from '../utils/httpClient';
 import { CacheStore } from '../cache/store';
 import { unwrapRedirector } from '../scrapers/directStream';
 import { revisarServidores, aplicarVeredictosRecordados } from './playbackHealth';
@@ -1184,6 +1185,108 @@ export class CatalogService {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * FUENTE PROPIA: una ficha añadida a mano desde el panel.
+   *
+   * Es la fuente más fiable que puede tener este catálogo, y por eso existe: todo lo demás
+   * depende de que una web ajena siga viva, siga publicando y no cambie su plantilla. Aquí la url
+   * la pone una persona y no se va a caer porque a alguien le dé por rediseñar su reproductor.
+   *
+   * LA METADATA VIENE ENTERA DE TMDB, que es la regla de toda la casa (FUENTES.md §1): nada
+   * adopta la identidad de otra cosa sin respaldo. Quien añade elige un título CONCRETO de TMDB
+   * —con su año y su carátula delante—, así que la identidad está resuelta antes de empezar y no
+   * hay matcher que pueda equivocarse.
+   *
+   * LAS URLS SE COMPRUEBAN ANTES DE GUARDARLAS. Si no entregan vídeo no se guardan, igual que en
+   * el crawl: en esta base no entra nada que no reproduzca, venga de donde venga. Se devuelve
+   * cuáles pasaron y cuáles no, para que quien las pegó lo vea.
+   */
+  static async anadirFichaManual(opts: {
+    tmdbId: number;
+    tipo: ContentType;
+    urls: string[];
+  }): Promise<{ ok: boolean; id?: string; titulo?: string; aceptadas: string[]; rechazadas: string[]; error?: string }> {
+    const urls = Array.from(new Set(opts.urls.map(u => u.trim()).filter(Boolean)));
+    if (!urls.length) return { ok: false, aceptadas: [], rechazadas: [], error: 'No se pasó ninguna url' };
+
+    const detalle = await TmdbService.getTmdbDetails(opts.tmdbId, opts.tipo);
+    if (!detalle) return { ok: false, aceptadas: [], rechazadas: urls, error: `TMDB no conoce el ${opts.tipo} ${opts.tmdbId}` };
+
+    // Cada url se prueba de verdad: 64 KB bastan para ver la cabecera del contenedor.
+    const aceptadas: string[] = [];
+    const rechazadas: string[] = [];
+    await Promise.all(urls.map(async url => {
+      try {
+        const r = await httpClient.get(url, {
+          headers: { Range: 'bytes=0-65535' },
+          responseType: 'arraybuffer',
+          timeout: 25000,
+          validateStatus: () => true,
+          maxRedirects: 5,
+        } as any);
+        const bytes = (r.data as ArrayBuffer)?.byteLength ?? 0;
+        const esHtml = /text\/html/i.test(String(r.headers['content-type'] || ''));
+        if (r.status < 400 && !esHtml && bytes > 8192) aceptadas.push(url);
+        else rechazadas.push(url);
+      } catch {
+        rechazadas.push(url);
+      }
+    }));
+
+    if (!aceptadas.length) {
+      return { ok: false, aceptadas, rechazadas, error: 'Ninguna url entregó vídeo' };
+    }
+
+    const titulo = detalle.title || detalle.name || `TMDB ${opts.tmdbId}`;
+    const fecha = String(detalle.release_date || detalle.first_air_date || '');
+    // El id lleva el año: dos obras del mismo nombre no pueden pisarse (FUENTES.md §1).
+    const id = `manual-${slugify(titulo)}${fecha ? '-' + fecha.slice(0, 4) : ''}`;
+
+    const servers = aceptadas.map((url, i) => ({
+      id: `${id}_manual_${i}`,
+      name: `Manual ${i + 1}`,
+      embed_url: url,
+      direct_stream: url,
+      direct_mode: 'public' as const,
+      direct_kind: /\.m3u8(\?|$)/i.test(url) ? ('hls' as const) : ('mp4' as const),
+      status: 'online' as const,
+      source_id: 'manual',
+      verified_at: new Date().toISOString(),
+    }));
+
+    const fila: Record<string, unknown> = {
+      id,
+      tmdb_id: opts.tmdbId,
+      type: opts.tipo,
+      title: titulo,
+      original_title: detalle.original_title || detalle.original_name || titulo,
+      overview: detalle.overview || '',
+      release_date: fecha,
+      rating: detalle.vote_average || 0,
+      genres: (detalle.genres || []).map((g: any) => g.name),
+      poster: detalle.poster_path ? `https://image.tmdb.org/t/p/w500${detalle.poster_path}` : null,
+      backdrop: detalle.backdrop_path ? `https://image.tmdb.org/t/p/original${detalle.backdrop_path}` : null,
+      runtime: detalle.runtime ?? null,
+      metadata_source: 'tmdb',
+      servers,
+      seasons: [],
+      has_streams: true,
+      source_url: null,
+      source_urls: [],
+      streams_updated_at: new Date().toISOString(),
+      streams_checked_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      title_normalized: searchIndexKey(titulo, detalle.original_title || detalle.original_name || titulo, []),
+    };
+
+    const { error } = await getSupabaseAdmin().from('media_items').upsert(fila, { onConflict: 'id' });
+    if (error) return { ok: false, aceptadas, rechazadas, error: error.message };
+
+    await this.invalidateItem({ id });
+    await this.invalidateListings();
+    return { ok: true, id, titulo, aceptadas, rechazadas };
   }
 
   /**
