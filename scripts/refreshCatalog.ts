@@ -40,7 +40,7 @@ async function hasColumn(column: string): Promise<boolean> {
   return !error;
 }
 
-function toRow(item: MediaItem, withNormalized: boolean, withMetadataSource: boolean, withRichMetadata: boolean) {
+function toRow(item: MediaItem, withNormalized: boolean, withMetadataSource: boolean, withRichMetadata: boolean, withMultiSource = false) {
   const row: Record<string, unknown> = {
     id: item.id,
     tmdb_id: item.tmdb_id,
@@ -79,6 +79,24 @@ function toRow(item: MediaItem, withNormalized: boolean, withMetadataSource: boo
     // URL exacta del detalle en la fuente: con ella la API resuelve los enlaces con UN
     // solo scrapeDetail en vez de una búsqueda por título (migración 004).
     row.source_url = (item as any)._tioplus_url || item._source_url || null;
+  }
+  if (withMultiSource) {
+    /**
+     * TODAS sus páginas, no solo la principal.
+     *
+     * Cuando dos fuentes traen la misma obra, la copia descartada cede aquí su página (ver el
+     * índice `byTmdb` más abajo). Si esa lista no se escribiera, la absorción se perdería en
+     * memoria: `mergeIntoExisting` solo parchea `source_urls` de filas que YA existen, y una
+     * ficha nueva se guardaría con la página de una sola web.
+     *
+     * Sin su página, los servidores exclusivos de esa fuente son inalcanzables desde la ficha
+     * unificada (migración 005).
+     */
+    const paginas = new Set([
+      ...(item._source_urls || []),
+      (item as any)._tioplus_url || item._source_url,
+    ].filter(Boolean) as string[]);
+    if (paginas.size) row.source_urls = Array.from(paginas);
   }
   return row;
 }
@@ -506,7 +524,20 @@ async function main() {
   // NEGATIVO, que nunca colisiona con un id real. Como ese fallback sí puede repetir un título
   // ya presente, se deduplica por título canónico + tipo y cede siempre ante la ficha de TMDB.
   const CONCURRENCY = 10;
-  const byTmdb = new Map<number, MediaItem>();
+  /**
+   * ÍNDICE POR TIPO **Y** TMDB_ID, no por tmdb_id a secas.
+   *
+   * TMDB numera películas y series por separado y los números se repiten: medido sobre este
+   * catálogo, 76 identificadores los usan a la vez una película y una serie (el 194 es «Amélie»
+   * y «NYPD Blue»; el 246, «Zatoichi» y «Avatar: La leyenda de Aang»). Con la clave a secas, la
+   * segunda obra que llegara desaparecía de la tanda de escritura sin dejar rastro — y la tabla
+   * sí distingue las dos, porque su UNIQUE es (tmdb_id, type). Es la misma regla que FUENTES.md §1
+   * pone por delante de todo: la clase forma parte de la identidad.
+   */
+  const byTmdb = new Map<string, MediaItem>();
+  const claveDeFicha = (it: MediaItem) => `${it.type}:${it.tmdb_id}`;
+  let absorbidas = 0;
+  let noFundidasPorAno = 0;
   const fallbacks: MediaItem[] = [];
   let withSignals = 0;
   for (let i = 0; i < items.length; i += CONCURRENCY) {
@@ -523,7 +554,54 @@ async function main() {
         fallbacks.push(item);
         continue;
       }
-      if (!byTmdb.has(item.tmdb_id)) byTmdb.set(item.tmdb_id, item);
+      const clave = claveDeFicha(item);
+      const yaEstaba = byTmdb.get(clave);
+      if (!yaEstaba) {
+        byTmdb.set(clave, item);
+        continue;
+      }
+      /**
+       * LA COPIA NO SE TIRA: SE LE QUITA LA PÁGINA ANTES.
+       *
+       * Aquí llega la MISMA obra traída por otra fuente. Quedarse con una sola fila es lo
+       * correcto —la tabla tiene UNIQUE (tmdb_id, type)— pero descartar la otra entera se lleva
+       * por delante lo único que aportaba: SU página de origen, que es de donde salen sus
+       * servidores. Sin ella, la ficha unificada nunca ve los enlaces de esa web.
+       *
+       * `mergeIntoExisting` ya sabía hacer esto, pero corre al ESCRIBIR y solo para filas que
+       * chocan contra la base; una copia descartada aquí no llega nunca hasta allí. Medido en la
+       * corrida del 2026-08-19: 17.767 títulos recolectados y 14.791 escritos — casi 3.000 copias
+       * evaporadas con sus páginas dentro. Se ve en la cobertura: de Cinecalidad solo constaba el
+       * 62-69 %, y lo que faltaba era justo lo que TioPlus ya traía.
+       *
+       * Y NO SE FUNDE NADA SIN COMPROBAR EL AÑO, la misma llave que exige `mergeIntoExisting`: el
+       * tmdb_id no lo publica la fuente, lo DEDUCE el matcher, y cuando se equivoca esto pegaría
+       * la página de una película a la ficha de otra. Con más de un año de diferencia se descarta
+       * como antes, que es el comportamiento seguro.
+       */
+      const anoDe = (x: MediaItem) => Number(String(x.release_date || '').slice(0, 4)) || 0;
+      const a = anoDe(yaEstaba);
+      const b = anoDe(item);
+      if (a && b && Math.abs(a - b) > 1) {
+        noFundidasPorAno++;
+        continue;
+      }
+      const pagina = (item as any)._tioplus_url || item._source_url;
+      if (pagina) {
+        const paginas = new Set([
+          ...(yaEstaba._source_urls || []),
+          (yaEstaba as any)._tioplus_url || yaEstaba._source_url,
+          pagina,
+        ].filter(Boolean) as string[]);
+        if (paginas.size > (yaEstaba._source_urls || []).length) {
+          yaEstaba._source_urls = Array.from(paginas);
+          absorbidas++;
+        }
+      }
+      // Y sus nombres, que alimentan `title_normalized`: sin ellos la ficha unificada no se
+      // encuentra por el título con el que la publica la otra web.
+      const alias = new Set([...(yaEstaba.aliases || []), ...(item.aliases || [])].filter(Boolean));
+      if (alias.size > (yaEstaba.aliases || []).length) yaEstaba.aliases = Array.from(alias);
     }
     if (i > 0 && i % 500 === 0) console.log(`   ...enriquecidos ${i}/${items.length} (${withSignals} con señales de su página)`);
   }
@@ -560,7 +638,9 @@ async function main() {
   const withoutPoster = all.filter(it => !it.poster).length;
   console.log(
     `   Con metadata TMDB: ${byTmdb.size} | con metadata de la fuente: ${byFallback.size} | ` +
-    `duplicados descartados: ${droppedDupes} | sin póster: ${withoutPoster}`
+    `duplicados descartados: ${droppedDupes} | sin póster: ${withoutPoster} | ` +
+    `páginas absorbidas de otra fuente: ${absorbidas}` +
+    (noFundidasPorAno ? ` | no fundidas por el año: ${noFundidasPorAno}` : '')
   );
   console.log(`   Cobertura de metadata: ${all.length}/${all.length} (100%) — ${(byTmdb.size / (all.length || 1) * 100).toFixed(1)}% desde TMDB`);
 
@@ -581,7 +661,7 @@ async function main() {
     console.warn('   ⚠ Columnas source_urls/has_streams ausentes — ejecuta src/db/migrations/005_multisource_and_availability.sql para unificar fuentes y ocultar fichas sin enlaces.');
   }
 
-  const rows = all.map(it => toRow(it, withNormalized, withMetadataSource, withRichMetadata));
+  const rows = all.map(it => toRow(it, withNormalized, withMetadataSource, withRichMetadata, withMultiSource));
   let ok = 0;
   let fail = 0;
   let mergedCount = 0;
