@@ -1425,6 +1425,14 @@ export class CatalogService {
       },
       ultima_actividad: { crawl, extraccion, verificacion },
       ritmo: { ultima_hora: ultimaHora, ultimas_24h: ultimas24h },
+      /**
+       * Qué está haciendo el crawl AHORA. Lo deja él mismo en Redis cada pocos cientos de
+       * títulos, porque su avance no se puede deducir de la base: recolecta, enriquece y
+       * comprueba durante horas y solo escribe al final. Sin esto, «cero filas» es
+       * indistinguible de «no hay nadie trabajando». Caduca a los 20 min: si el trabajo muere,
+       * el panel deja de decir que hay algo en marcha.
+       */
+      crawl_en_marcha: await CacheStore.get<Record<string, unknown>>('crawl:latido'),
       cadencia: {
         crawl: { cada_horas: 24, workflow: 'scraper.yml', tarda_horas: 3 },
         extraccion: { cada_horas: 8, workflow: 'reproducible.yml', tarda_horas: 2 },

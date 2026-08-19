@@ -419,11 +419,30 @@
                 '<div class="col-12 col-md-4">' + fila('En las últimas 24 h', num(ri.ultimas_24h)) + '</div>' +
                 '<div class="col-12 col-md-4">' + trabajo('Última escritura del crawl', act.crawl, (e.cadencia || {}).crawl) + '</div>' +
               '</div>' +
-              '<div class="text-secondary small mt-2">' +
-                (vacio
-                  ? 'La base está vacía. El crawl la está reconstruyendo: por cada título baja a su página, saca las urls y las comprueba una a una, así que tarda horas. Si «añadidas en la última hora» sube, está trabajando.'
-                  : 'Solo se guarda lo que reproduce, así que cada ficha añadida es contenido bueno. El número de arriba es el avance real.') +
-              '</div>' +
+              (function () {
+                // Lo que el propio crawl reporta mientras trabaja. Es lo único que informa
+                // durante las horas en las que aún no ha escrito nada en la base.
+                const lat = e.crawl_en_marcha;
+                if (!lat) {
+                  return '<div class="text-secondary small mt-2">' +
+                    (vacio
+                      ? 'La base está vacía y no hay ningún crawl en marcha ahora mismo.'
+                      : 'Solo se guarda lo que reproduce, así que cada ficha añadida es contenido bueno.') +
+                    '</div>';
+                }
+                const pct = (lat.total && lat.hechos != null)
+                  ? ' · ' + Math.round((lat.hechos / lat.total) * 100) + '%' : '';
+                const cuantos = (lat.hechos != null && lat.total)
+                  ? num(lat.hechos) + ' de ' + num(lat.total) + pct : '';
+                return '<div class="mt-3 p-3 rounded-3" style="background:rgba(74,222,128,0.08);border:1px solid rgba(74,222,128,0.25)">' +
+                  '<div class="fw-bold" style="color:#4ade80">⚙️ Crawl en marcha — ' + lat.fase + '</div>' +
+                  (cuantos ? '<div class="val mt-1">' + cuantos + '</div>' : '') +
+                  '<div class="text-secondary small mt-1">' +
+                    'empezó ' + haceCuanto(lat.empezado) + ' · última señal ' + haceCuanto(lat.actualizado) +
+                  '</div>' +
+                  '<div class="text-secondary small mt-2">Escribe en la base al final, así que hasta entonces los contadores de arriba siguen a cero. Esto es lo que dice que está trabajando.</div>' +
+                '</div>';
+              })() +
             '</div>' +
           '</div>' +
 

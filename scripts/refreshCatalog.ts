@@ -23,6 +23,7 @@ import { getSupabaseAdmin } from '../src/services/supabaseService';
 import { canonicalTitle, searchIndexKey, yearFromSlug } from '../src/utils/text';
 import { mereceRepasoDeExtraccion, hasVolatileToken } from '../src/scrapers/directStream';
 import { streamClient } from '../src/utils/httpClient';
+import { CacheStore } from '../src/cache/store';
 import { MediaItem } from '../src/types';
 
 // Con RLS activado en media_items, escribir requiere la SUPABASE_SERVICE_ROLE_KEY
@@ -681,10 +682,40 @@ async function quedarseConLoQueReproduce(items: MediaItem[]): Promise<MediaItem[
     }));
     if ((i + CONC) % 400 < CONC) {
       console.log(`   ${Math.min(i + CONC, items.length)}/${items.length} · ${buenos.length} con vídeo`);
+      await latir('extrayendo y comprobando urls directas', Math.min(i + CONC, items.length), items.length);
     }
   }
   return buenos;
 }
+
+/**
+ * EL LATIDO DEL CRAWL, para que el panel pueda decir si está trabajando.
+ *
+ * Hacía falta porque el avance NO se puede deducir de la base: este trabajo recolecta, enriquece
+ * y comprueba durante horas, y solo escribe AL FINAL. Mientras tanto el panel veía cero filas y
+ * cero actividad, que es indistinguible de «no está corriendo nadie» — y eso fue justo lo que se
+ * reportó al mirar el panel con la base recién vaciada.
+ *
+ * Se deja en Redis, que es donde el crawl ya escribe, así que no hace falta ninguna credencial
+ * nueva ni preguntarle nada a la API de GitHub. Y caduca solo: si el trabajo muere, el latido se
+ * apaga en 20 minutos y el panel deja de decir que hay algo en marcha, en vez de mentir para
+ * siempre.
+ */
+const CLAVE_LATIDO = 'crawl:latido';
+
+async function latir(fase: string, hechos?: number, total?: number): Promise<void> {
+  try {
+    await CacheStore.set(CLAVE_LATIDO, {
+      fase,
+      hechos: hechos ?? null,
+      total: total ?? null,
+      actualizado: new Date().toISOString(),
+      empezado: INICIO_DEL_CRAWL,
+    }, 20 * 60);
+  } catch { /* el latido nunca puede tumbar el crawl */ }
+}
+
+const INICIO_DEL_CRAWL = new Date().toISOString();
 
 async function main() {
   const positional = process.argv.slice(2).filter(a => !a.startsWith('--'));
@@ -706,12 +737,14 @@ async function main() {
     return;
   }
 
+  await latir('recolectando los títulos de las webs');
   console.log('🔎 Recolectando catálogo desde las fuentes...');
   let items = await collectCatalog();
   if (Number.isFinite(limitArg) && limitArg > 0) {
     items = items.slice(0, limitArg);
   }
   console.log(`   ${items.length} títulos recolectados`);
+  await latir('enriqueciendo con TMDB', 0, items.length);
 
   // Enriquecer con TMDB (géneros, rating, sinopsis, póster/backdrop, tráiler, cast con fotos)
   // y resolver el tmdb_id real, con concurrencia ACOTADA. skipSeasons: no bajamos temporadas
@@ -801,7 +834,10 @@ async function main() {
       const alias = new Set([...(yaEstaba.aliases || []), ...(item.aliases || [])].filter(Boolean));
       if (alias.size > (yaEstaba.aliases || []).length) yaEstaba.aliases = Array.from(alias);
     }
-    if (i > 0 && i % 500 === 0) console.log(`   ...enriquecidos ${i}/${items.length} (${withSignals} con señales de su página)`);
+    if (i > 0 && i % 500 === 0) {
+      console.log(`   ...enriquecidos ${i}/${items.length} (${withSignals} con señales de su página)`);
+      await latir('enriqueciendo con TMDB', i, items.length);
+    }
   }
 
   // Índice de títulos ya cubiertos por TMDB, para no duplicarlos con una ficha de fallback.
@@ -885,6 +921,7 @@ async function main() {
   all.length = 0;
   all.push(...conDirecto);
 
+  await latir('guardando en la base', 0, all.length);
   const rows = all.map(it => toRow(it, withNormalized, withMetadataSource, withRichMetadata, withMultiSource));
   let ok = 0;
   let fail = 0;
