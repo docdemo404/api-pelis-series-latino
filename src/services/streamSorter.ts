@@ -113,10 +113,29 @@ function costeDeEntrega(s: ServerOption): number {
 }
 
 /** ¿A este servidor se le ha descargado vídeo de verdad hace poco? */
+/**
+ * Cuánto vale el sello de una URL PERMANENTE.
+ *
+ * Las seis horas de `VERIFICADO_VIGENTE_MS` existen porque la URL que se sella caduca sola: lleva
+ * una firma con fecha dentro (`?e=129600`, `?expires=…`) y a las pocas horas devuelve 403 aunque
+ * el fichero siga ahí. Sellar cada seis horas es perseguir esa caducidad.
+ *
+ * Un fichero de `archive.org` o de `1a-1791.com` no lleva firma ninguna: la URL que funcionó ayer
+ * funciona hoy. Lo único que puede pasarle es que RETIREN el fichero, y eso no ocurre cada seis
+ * horas. Aplicarles la misma ventana los sacaba del catálogo por no haber pasado el barrido, que
+ * es justo el ir y venir de títulos del que veníamos.
+ *
+ * Una semana: lo bastante largo para que un barrido perdido no esconda nada, y lo bastante corto
+ * para que un fichero retirado no se anuncie un mes.
+ */
+const VIGENCIA_PERMANENTE_MS = 7 * 24 * 60 * 60 * 1000;
+
 function verificadoVigente(s: ServerOption): boolean {
   if (!s?.verified_at) return false;
   const t = Date.parse(s.verified_at);
-  return Number.isFinite(t) && Date.now() - t < VERIFICADO_VIGENTE_MS;
+  if (!Number.isFinite(t)) return false;
+  const ventana = s.direct_mode === 'public' ? VIGENCIA_PERMANENTE_MS : VERIFICADO_VIGENTE_MS;
+  return Date.now() - t < ventana;
 }
 
 export function nombreConTipo(name: string, tieneVideoDirecto: boolean): string {

@@ -75,6 +75,7 @@ import { streamClient } from '../src/utils/httpClient';
 import { inspectEmbed } from '../src/scrapers/embedHealth';
 import { bestMode, policyFor } from '../src/scrapers/hostPolicy';
 import { sinVideoDirecto, comprobarEmbed } from '../src/services/playbackHealth';
+import { hasVolatileToken } from '../src/scrapers/directStream';
 import { directEndpointUrl } from '../src/scrapers/directStream';
 import { nombreConTipo, paraElCliente, fichaReproducible, veredictoDisponibilidad } from '../src/services/streamSorter';
 import { MediaItem, ContentType } from '../src/types';
@@ -3408,6 +3409,159 @@ async function main() {
 
   if (process.argv.includes('--episodios-prestados')) {
     await purgeBorrowedEpisodeServers(apply);
+    return;
+  }
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * URLS DIRECTAS QUE NO CADUCAN (`--permanentes`)
+ *
+ * Es el catálogo que se pidió: cada ficha con TODAS sus urls directas funcionales, y lo que no
+ * tenga ninguna no se muestra. Sin acuñar nada al reproducir, sin sellos de seis horas, sin
+ * proxy — la url que se guarda es la que el reproductor pide.
+ *
+ * POR QUÉ ESTO ES DISTINTO DE TODO LO DEMÁS DE ESTE FICHERO. El resto del catálogo vive de urls
+ * FIRMADAS: `?t=VMhp30…&s=1787139630&e=129600` de vidhideplus, `?expires=1787149324&md5=…` de
+ * vidsonic. Esas no se pueden guardar — a las pocas horas devuelven 403 aunque el fichero siga
+ * ahí—, y de ahí sale toda la maquinaria de acuñar, sellar y volver a sellar.
+ *
+ * Pero una parte del catálogo NO es así. Los envoltorios de FuegoCine llevan la dirección real
+ * dentro de un parámetro (`?link=https://archive.org/download/…mp4`), y esa sí es el fichero:
+ * sin firma, sin caducidad, sin atadura de IP. Medido sobre el catálogo: 960 fichas la tienen,
+ * repartidas en 1a-1791 (504), rumble (204), archive.org (145), eintim (84) y pixeldrain (10).
+ *
+ * Lo que hace esta pasada:
+ *   1. recorre cada ficha y saca TODAS las urls candidatas (del envoltorio y del propio embed);
+ *   2. descarta las que lleven firma o caducidad (`hasVolatileToken`);
+ *   3. comprueba una a una que devuelven BYTES DE VÍDEO, no una página de error;
+ *   4. guarda las que pasan como `direct_mode: 'public'`, con la url REAL en `direct_stream`.
+ *
+ * El modo `public` existía en el tipo desde hace tiempo y no lo producía nadie. Es el único que
+ * no pasa por esta API: el reproductor va directo al fichero. Eso, además de ser más fiable,
+ * quita el vídeo del presupuesto de tránsito de Vercel.
+ *
+ *   npm run repair:catalog -- --permanentes            (dry-run)
+ *   npm run repair:catalog -- --permanentes --apply
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ */
+const FICHERO_PERMANENTE = [
+  /pixeldrain\.com\/api\/file\//i,
+  /archive\.org\/download\//i,
+  /1a-\d+\.com\/video\//i,
+  /cdn\.rumble\.cloud\/video\//i,
+  /remux\.unlimplay\.com\/remux/i,
+  /\.(mp4|mkv|webm)(\?|$)/i,
+];
+
+/** La dirección que un envoltorio lleva dentro de sus parámetros, si la lleva. */
+function urlDentroDelEnvoltorio(embed: string): string | null {
+  try {
+    const q = new URL(embed).searchParams;
+    for (const [, v] of q) {
+      if (!v) continue;
+      if (/^https?:\/\//i.test(v)) return v;
+      if (/^[\w.-]+\.[a-z]{2,}\//i.test(v)) return `https://${v}`;
+    }
+  } catch { /* no es una url con parámetros */ }
+  return null;
+}
+
+/** ¿Devuelve bytes de vídeo? Se piden 64 KB: basta para ver la cabecera del contenedor. */
+async function entregaVideoPermanente(url: string): Promise<boolean> {
+  try {
+    const r = await streamClient.get(url, {
+      headers: { Range: 'bytes=0-65535' },
+      responseType: 'arraybuffer',
+      timeout: 30000,
+      validateStatus: () => true,
+      maxRedirects: 5,
+    });
+    if (r.status >= 400) return false;
+    if (/text\/html/i.test(String(r.headers['content-type'] || ''))) return false;
+    return ((r.data as ArrayBuffer)?.byteLength ?? 0) > 8192;
+  } catch {
+    return false;
+  }
+}
+
+async function recogerPermanentes(apply: boolean, limitArg?: number): Promise<void> {
+  console.log(`🔗 Buscando urls directas que no caduquen${apply ? '' : ' (dry-run: no se escribe nada)'}...`);
+  const rows = await fetchAllRows(['servers', 'has_streams', 'title']);
+
+  const candidatas = rows
+    .map((r: any) => {
+      const servidores = Array.isArray(r.servers) ? r.servers : [];
+      const urls = new Map<number, string>();   // índice del servidor → url permanente candidata
+      servidores.forEach((sv: any, i: number) => {
+        if (sv?.status === 'offline') return;
+        const embed = String(sv?.embed_url || '');
+        for (const cand of [urlDentroDelEnvoltorio(embed), embed]) {
+          if (!cand) continue;
+          if (!FICHERO_PERMANENTE.some(re => re.test(cand))) continue;
+          if (hasVolatileToken(cand)) continue;
+          urls.set(i, cand);
+          break;
+        }
+      });
+      return { fila: r, urls };
+    })
+    .filter(c => c.urls.size > 0);
+
+  const objetivo = Number.isFinite(limitArg) && (limitArg as number) > 0
+    ? candidatas.slice(0, limitArg as number)
+    : candidatas;
+  console.log(`   ${candidatas.length} fichas con alguna url candidata · se comprueban ${objetivo.length}
+`);
+
+  let conAlguna = 0, urlsBuenas = 0, urlsMalas = 0, fichasEscritas = 0;
+  const CONC = 6;
+
+  for (let i = 0; i < objetivo.length; i += CONC) {
+    await Promise.all(objetivo.slice(i, i + CONC).map(async ({ fila, urls }) => {
+      const servidores = [...(fila.servers as any[])];
+      let buenas = 0;
+
+      await Promise.all(Array.from(urls.entries()).map(async ([idx, url]) => {
+        if (await entregaVideoPermanente(url)) {
+          buenas++;
+          urlsBuenas++;
+          servidores[idx] = {
+            ...servidores[idx],
+            direct_stream: url,          // la url REAL, no el endpoint de esta API
+            direct_mode: 'public',
+            direct_kind: /\.m3u8(\?|$)/i.test(url) ? 'hls' : 'mp4',
+            status: 'online',
+            verified_at: new Date().toISOString(),
+          };
+        } else {
+          urlsMalas++;
+        }
+      }));
+
+      if (buenas === 0) return;
+      conAlguna++;
+      if (!apply) return;
+      const { error } = await db.from('media_items')
+        .update({ servers: servidores, has_streams: true, streams_checked_at: new Date().toISOString() })
+        .eq('id', fila.id).select('id');
+      if (!error) {
+        fichasEscritas++;
+        tocadas.push({ id: fila.id, tmdb_id: fila.tmdb_id });
+      }
+    }));
+    if ((i + CONC) % 120 < CONC) {
+      console.log(`   ${Math.min(i + CONC, objetivo.length)}/${objetivo.length} · ${conAlguna} fichas con url permanente`);
+    }
+  }
+
+  console.log(`
+🔗 ${urlsBuenas} urls entregan vídeo · ${urlsMalas} no · ${conAlguna} fichas tendrían al menos una`);
+  console.log(apply ? `   ✅ escritas ${fichasEscritas} fichas` : '   (dry-run: repite con --apply para escribirlas)');
+  await purgarCacheDeTocadas(apply);
+}
+
+  if (process.argv.includes('--permanentes')) {
+    await recogerPermanentes(apply, Number.isFinite(limitArg) ? limitArg : undefined);
     return;
   }
 
