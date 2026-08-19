@@ -226,88 +226,6 @@
           <div id="alertBox" class="mt-3"></div>
         </div>
 
-        <!-- Editor Visual de Portadas & Metadatos (TMDB Override) -->
-        <div class="card main-card p-4 p-md-5 mb-4">
-          <div class="d-flex align-items-center justify-content-between mb-3">
-            <div>
-              <h3 class="brand-title fw-bold m-0 text-info">🖼️ Editor de Portadas & Imágenes Alternativas (TMDB)</h3>
-              <p class="text-secondary small m-0 mt-1">Busca cualquier película o serie para elegir portadas/backdrops oficiales de TMDB o establecer una URL personalizada.</p>
-            </div>
-          </div>
-
-          <div class="input-group mb-4">
-            <input type="text" id="editorQuery" class="form-control bg-dark text-white border-secondary" placeholder="Buscar película o serie (ej: Scary Movie 6, Toy Story 5, Avatar)...">
-            <button class="btn btn-info fw-bold" type="button" id="editorSearchBtn">🔍 Buscar en TMDB</button>
-          </div>
-
-          <div id="editorSearchResults" class="mb-4" style="display: none;">
-            <h6 class="text-uppercase text-secondary fw-bold small mb-3">Selecciona un título para editar su portada:</h6>
-            <div id="mediaGrid" class="row g-3"></div>
-          </div>
-
-          <!-- Panel de Selección de Imágenes -->
-          <div id="imagePickerContainer" class="p-4 bg-dark border border-secondary rounded-3" style="display: none;">
-            <div class="d-flex justify-content-between align-items-center mb-3">
-              <h5 class="fw-bold m-0 text-white" id="selectedTitleHeader">Personalizar Imágenes</h5>
-              <button type="button" class="btn btn-sm btn-outline-secondary" id="closePickerBtn">❌ Cerrar</button>
-            </div>
-
-            <div class="row g-4">
-              <!-- Vista previa actual -->
-              <div class="col-md-4">
-                <div class="card bg-slate-900 border border-secondary p-3 text-center">
-                  <h6 class="fw-bold text-secondary mb-2">Vista Previa Actual</h6>
-                  <img id="previewPoster" src="" class="img-fluid rounded-3 mb-2 shadow" style="max-height: 280px; object-fit: cover;">
-                  <div class="small text-truncate text-secondary mb-2" id="previewTitle"></div>
-                  <button type="button" id="resetOverrideBtn" class="btn btn-outline-danger btn-sm w-100 mb-2">🔄 Restablecer Portada Original</button>
-                </div>
-              </div>
-
-              <!-- Galería de Portadas Alternativas TMDB -->
-              <div class="col-md-8">
-                <h6 class="fw-bold text-info mb-2">Posters Alternativos en TMDB (Haz clic para seleccionar)</h6>
-                <div id="postersGallery" class="d-flex gap-2 overflow-auto pb-3 mb-3" style="max-height: 200px;"></div>
-
-                <h6 class="fw-bold text-info mb-2">FONDOS / Backdrops Alternativos</h6>
-                <div id="backdropsGallery" class="d-flex gap-2 overflow-auto pb-3 mb-3" style="max-height: 160px;"></div>
-
-                <div class="mb-3">
-                  <label class="form-label small text-secondary">URL de Poster Personalizada (Opcional):</label>
-                  <input type="text" id="customPosterUrl" class="form-control form-control-sm bg-dark text-white border-secondary" placeholder="https://...">
-                </div>
-
-                <div class="mb-3">
-                  <label class="form-label small text-secondary">URL de Backdrop Personalizada (Opcional):</label>
-                  <input type="text" id="customBackdropUrl" class="form-control form-control-sm bg-dark text-white border-secondary" placeholder="https://...">
-                </div>
-
-                <button type="button" id="saveOverrideBtn" class="btn btn-gradient w-100">💾 Aplicar Esta Portada / Backdrop</button>
-                <div id="overrideAlert" class="mt-2"></div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Sandbox de Pruebas en Vivo -->
-        <div class="card sandbox-card p-4">
-          <h4 class="brand-title fw-bold text-warning mb-2">🧪 Probador de Unificación en Vivo</h4>
-          <p class="text-secondary small mb-3">Busca una película o serie para comprobar en tiempo real cómo la API fusiona las fuentes en 1 solo resultado sin títulos duplicados.</p>
-
-          <div class="input-group mb-3">
-            <input type="text" id="testQuery" class="form-control bg-dark text-white border-secondary" placeholder="Ejemplo: spiderman, garfield, avatar..." value="spiderman">
-            <button class="btn btn-warning fw-bold" type="button" id="testBtn">🔎 Probar Unificación</button>
-          </div>
-
-          <div id="testOutput" style="display: none;">
-            <div class="p-3 bg-dark border border-secondary rounded-3">
-              <div class="d-flex justify-content-between mb-2">
-                <span class="fw-bold text-success" id="testCount"></span>
-                <span class="badge bg-secondary" id="testStatus"></span>
-              </div>
-              <pre id="jsonPreview" class="m-0 text-info" style="max-height: 300px; overflow-y: auto; font-size: 0.85rem;"></pre>
-            </div>
-          </div>
-        </div>
 
       </div>
     </div>
@@ -481,16 +399,16 @@
     }
 
     function renderEstado(e) {
-      const c = e.catalogo || {}, esc = e.escalones || {}, pen = e.pendiente || {}, f = e.fuentes || {}, act = e.ultima_actividad || {};
+      const c = e.catalogo || {}, en = e.enlaces || {}, f = e.fuentes || {}, act = e.ultima_actividad || {}, ri = e.ritmo || {};
+      const vacio = (c.total || 0) === 0;
       estadoBox.innerHTML =
         '<div class="row g-4">' +
 
-          '<div class="col-12 col-lg-6">' +
+          '<div class="col-12 col-lg-4">' +
             '<div class="stat-box">' +
-              '<div class="text-secondary small mb-1">Lo que ve la app</div>' +
-              '<div class="display-6 fw-bold text-info m-0">' + num(c.anunciables) + '</div>' +
-              '<div class="text-secondary small mb-3">de ' + num(c.total) + ' fichas' +
-                (c.anunciables_pct != null ? ' · ' + c.anunciables_pct + '%' : '') + '</div>' +
+              '<div class="text-secondary small mb-1">Títulos en la base</div>' +
+              '<div class="display-6 fw-bold text-info m-0">' + num(c.total) + '</div>' +
+              '<div class="text-secondary small mb-3">todos con url directa comprobada</div>' +
               fila('Películas', num(c.peliculas)) +
               fila('Series', num(c.series)) +
             '</div>' +
@@ -498,50 +416,40 @@
 
           '<div class="col-12 col-lg-4">' +
             '<div class="stat-box">' +
-              '<div class="text-secondary small mb-2">De dónde sale ese número</div>' +
-              // Cada línea es un SUBCONJUNTO de la de arriba. Se sangran y se marca la última
-              // porque con 2.798 y 2.791 seguidos es imposible adivinar que uno sale del otro.
-              fila('Fichas del catálogo', num(c.total)) +
-              fila('↳ reproducibles', num(esc.reproducible)) +
-              fila('&nbsp;&nbsp;↳ y con carátula', num(esc.reproducible_con_poster)) +
-              fila('&nbsp;&nbsp;&nbsp;&nbsp;↳ y con el sello al día', '<span class="text-info">' + num(c.anunciables) + '</span>', '← lo que ve la app') +
-              '<div class="text-secondary small mt-2">Las tres condiciones se suman: cada línea es parte de la de arriba.</div>' +
+              '<div class="text-secondary small mb-2">URLs directas</div>' +
+              fila('Total', num(en.urls_totales)) +
+              fila('Media por título', en.media_por_titulo != null ? String(en.media_por_titulo) : '—') +
+              fila('Con respaldo (2 o más)', num(en.con_respaldo)) +
+              fila('Con una sola', num(en.con_uno_solo)) +
+              '<div class="text-secondary small mt-2">Un título con una sola url se queda sin nada si esa se cae; con respaldo, la app pasa a la siguiente.</div>' +
             '</div>' +
           '</div>' +
 
           '<div class="col-12 col-lg-4">' +
             '<div class="stat-box">' +
-              '<div class="text-secondary small mb-2">Lo que queda fuera</div>' +
-              fila('Comprobadas y sin enlaces', num(esc.sin_enlaces)) +
-              fila('Sin comprobar todavía', num(esc.sin_comprobar)) +
-              fila('Sin carátula', num(c.total >= 0 && esc.con_poster >= 0 ? c.total - esc.con_poster : -1)) +
-              '<div class="text-secondary small mt-3 mb-2">Sellos de verificación</div>' +
-              fila('Vigentes', num(esc.sello_vigente), '(' + (esc.ventana_sello_horas || 6) + ' h)') +
-              fila('Sellados en 24 h', num(esc.sello_ultimas_24h)) +
-            '</div>' +
-          '</div>' +
-
-          '<div class="col-12 col-lg-6">' +
-            '<div class="stat-box">' +
-              '<div class="text-secondary small mb-2">Trabajo pendiente</div>' +
-              fila('Nunca resueltas', num(pen.nunca_resueltas)) +
-              fila('Con servidores, sin anunciar', num(pen.con_servidores_sin_anunciar)) +
+              '<div class="text-secondary small mb-2">De dónde salen</div>' +
+              Object.entries(en.por_fuente || {}).sort((a, b) => b[1] - a[1])
+                .map(([k, v]) => fila(k, num(v) + ' urls')).join('') +
               '<div class="text-secondary small mt-3 mb-2">Fichas por fuente</div>' +
-              fila('TioPlus', num(f.tioplus)) +
-              fila('FuegoCine', num(f.fuegocine)) +
               fila('Cinecalidad', num(f.cinecalidad)) +
+              fila('FuegoCine', num(f.fuegocine)) +
+              fila('TioPlus', num(f.tioplus)) +
             '</div>' +
           '</div>' +
 
           '<div class="col-12">' +
             '<div class="stat-box">' +
-              '<div class="text-secondary small mb-2">Última vez que cada trabajo escribió algo</div>' +
+              '<div class="text-secondary small mb-2">Cómo va el llenado</div>' +
               '<div class="row g-3">' +
-                '<div class="col-12 col-md-4">' + trabajo('Crawl (catálogo)', act.crawl, (e.cadencia || {}).crawl) + '</div>' +
-                '<div class="col-12 col-md-4">' + trabajo('Extracción (vídeo directo)', act.extraccion, (e.cadencia || {}).extraccion) + '</div>' +
-                '<div class="col-12 col-md-4">' + trabajo('Verificación (sellos)', act.verificacion, (e.cadencia || {}).verificacion) + '</div>' +
+                '<div class="col-12 col-md-4">' + fila('Añadidas en la última hora', num(ri.ultima_hora)) + '</div>' +
+                '<div class="col-12 col-md-4">' + fila('En las últimas 24 h', num(ri.ultimas_24h)) + '</div>' +
+                '<div class="col-12 col-md-4">' + trabajo('Última escritura del crawl', act.crawl, (e.cadencia || {}).crawl) + '</div>' +
               '</div>' +
-              '<div class="text-secondary small mt-2">Se deduce de la propia huella en la base, no de GitHub: mide cuándo escribió, no si arrancó. El crawl escribe al final, así que mientras corre este número sigue subiendo.</div>' +
+              '<div class="text-secondary small mt-2">' +
+                (vacio
+                  ? 'La base está vacía. El crawl la está reconstruyendo: por cada título baja a su página, saca las urls y las comprueba una a una, así que tarda horas. Si «añadidas en la última hora» sube, está trabajando.'
+                  : 'Solo se guarda lo que reproduce, así que cada ficha añadida es contenido bueno. El número de arriba es el avance real.') +
+              '</div>' +
             '</div>' +
           '</div>' +
 

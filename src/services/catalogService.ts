@@ -1328,6 +1328,7 @@ export class CatalogService {
       reproducibleConPoster,
       // Las fuentes se reconocen por el molde del id, que ES el slug de su página (FUENTES.md §2.3).
       deFuegocine, deCinecalidad,
+      ultimaHora, ultimas24h,
     ] = await enTandas<number>([
       () => cuantas(q => q),
       () => cuantas(q => q.eq('type', 'movie')),
@@ -1347,6 +1348,12 @@ export class CatalogService {
       () => cuantas(q => q.eq('has_streams', true).not('poster', 'is', null)),
       () => cuantas(q => q.or('id.like.fc-%,id.like.2%-%-%')),
       () => cuantas(q => q.like('id', 'ver-%')),
+      // EL RITMO. Con la base recién vaciada, «última actividad» dice «nunca» y no informa de
+      // nada: lo que prueba que el crawl está trabajando es que entren fichas, no que haya
+      // escrito alguna vez. `updated_at` se pone al escribir, así que contarlo por ventanas es
+      // el avance en vivo — y como solo se escribe lo que reproduce, cada una es contenido bueno.
+      () => cuantas(q => q.gt('updated_at', desde(1))),
+      () => cuantas(q => q.gt('updated_at', desde(24))),
     ]);
 
     const [crawl, extraccion, verificacion] = await enTandas<string | null>([
@@ -1357,33 +1364,59 @@ export class CatalogService {
 
     const pct = (a: number, b: number) => (b > 0 && a >= 0 ? Number(((a / b) * 100).toFixed(1)) : null);
 
+    /**
+     * CUÁNTAS URLS HAY Y CÓMO ESTÁN REPARTIDAS.
+     *
+     * Con el modelo nuevo los «escalones» de antes —sello vigente, has_streams, póster— ya no
+     * describen nada: en la base solo entra lo que tiene una url directa comprobada, así que
+     * TODO lo que hay reproduce por construcción. Lo que importa ahora es otra cosa: cuántos
+     * enlaces tiene cada título y cuántos son respaldo, porque de eso depende que la app pueda
+     * recuperarse sola cuando uno se cae.
+     *
+     * Se recorre el JSON de `servers`, que es caro — pero este catálogo es pequeño A PROPÓSITO
+     * (esa es toda la idea), así que aquí sí se puede pagar. Si algún día creciera mucho, este
+     * es el número que habría que mover a una columna.
+     */
+    let urlsTotales = 0, conRespaldo = 0, conUna = 0;
+    const porFuente: Record<string, number> = {};
+    try {
+      let ultimo = '';
+      for (let vuelta = 0; vuelta < 40; vuelta++) {
+        const { data } = await supabase.from('media_items')
+          .select('id,servers,seasons').gt('id', ultimo).order('id').limit(500);
+        if (!data?.length) break;
+        ultimo = (data[data.length - 1] as any).id;
+        for (const r of data as any[]) {
+          const enlaces = [
+            ...(Array.isArray(r.servers) ? r.servers : []),
+            ...(Array.isArray(r.seasons) ? r.seasons : [])
+              .flatMap((t: any) => Array.isArray(t?.episodes) ? t.episodes : [])
+              .flatMap((e: any) => Array.isArray(e?.servers) ? e.servers : []),
+          ].filter((sv: any) => sv?.direct_stream);
+          if (!enlaces.length) continue;
+          urlsTotales += enlaces.length;
+          if (enlaces.length > 1) conRespaldo++; else conUna++;
+          for (const sv of enlaces) {
+            const f = String(sv?.source_id || 'sin anotar').toLowerCase();
+            porFuente[f] = (porFuente[f] || 0) + 1;
+          }
+        }
+        if (data.length < 500) break;
+      }
+    } catch { /* si falla, el panel enseña el resto igual */ }
+
     const estado = {
       catalogo: { total, peliculas, series, anunciables, anunciables_pct: pct(anunciables, total) },
       /**
-       * Los tres escalones que una ficha tiene que pasar para poder anunciarse, por separado.
-       * Verlos juntos es lo que distingue «no hay catálogo» de «el catálogo está ahí sin sellar»,
-       * que son problemas distintos con arreglos distintos.
+       * Los enlaces, que es lo que ahora define la salud del catálogo: uno solo significa que si
+       * ese se cae no hay a dónde ir; varios son la red de seguridad de la app.
        */
-      /**
-       * EL EMBUDO, en orden y cada uno subconjunto del anterior. Se pintan así a propósito: la
-       * primera versión enseñaba «reproducible» y «lo que ve la app» como dos cifras sueltas, y
-       * con 2.798 y 2.791 delante es imposible adivinar que la segunda sale de la primera.
-       */
-      escalones: {
-        con_poster: conPoster,
-        reproducible,
-        reproducible_con_poster: reproducibleConPoster,
-        sin_enlaces: sinEnlaces,
-        sin_comprobar: sinComprobar,
-        sello_vigente: selloVigente,
-        sello_ultimas_24h: sello24h,
-        ventana_sello_horas: VERIFICADO_VIGENTE_MS / 3600000,
-      },
-      pendiente: {
-        // Nunca resuelta: nadie ha ido a buscarle los enlaces todavía. No es lo mismo que
-        // «comprobada y sin nada», y confundirlas dejó 2.434 fichas condenadas sin abrir.
-        nunca_resueltas: nuncaResueltas,
-        con_servidores_sin_anunciar: conServidoresSinAnunciar,
+      enlaces: {
+        urls_totales: urlsTotales,
+        media_por_titulo: total > 0 ? Number((urlsTotales / Math.max(total, 1)).toFixed(2)) : 0,
+        con_respaldo: conRespaldo,
+        con_uno_solo: conUna,
+        por_fuente: porFuente,
       },
       fuentes: {
         cinecalidad: deCinecalidad,
@@ -1391,19 +1424,7 @@ export class CatalogService {
         tioplus: total >= 0 && deFuegocine >= 0 && deCinecalidad >= 0 ? total - deFuegocine - deCinecalidad : -1,
       },
       ultima_actividad: { crawl, extraccion, verificacion },
-      /**
-       * CADA CUÁNTO DEBERÍA CORRER CADA UNO, para que «hace 8 h» signifique algo.
-       *
-       * Un tiempo sin referencia no dice si algo va bien o mal: 8 h es lo normal en el crawl
-       * —corre una vez al día— y sería una avería en la verificación, que va cada 2 h porque el
-       * sello dura 6. Sale de los `cron` de .github/workflows; si allí cambian, hay que cambiarlo
-       * aquí, y por eso va con el nombre del fichero al lado.
-       *
-       * OJO CON EL CRAWL: escribe al FINAL, después de recolectar y enriquecer ~15.000 títulos,
-       * lo que son unas 3 h. O sea que puede estar corriendo ahora mismo y este número seguir
-       * subiendo hasta que termine. No es un fallo del medidor: es que hasta que no escribe, no
-       * hay nada que medir.
-       */
+      ritmo: { ultima_hora: ultimaHora, ultimas_24h: ultimas24h },
       cadencia: {
         crawl: { cada_horas: 24, workflow: 'scraper.yml', tarda_horas: 3 },
         extraccion: { cada_horas: 8, workflow: 'reproducible.yml', tarda_horas: 2 },
