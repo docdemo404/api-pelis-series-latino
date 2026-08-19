@@ -44,9 +44,9 @@ on:
   workflow_dispatch:
     inputs:
       fichas:
-        description: 'Cuántas fichas extraer en esta corrida (900 es la tanda diaria; súbelo para vaciar un atraso de golpe)'
+        description: 'Cuántas fichas extraer en esta corrida (2000 es la tanda normal; súbelo para vaciar un atraso de golpe)'
         required: false
-        default: '900'
+        default: '2000'
 
 # Dos corridas a la vez se pisarían: escriben las mismas filas y se doblarían las peticiones a
 # los hosts, que responden 429 mucho antes de lo que se cree. La nueva espera a que acabe la
@@ -58,7 +58,16 @@ concurrency:
 jobs:
   # 1. EXTRAER. Recorre el catálogo, ordena por antigüedad y se lleva las más atrasadas, así que
   #    las tandas avanzan en vez de repetir la misma cabecera de lista.
-  #    Medido: 900 fichas en 57 min, con acierto en 291 de ellas (32 %).
+  #
+  #    LA TANDA SUBE DE 900 A 2.000, y el motivo es que el trabajo por fin RINDE. Con la familia
+  #    upns apagada ocupando la cabeza de la cola, la extracción acertaba en 1 de cada 40 fichas
+  #    medidas por el camino de producción: subir la tanda solo habría gastado más minutos en
+  #    hosts que no podían salir bien. Descontados esos y devuelto vidhideplus (2026-08-19), el
+  #    acierto es de 42 de 60 — el 70 % — y quedan ~10.000 fichas con algo extraíble pendiente.
+  #
+  #    Cabe en el tope: medido a 900 fichas en 57 min, 2.000 son unos 127 min más 6 de preparación,
+  #    dentro de los 170 del trabajo. La concurrencia NO sube (sigue en 6): lo que crece es la
+  #    duración, no las peticiones por segundo, que es lo que hace que estos hosts contesten 429.
   extraer:
     runs-on: ubuntu-latest
     timeout-minutes: 170
@@ -79,7 +88,7 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
-        run: npx ts-node scripts/refreshCatalog.ts --direct-only --direct=${{ github.event.inputs.fichas || 900 }}
+        run: npx ts-node scripts/refreshCatalog.ts --direct-only --direct=${{ github.event.inputs.fichas || 2000 }}
 
   # 2. Y de lo que dice tener vídeo directo, comprobar que su endpoint contesta. Un servidor
   #    rotulado "Vídeo directo" que da 502 es peor que un embed: el reproductor lo elige PRIMERO
