@@ -100,6 +100,21 @@
           <a href="/docs" class="btn btn-outline-light rounded-3 px-3">📄 Ver Docs API</a>
         </div>
 
+        <!-- Estado del catálogo: lo que hasta ahora solo se veía corriendo scripts a mano -->
+        <div class="card main-card p-4 p-md-5 mb-4">
+          <div class="d-flex align-items-center justify-content-between mb-2">
+            <h3 class="brand-title fw-bold m-0">📊 Estado del catálogo</h3>
+            <button type="button" id="estadoRefrescar" class="btn btn-sm btn-dark text-white border-secondary">↻ Actualizar</button>
+          </div>
+          <p class="text-secondary mb-4">
+            Lo que la app puede enseñar ahora mismo y qué lo está limitando. Los números se miden
+            sobre la base de datos y se guardan un minuto, así que recargar no cuesta nada.
+          </p>
+          <div id="estadoCatalogo">
+            <div class="text-secondary small py-3">⏳ Midiendo el catálogo…</div>
+          </div>
+        </div>
+
         <!-- Tarjeta Principal de Fuentes -->
         <div class="card main-card p-4 p-md-5 mb-4">
           <h3 class="brand-title fw-bold mb-2">Proveedores & Orden de Prioridad</h3>
@@ -265,6 +280,102 @@
         '</div>';
       }).join('');
     }
+
+    // ── Estado del catálogo ──────────────────────────────────────────────────
+    //
+    // Se pinta aparte de las fuentes porque tarda ~3 s en frío (son 17 conteos) y las fuentes
+    // salen al instante: así el panel no se queda en blanco esperando a esto.
+    const estadoBox = document.getElementById('estadoCatalogo');
+
+    function haceCuanto(iso) {
+      if (!iso) return 'nunca';
+      const min = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+      if (min < 1) return 'ahora mismo';
+      if (min < 60) return 'hace ' + min + ' min';
+      const h = Math.floor(min / 60);
+      if (h < 24) return 'hace ' + h + ' h ' + (min % 60) + ' min';
+      return 'hace ' + Math.floor(h / 24) + ' d ' + (h % 24) + ' h';
+    }
+
+    // Un número que no se pudo medir NO se pinta como cero: se dice que no se pudo.
+    const num = (n) => (typeof n === 'number' && n >= 0) ? n.toLocaleString('es-ES') : '—';
+
+    function fila(etiqueta, valor, nota) {
+      return '<div class="d-flex justify-content-between align-items-baseline py-1 border-bottom border-secondary border-opacity-10">' +
+        '<span class="text-secondary small">' + etiqueta + '</span>' +
+        '<span class="fw-bold ms-3">' + valor + (nota ? ' <span class="text-secondary fw-normal small">' + nota + '</span>' : '') + '</span>' +
+        '</div>';
+    }
+
+    function renderEstado(e) {
+      const c = e.catalogo || {}, esc = e.escalones || {}, pen = e.pendiente || {}, f = e.fuentes || {}, act = e.ultima_actividad || {};
+      estadoBox.innerHTML =
+        '<div class="row g-4">' +
+
+          '<div class="col-12 col-lg-4">' +
+            '<div class="p-3 rounded-3 bg-dark bg-opacity-50 h-100">' +
+              '<div class="text-secondary small mb-1">Lo que ve la app</div>' +
+              '<div class="display-6 fw-bold text-info m-0">' + num(c.anunciables) + '</div>' +
+              '<div class="text-secondary small mb-3">de ' + num(c.total) + ' fichas' +
+                (c.anunciables_pct != null ? ' · ' + c.anunciables_pct + '%' : '') + '</div>' +
+              fila('Películas', num(c.peliculas)) +
+              fila('Series', num(c.series)) +
+            '</div>' +
+          '</div>' +
+
+          '<div class="col-12 col-lg-4">' +
+            '<div class="p-3 rounded-3 bg-dark bg-opacity-50 h-100">' +
+              '<div class="text-secondary small mb-2">Por qué el resto no se anuncia</div>' +
+              fila('Reproducible', num(esc.reproducible)) +
+              fila('Comprobada y sin enlaces', num(esc.sin_enlaces)) +
+              fila('Sin comprobar todavía', num(esc.sin_comprobar)) +
+              fila('Con sello vigente', num(esc.sello_vigente), '(' + (esc.ventana_sello_horas || 6) + ' h)') +
+              fila('Sellada en 24 h', num(esc.sello_ultimas_24h)) +
+              '<div class="text-secondary small mt-2">Una ficha se anuncia solo si cumple las tres: reproducible, con carátula y con el sello al día.</div>' +
+            '</div>' +
+          '</div>' +
+
+          '<div class="col-12 col-lg-4">' +
+            '<div class="p-3 rounded-3 bg-dark bg-opacity-50 h-100">' +
+              '<div class="text-secondary small mb-2">Trabajo pendiente</div>' +
+              fila('Nunca resueltas', num(pen.nunca_resueltas)) +
+              fila('Con servidores, sin anunciar', num(pen.con_servidores_sin_anunciar)) +
+              '<div class="text-secondary small mt-3 mb-2">Fichas por fuente</div>' +
+              fila('TioPlus', num(f.tioplus)) +
+              fila('FuegoCine', num(f.fuegocine)) +
+              fila('Cinecalidad', num(f.cinecalidad)) +
+            '</div>' +
+          '</div>' +
+
+          '<div class="col-12">' +
+            '<div class="p-3 rounded-3 bg-dark bg-opacity-50">' +
+              '<div class="text-secondary small mb-2">Última vez que cada trabajo escribió algo</div>' +
+              '<div class="row g-3">' +
+                '<div class="col-12 col-md-4">' + fila('Crawl (catálogo)', haceCuanto(act.crawl)) + '</div>' +
+                '<div class="col-12 col-md-4">' + fila('Extracción (vídeo directo)', haceCuanto(act.extraccion)) + '</div>' +
+                '<div class="col-12 col-md-4">' + fila('Verificación (sellos)', haceCuanto(act.verificacion)) + '</div>' +
+              '</div>' +
+              '<div class="text-secondary small mt-2">Se deduce de la propia huella en la base, no de GitHub: mide cuándo escribió, no si arrancó.</div>' +
+            '</div>' +
+          '</div>' +
+
+        '</div>' +
+        '<div class="text-secondary small mt-3">Medido ' + haceCuanto(e.medido_en) + '.</div>';
+    }
+
+    async function loadEstado() {
+      estadoBox.innerHTML = '<div class="text-secondary small py-3">⏳ Midiendo el catálogo…</div>';
+      try {
+        const res = await fetch('/api/v1/panel/estado');
+        const json = await res.json();
+        if (json.status !== 'success') throw new Error('respuesta inesperada');
+        renderEstado(json);
+      } catch (err) {
+        estadoBox.innerHTML = '<div class="alert alert-danger mb-0">❌ No se pudo leer /api/v1/panel/estado</div>';
+      }
+    }
+    document.getElementById('estadoRefrescar').addEventListener('click', loadEstado);
+    loadEstado();
 
     async function loadSources() {
       try {

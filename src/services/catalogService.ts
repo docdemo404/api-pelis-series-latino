@@ -1116,6 +1116,147 @@ export class CatalogService {
   }
 
   /**
+   * EL ESTADO DEL CATÁLOGO EN NÚMEROS, para el panel.
+   *
+   * Todo lo que este proyecto ha ido descubriendo a base de correr scripts a mano —cuánto se
+   * anuncia de verdad, qué escalón lo está tapando, cuánto queda sin abrir— no se veía desde
+   * ninguna parte. Y eso importa aquí más que en otros sitios: el catálogo ENCOGE cuando un
+   * barrido se cae (es la regla de la casa, más corto y cierto antes que largo y falso), así que
+   * la salud de los trabajos se lee en el tamaño de lo anunciable. Sin un sitio donde mirarlo,
+   * la única señal es que la app se vea vacía.
+   *
+   * SOLO CUENTA FILAS, NUNCA LAS TRAE. Cada número es un `count` con `head: true`, así que
+   * Postgres no manda ni una fila. Es deliberado: la tentación es calcular aquí la cola de
+   * extracción, pero eso exige abrir el JSON de `servers` de 15.000 filas —23 MB— y convertiría
+   * abrir el panel en la consulta más cara de la API. Ese número vive en
+   * `scripts/dev/diag_extraible.ts`, que puede permitirse tardar.
+   *
+   * La ÚLTIMA ACTIVIDAD de cada trabajo se deduce de su propia huella en la base y no de la API
+   * de GitHub: `updated_at` lo escribe el crawl, `streams_updated_at` la extracción y
+   * `streams_checked_at` la verificación. Así no hace falta ninguna credencial nueva, y además
+   * mide lo que de verdad importa —cuándo escribió algo por última vez— y no si la tarea arrancó.
+   */
+  static async estadoDelCatalogo(): Promise<Record<string, unknown>> {
+    const cacheKey = 'panel:estado';
+    const cached = await CacheStore.get<Record<string, unknown>>(cacheKey);
+    if (cached) return cached;
+
+    const cuantas = async (aplicar: (q: any) => any): Promise<number> => {
+      try {
+        const { count, error } = await aplicar(
+          supabase.from('media_items').select('id', { count: 'exact', head: true })
+        );
+        return error ? -1 : (count ?? 0);
+      } catch {
+        return -1;
+      }
+    };
+
+    const masReciente = async (columna: string): Promise<string | null> => {
+      try {
+        const { data } = await supabase
+          .from('media_items').select(columna)
+          .not(columna, 'is', null)
+          .order(columna, { ascending: false }).limit(1);
+        return ((data || [])[0] as any)?.[columna] ?? null;
+      } catch {
+        return null;
+      }
+    };
+
+    const desde = (h: number) => new Date(Date.now() - h * 3600 * 1000).toISOString();
+    const vigente = new Date(Date.now() - VERIFICADO_VIGENTE_MS).toISOString();
+
+    /**
+     * EN TANDAS DE CUATRO, NO LAS DIECISIETE A LA VEZ.
+     *
+     * La primera versión hacía un `Promise.all` con todas y CUATRO volvían vacías —siempre
+     * distintas—, así que el panel enseñaba «-1» en la mitad de los números sin dar ningún error.
+     * Sueltas, las mismas consultas tardan 200-600 ms y aciertan: no era la consulta, era
+     * dispararlas todas contra PostgREST a la vez.
+     *
+     * Con el resultado cacheado un minuto, ir por tandas no cuesta nada — y un número correcto
+     * dos segundos más tarde vale infinitamente más que un «-1» inmediato, que es justo la clase
+     * de dato falso que ha hecho perder tardes en este proyecto.
+     */
+    const enTandas = async <T>(tareas: Array<() => Promise<T>>, tanda = 4): Promise<T[]> => {
+      const salida: T[] = [];
+      for (let i = 0; i < tareas.length; i += tanda) {
+        salida.push(...await Promise.all(tareas.slice(i, i + tanda).map(f => f())));
+      }
+      return salida;
+    };
+
+    const [
+      total, peliculas, series,
+      conPoster, reproducible, sinEnlaces, sinComprobar,
+      selloVigente, sello24h, nuncaResueltas, conServidoresSinAnunciar,
+      anunciables,
+      // Las fuentes se reconocen por el molde del id, que ES el slug de su página (FUENTES.md §2.3).
+      deFuegocine, deCinecalidad,
+    ] = await enTandas<number>([
+      () => cuantas(q => q),
+      () => cuantas(q => q.eq('type', 'movie')),
+      () => cuantas(q => q.eq('type', 'tvseries')),
+      () => cuantas(q => q.not('poster', 'is', null)),
+      () => cuantas(q => q.eq('has_streams', true)),
+      () => cuantas(q => q.eq('has_streams', false)),
+      () => cuantas(q => q.is('has_streams', null)),
+      () => cuantas(q => q.gt('streams_checked_at', vigente)),
+      () => cuantas(q => q.gt('streams_checked_at', desde(24))),
+      () => cuantas(q => q.is('streams_updated_at', null)),
+      () => cuantas(q => q.eq('has_streams', false).neq('servers', '[]')),
+      () => cuantas(q => q.eq('has_streams', true).not('poster', 'is', null).gt('streams_checked_at', vigente)),
+      () => cuantas(q => q.or('id.like.fc-%,id.like.2%-%-%')),
+      () => cuantas(q => q.like('id', 'ver-%')),
+    ]);
+
+    const [crawl, extraccion, verificacion] = await enTandas<string | null>([
+      () => masReciente('updated_at'),
+      () => masReciente('streams_updated_at'),
+      () => masReciente('streams_checked_at'),
+    ]);
+
+    const pct = (a: number, b: number) => (b > 0 && a >= 0 ? Number(((a / b) * 100).toFixed(1)) : null);
+
+    const estado = {
+      catalogo: { total, peliculas, series, anunciables, anunciables_pct: pct(anunciables, total) },
+      /**
+       * Los tres escalones que una ficha tiene que pasar para poder anunciarse, por separado.
+       * Verlos juntos es lo que distingue «no hay catálogo» de «el catálogo está ahí sin sellar»,
+       * que son problemas distintos con arreglos distintos.
+       */
+      escalones: {
+        con_poster: conPoster,
+        reproducible,
+        sin_enlaces: sinEnlaces,
+        sin_comprobar: sinComprobar,
+        sello_vigente: selloVigente,
+        sello_ultimas_24h: sello24h,
+        ventana_sello_horas: VERIFICADO_VIGENTE_MS / 3600000,
+      },
+      pendiente: {
+        // Nunca resuelta: nadie ha ido a buscarle los enlaces todavía. No es lo mismo que
+        // «comprobada y sin nada», y confundirlas dejó 2.434 fichas condenadas sin abrir.
+        nunca_resueltas: nuncaResueltas,
+        con_servidores_sin_anunciar: conServidoresSinAnunciar,
+      },
+      fuentes: {
+        cinecalidad: deCinecalidad,
+        fuegocine: deFuegocine,
+        tioplus: total >= 0 && deFuegocine >= 0 && deCinecalidad >= 0 ? total - deFuegocine - deCinecalidad : -1,
+      },
+      ultima_actividad: { crawl, extraccion, verificacion },
+      medido_en: new Date().toISOString(),
+    };
+
+    // Un minuto: bastante para que recargar el panel no cueste quince consultas, y poco para que
+    // el número que se mira mientras corre un barrido no se quede viejo delante de los ojos.
+    await CacheStore.set(cacheKey, estado, 60);
+    return estado;
+  }
+
+  /**
    * ESCRIBE EN LA FILA Y COMPRUEBA QUE DE VERDAD SE HA ESCRITO.
    *
    * Un UPDATE de PostgREST contra una fila que RLS no deja tocar NO da error: contesta 204 y sin

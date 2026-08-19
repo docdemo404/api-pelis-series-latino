@@ -23,6 +23,17 @@
         }
       }
     },
+    "/api/v1/panel/estado": {
+      "get": {
+        "summary": "Estado del catálogo en números",
+        "description": "Cuánto del catálogo puede anunciar la app ahora mismo y qué lo está limitando: total y anunciables, los tres escalones que una ficha debe pasar (reproducible, con carátula y con el sello de verificación vigente), trabajo pendiente, fichas por fuente y cuándo escribió por última vez cada trabajo de fondo. Solo cuenta filas (nunca las trae) y el resultado se cachea 60 s.",
+        "responses": {
+          "200": {
+            "description": "Estado medido con éxito"
+          }
+        }
+      }
+    },
     "/api/v1/panel/sources": {
       "post": {
         "summary": "Actualizar activación y prioridad de fuentes de catálogo",

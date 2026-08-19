@@ -68,6 +68,21 @@ router.get('/api/v1/panel', async (_req: Request, res: Response, next: NextFunct
   }
 });
 
+/**
+ * ESTADO DEL CATÁLOGO — los números que hasta ahora había que sacar corriendo scripts a mano.
+ *
+ * Va en su propio endpoint y no dentro de `/api/v1/panel` a propósito: son ~17 consultas de
+ * conteo (unos 3 s en frío, cacheadas un minuto), y el panel pinta las fuentes al instante
+ * mientras esto llega. Meterlo en el mismo payload haría lento lo que hoy es inmediato.
+ */
+router.get('/api/v1/panel/estado', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    res.json({ status: 'success', ...(await CatalogService.estadoDelCatalogo()) });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Actualizar fuentes y su orden de prioridad
 router.post('/api/v1/panel/sources', async (req: Request, res: Response, next: NextFunction) => {
   try {

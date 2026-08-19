@@ -29,7 +29,7 @@
 
         <!-- Banner Catálogo Unificado & Panel -->
         <div class="alert alert-success bg-dark text-success border-success mb-4" role="alert">
-          <strong>✨ Catálogo Unificado & Gestor de Fuentes:</strong> La API agrupa automáticamente títulos idénticos entre diferentes proveedores (TioPlus, FuegoCine, Supabase) unificando sus servidores. Puedes gestionar la activación y prioridad de fuentes en <a href="/panel" class="alert-link text-warning">/panel</a> o <code>/api/v1/panel</code>.
+          <strong>✨ Catálogo Unificado & Gestor de Fuentes:</strong> La API agrupa automáticamente títulos idénticos entre diferentes proveedores (Cinecalidad, TioPlus, FuegoCine, Supabase) unificando sus servidores. Puedes gestionar la activación y prioridad de fuentes en <a href="/panel" class="alert-link text-warning">/panel</a> o <code>/api/v1/panel</code>.
         </div>
 
         <!-- Banner TMDB API -->
@@ -63,7 +63,16 @@
             <span class="badge bg-warning text-dark badge-method me-3">GET / POST</span>
             <code class="fs-5 text-white">/panel</code> | <code class="fs-5 text-white">/api/v1/panel</code>
           </div>
-          <p class="text-secondary"><strong>Panel de Gestión de Fuentes:</strong> Interfaz interactiva y endpoint JSON para activar/desactivar proveedores de scraping (TioPlus, FuegoCine, Supabase DB) y reordenar su prioridad de visualización.</p>
+          <p class="text-secondary"><strong>Panel de Gestión de Fuentes:</strong> Interfaz interactiva y endpoint JSON para activar/desactivar proveedores de scraping (Cinecalidad, TioPlus, FuegoCine, Supabase DB) y reordenar su prioridad de visualización.</p>
+        </div>
+
+        <!-- Estado del catálogo -->
+        <div class="card card-api p-4 border-warning">
+          <div class="d-flex align-items-center mb-3">
+            <span class="badge bg-warning text-dark badge-method me-3">GET</span>
+            <code class="fs-5 text-white">/api/v1/panel/estado</code>
+          </div>
+          <p class="text-secondary"><strong>Estado del catálogo:</strong> cuánto puede anunciar la app ahora mismo y qué lo limita — total y anunciables, los tres escalones que una ficha debe pasar (reproducible, con carátula y con el sello vigente), trabajo pendiente, fichas por fuente y cuándo escribió por última vez cada trabajo de fondo. Se pinta en <a href="/panel" class="text-warning">/panel</a>.</p>
         </div>
 
         <!-- Endpoint Búsqueda General -->
