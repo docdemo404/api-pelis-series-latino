@@ -520,6 +520,59 @@ async function extractUpns(embedUrl: string): Promise<DirectStream | null> {
 }
 
 /**
+ * vidsonic.net — la url va en el HTML, escrita del revés y en hexadecimal.
+ *
+ * Su página no llama a ninguna API y no pide nada a nadie: trae la dirección delante, ofuscada
+ * con tres pasos que su propio `_decode` deja a la vista:
+ *
+ *     const _0x1 = '3939343665|6461363138|…';        // trozos hexadecimales separados por '|'
+ *     const _decode = function(s) {
+ *         const clean = s.split('|').join('');       // 1. juntar los trozos
+ *         …parseInt(clean.substr(i, 2), 16)…         // 2. cada par de dígitos, un carácter
+ *         return out.split('').reverse().join('');   // 3. y la cadena entera, al revés
+ *     };
+ *     let _videoUrl = _decode(_0x1);
+ *
+ * De ahí sale, por ejemplo:
+ *
+ *     https://sfy-01-fr.vidsonic.net/secure/uploads/364/1nkfw3bugfho4il.mp4/index.m3u8
+ *         ?server_id=3&expires=1787149324&file_id=ael6kkkue7zp&md5=d5f3…
+ *
+ * Fíjate en que el `.mp4` es un DIRECTORIO y el fichero es `index.m3u8`: es HLS, no un mp4, y
+ * `kindOf` acierta porque mira la extensión final. La url lleva `expires` y `md5`, así que es
+ * efímera y se acuña al reproducir como todas las demás.
+ *
+ * El reproductor la borra a los cinco segundos (`setTimeout(… _videoUrl = '' …, 5000)`), cosa que
+ * a un scraper le da igual: el valor ya está en el HTML servido.
+ *
+ * Medido el 2026-08-19 sobre los 10 embeds del catálogo: se descifra en 5 y 3 entregan vídeo de
+ * verdad (358–630 KB/s); el resto son páginas sin `_0x1`, que son ficheros que ya no están. Son
+ * 31 servidores —poco—, pero es de los pocos hosts que quedaban sin muro anti-bot, y el coste es
+ * esta función.
+ */
+function extraerVidsonic(html: string): DirectStream | null {
+  const crudo = html.match(/const\s+_0x1\s*=\s*'([0-9a-f|]+)'/i)?.[1];
+  if (!crudo) return null;
+
+  const limpio = crudo.split('|').join('');
+  // Un hexadecimal impar no es hexadecimal: mejor no extraer que extraer basura.
+  if (limpio.length % 2 !== 0) return null;
+
+  let texto = '';
+  for (let i = 0; i < limpio.length; i += 2) {
+    const codigo = parseInt(limpio.substr(i, 2), 16);
+    if (!Number.isFinite(codigo)) return null;
+    texto += String.fromCharCode(codigo);
+  }
+  const url = texto.split('').reverse().join('');
+
+  // Que el descifrado haya salido bien se comprueba mirando el resultado, no confiando en el
+  // molde: si el sitio cambia el orden de los pasos, esto devuelve null en vez de una url falsa.
+  if (!/^https?:\/\/[\w.-]+\//.test(url)) return null;
+  return { url: normalizeUrl(url), kind: kindOf(url) };
+}
+
+/**
  * unlimplay NO es un host de vídeo: es un agregador, como esta propia API.
  *
  * Su página `/play/embed/<tipo>/<id>` trae, escrito por su PHP y sin ninguna llamada extra, un
@@ -773,6 +826,11 @@ async function extraer(
       return extractOkru(html);
     }
 
+    // vidsonic escribe la url del revés y en hexadecimal; el genérico no la vería.
+    if (host.includes('vidsonic')) {
+      return extraerVidsonic(html);
+    }
+
     // unlimplay es un agregador: su HTML lista los hosts reales. Se mira ANTES del desempaquetado
     // porque su página no lleva vídeo propio y el genérico no encontraría nada.
     if (host.includes('unlimplay')) {
@@ -956,6 +1014,7 @@ const HOSTS_CON_EXTRACTOR = [
   'unlimplay', 'vimeos',                             // agregador con `remux` propio
   'drive.google',                                    // `get_video_info`
   'ahvsh', 'streamlare',                             // alcanzables desde que se arregló el TLS
+  'vidsonic',                                        // url del revés y en hexadecimal en su HTML
 ];
 
 /** ¿Este host solo se puede resolver llamando a su API, y por tanto al reproducir? */
