@@ -3016,9 +3016,36 @@ async function repairFakeDirects(apply: boolean, limitArg?: number, soloHost?: s
 
   const falsos = new Set<string>();
   const CONC = 8;
+  /**
+   * SE PARA A TIEMPO PARA PODER ESCRIBIR LO QUE HA APRENDIDO.
+   *
+   * Esta pasada junta sus veredictos en memoria y escribe AL FINAL, y su trabajo lleva semanas
+   * muriendo antes de llegar ahí: «The runner has received a shutdown signal», que es un fallo
+   * conocido y sin explicación en este repositorio (ver la cabecera de reproducible.yml). El
+   * 2026-08-19 iba por 1.600/2.500 con **369 falsos ya detectados** cuando el runner se apagó, y
+   * los 369 se perdieron enteros.
+   *
+   * Eso no es una pérdida abstracta: cada uno de esos es un servidor rotulado «Vídeo directo» que
+   * el reproductor elige PRIMERO por estar mejor rotulado, y que carga el manifiesto, enseña la
+   * duración y revienta al pedir el primer segmento. Es exactamente el «carga un frame, sale la
+   * duración y da error» que se reportó con «El show de Truman».
+   *
+   * Con un presupuesto propio, quedarse a medias deja de costar todo el trabajo: se comprueba lo
+   * que cabe, se retira lo demostrado y la próxima corrida sigue por donde toque. Comprobar menos
+   * y escribirlo vale más que comprobar todo y perderlo.
+   */
+  const minutosTope = Number((process.argv.find(a => a.startsWith('--minutos=')) || '').split('=')[1]) || 90;
+  const limiteTiempo = Date.now() + minutosTope * 60_000;
+  let comprobados = 0;
   for (let i = 0; i < lista.length; i += CONC) {
+    if (Date.now() > limiteTiempo) {
+      console.log(`   ⏱ agotado el presupuesto de ${minutosTope} min: ${comprobados}/${lista.length} comprobados.`);
+      console.log(`      Se retira lo demostrado hasta aquí; el resto sale en la próxima corrida.`);
+      break;
+    }
     await Promise.all(lista.slice(i, i + CONC).map(async u => { if (!(await entrega(u))) falsos.add(u); }));
-    if ((i + CONC) % 400 < CONC) console.log(`   ${Math.min(i + CONC, lista.length)}/${lista.length} · ${falsos.size} falsos`);
+    comprobados = Math.min(i + CONC, lista.length);
+    if (comprobados % 400 < CONC) console.log(`   ${comprobados}/${lista.length} · ${falsos.size} falsos`);
   }
 
   const porHost = new Map<string, number>();
