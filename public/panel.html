@@ -192,8 +192,19 @@
                 <button id="manualCancelar" class="btn btn-sm btn-dark text-white border-secondary">Cambiar</button>
               </div>
             </div>
-            <label class="text-secondary small mb-1 d-block">URLs directas — una por línea. Se aceptan .mp4, .mkv, .m3u8…</label>
-            <textarea id="manualUrls" class="form-control bg-dark text-white border-secondary mb-3" rows="4" placeholder="https://ejemplo.com/pelicula.mp4"></textarea>
+            <div id="manualPelicula">
+              <label class="text-secondary small mb-1 d-block">URLs directas — una por línea. La primera que funcione será la principal; las demás quedan como respaldo.</label>
+              <textarea id="manualUrls" class="form-control bg-dark text-white border-secondary mb-3" rows="4" placeholder="https://ejemplo.com/pelicula.mp4"></textarea>
+            </div>
+
+            <div id="manualSerie" style="display:none">
+              <div class="d-flex gap-2 align-items-center mb-2">
+                <label class="text-secondary small m-0">Temporada</label>
+                <select id="manualTemporada" class="form-select form-select-sm bg-dark text-white border-secondary" style="max-width:140px"></select>
+                <span class="text-secondary small">una url por capítulo (varias separadas por coma)</span>
+              </div>
+              <div id="manualCapitulos" class="mb-3" style="max-height:340px;overflow:auto"></div>
+            </div>
             <button id="manualGuardar" class="btn btn-info fw-bold">💾 Comprobar y guardar</button>
             <div id="manualAviso" class="mt-3"></div>
           </div>
@@ -333,12 +344,64 @@
               (manualSel.type === 'tvseries' ? 'Serie' : 'Película') + ' · TMDB ' + manualSel.tmdb_id;
             document.getElementById('manualElegido').style.display = '';
             caja.innerHTML = '';
+            manualPrepararTipo();
           });
         });
       } catch (e) {
         caja.innerHTML = '<div class="alert alert-danger mb-0">No se pudo buscar en TMDB</div>';
       }
     }
+
+    // Una serie no se reproduce por la ficha: se reproduce capítulo a capítulo. Así que al
+    // elegir una serie se piden sus episodios a TMDB y se ofrece un campo POR CAPÍTULO — pedir
+    // «las urls de la serie» no significaba nada.
+    let manualTemporadas = [];
+
+    async function manualPrepararTipo() {
+      const esSerie = manualSel && manualSel.type === 'tvseries';
+      document.getElementById('manualPelicula').style.display = esSerie ? 'none' : '';
+      document.getElementById('manualSerie').style.display = esSerie ? '' : 'none';
+      if (!esSerie) return;
+
+      const sel = document.getElementById('manualTemporada');
+      const caps = document.getElementById('manualCapitulos');
+      sel.innerHTML = '';
+      caps.innerHTML = '<div class="text-secondary small">Cargando capítulos desde TMDB…</div>';
+      try {
+        const j = await (await fetch('/api/v1/panel/manual/episodios?tmdb_id=' + manualSel.tmdb_id)).json();
+        manualTemporadas = j.temporadas || [];
+        if (!manualTemporadas.length) {
+          caps.innerHTML = '<div class="text-secondary small">TMDB no lista capítulos para esta serie.</div>';
+          return;
+        }
+        sel.innerHTML = manualTemporadas.map(function (t) {
+          return '<option value="' + t.season_number + '">Temporada ' + t.season_number +
+            ' (' + (t.episodes || []).length + ')</option>';
+        }).join('');
+        manualPintarCapitulos();
+      } catch (e) {
+        caps.innerHTML = '<div class="alert alert-danger mb-0">No se pudieron leer los capítulos</div>';
+      }
+    }
+
+    function manualPintarCapitulos() {
+      const n = Number(document.getElementById('manualTemporada').value);
+      const t = manualTemporadas.find(function (x) { return x.season_number === n; });
+      const caps = document.getElementById('manualCapitulos');
+      if (!t) { caps.innerHTML = ''; return; }
+      caps.innerHTML = (t.episodes || []).map(function (e) {
+        const clave = t.season_number + 'x' + e.episode_number;
+        return '<div class="d-flex gap-2 align-items-center mb-2">' +
+          '<span class="text-secondary small" style="min-width:52px">' + clave + '</span>' +
+          '<span class="text-secondary small text-truncate" style="max-width:180px" title="' + (e.name || '') + '">' + (e.name || '') + '</span>' +
+          '<input class="form-control form-control-sm bg-dark text-white border-secondary cap-url" ' +
+            'data-s="' + t.season_number + '" data-e="' + e.episode_number + '" ' +
+            'placeholder="https://…/' + clave + '.mp4">' +
+        '</div>';
+      }).join('');
+    }
+
+    document.getElementById('manualTemporada').addEventListener('change', manualPintarCapitulos);
 
     document.getElementById('manualBuscarBtn').addEventListener('click', manualBuscar);
     document.getElementById('manualBuscar').addEventListener('keydown', function (e) {
@@ -355,10 +418,28 @@
       if (!manualSel) return;
       const btn = document.getElementById('manualGuardar');
       const aviso = document.getElementById('manualAviso');
-      const urls = document.getElementById('manualUrls').value
+      const esSerie = manualSel.type === 'tvseries';
+      const urls = esSerie ? [] : document.getElementById('manualUrls').value
         .split('\n').map(function (x) { return x.trim(); }).filter(Boolean);
-      if (!urls.length) {
-        aviso.innerHTML = '<div class="alert alert-warning mb-0">Pon al menos una url.</div>';
+
+      // De los capítulos solo viajan los que tengan algo escrito: los vacíos no son un hueco que
+      // rellenar con nada, simplemente todavía no tienen vídeo.
+      const episodios = [];
+      if (esSerie) {
+        document.querySelectorAll('.cap-url').forEach(function (inp) {
+          const v = inp.value.trim();
+          if (!v) return;
+          episodios.push({
+            season: Number(inp.dataset.s),
+            episode: Number(inp.dataset.e),
+            urls: v.split(',').map(function (x) { return x.trim(); }).filter(Boolean),
+          });
+        });
+      }
+
+      if (!urls.length && !episodios.length) {
+        aviso.innerHTML = '<div class="alert alert-warning mb-0">' +
+          (esSerie ? 'Pon la url de al menos un capítulo.' : 'Pon al menos una url.') + '</div>';
         return;
       }
       btn.disabled = true; btn.textContent = 'Comprobando las urls…';
@@ -366,7 +447,7 @@
         const res = await fetch('/api/v1/panel/manual', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ tmdb_id: manualSel.tmdb_id, type: manualSel.type, urls: urls }),
+          body: JSON.stringify({ tmdb_id: manualSel.tmdb_id, type: manualSel.type, urls: urls, episodios: episodios }),
         });
         const j = await res.json();
         const lista = function (arr, clase) {
@@ -376,7 +457,8 @@
         };
         if (j.status === 'success') {
           aviso.innerHTML = '<div class="alert alert-success mb-0">' +
-            '✅ Guardado «' + j.titulo + '» con ' + (j.aceptadas || []).length + ' url(s).' +
+            '✅ Guardado «' + j.titulo + '» con ' + (j.aceptadas || []).length + ' url(s)' +
+            (j.capitulos_ok ? ' en ' + j.capitulos_ok + ' capítulo(s)' : '') + '.' +
             lista(j.aceptadas, 'text-success') +
             ((j.rechazadas || []).length
               ? '<div class="mt-2">No entregaron vídeo y NO se guardaron:</div>' + lista(j.rechazadas, 'text-warning')

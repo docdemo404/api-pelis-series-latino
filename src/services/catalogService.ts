@@ -1207,9 +1207,23 @@ export class CatalogService {
     tmdbId: number;
     tipo: ContentType;
     urls: string[];
-  }): Promise<{ ok: boolean; id?: string; titulo?: string; aceptadas: string[]; rechazadas: string[]; error?: string }> {
+    /**
+     * Urls por CAPÍTULO, para las series. Una serie no se reproduce por la ficha: se reproduce
+     * capítulo a capítulo, así que pedir «las urls de la serie» no significa nada — hay que poder
+     * decir cuál es la del 1x01 y cuál la del 1x02.
+     */
+    episodios?: Array<{ season: number; episode: number; urls: string[] }>;
+  }): Promise<{
+    ok: boolean; id?: string; titulo?: string;
+    aceptadas: string[]; rechazadas: string[]; capitulos_ok?: number; error?: string;
+  }> {
     const urls = Array.from(new Set(opts.urls.map(u => u.trim()).filter(Boolean)));
-    if (!urls.length) return { ok: false, aceptadas: [], rechazadas: [], error: 'No se pasó ninguna url' };
+    const porCapitulo = (opts.episodios || [])
+      .map(e => ({ ...e, urls: Array.from(new Set(e.urls.map(u => u.trim()).filter(Boolean))) }))
+      .filter(e => e.urls.length);
+    if (!urls.length && !porCapitulo.length) {
+      return { ok: false, aceptadas: [], rechazadas: [], error: 'No se pasó ninguna url' };
+    }
 
     const detalle = await TmdbService.getTmdbDetails(opts.tmdbId, opts.tipo);
     if (!detalle) return { ok: false, aceptadas: [], rechazadas: urls, error: `TMDB no conoce el ${opts.tipo} ${opts.tmdbId}` };
@@ -1217,25 +1231,36 @@ export class CatalogService {
     // Cada url se prueba de verdad: 64 KB bastan para ver la cabecera del contenedor.
     const aceptadas: string[] = [];
     const rechazadas: string[] = [];
-    await Promise.all(urls.map(async url => {
-      try {
-        const r = await httpClient.get(url, {
-          headers: { Range: 'bytes=0-65535' },
-          responseType: 'arraybuffer',
-          timeout: 25000,
-          validateStatus: () => true,
-          maxRedirects: 5,
-        } as any);
-        const bytes = (r.data as ArrayBuffer)?.byteLength ?? 0;
-        const esHtml = /text\/html/i.test(String(r.headers['content-type'] || ''));
-        if (r.status < 400 && !esHtml && bytes > 8192) aceptadas.push(url);
-        else rechazadas.push(url);
-      } catch {
-        rechazadas.push(url);
-      }
-    }));
+    const comprobar = async (lista: string[]): Promise<string[]> => {
+      const buenas: string[] = [];
+      await Promise.all(lista.map(async url => {
+        try {
+          const r = await httpClient.get(url, {
+            headers: { Range: 'bytes=0-65535' },
+            responseType: 'arraybuffer',
+            timeout: 25000,
+            validateStatus: () => true,
+            maxRedirects: 5,
+          } as any);
+          const bytes = (r.data as ArrayBuffer)?.byteLength ?? 0;
+          const esHtml = /text\/html/i.test(String(r.headers['content-type'] || ''));
+          if (r.status < 400 && !esHtml && bytes > 8192) { buenas.push(url); aceptadas.push(url); }
+          else rechazadas.push(url);
+        } catch {
+          rechazadas.push(url);
+        }
+      }));
+      return buenas;
+    };
 
-    if (!aceptadas.length) {
+    const buenasDeLaFicha = await comprobar(urls);
+    const capitulosBuenos: Array<{ season: number; episode: number; urls: string[] }> = [];
+    for (const cap of porCapitulo) {
+      const buenas = await comprobar(cap.urls);
+      if (buenas.length) capitulosBuenos.push({ season: cap.season, episode: cap.episode, urls: buenas });
+    }
+
+    if (!buenasDeLaFicha.length && !capitulosBuenos.length) {
       return { ok: false, aceptadas, rechazadas, error: 'Ninguna url entregó vídeo' };
     }
 
@@ -1244,7 +1269,7 @@ export class CatalogService {
     // El id lleva el año: dos obras del mismo nombre no pueden pisarse (FUENTES.md §1).
     const id = `manual-${slugify(titulo)}${fecha ? '-' + fecha.slice(0, 4) : ''}`;
 
-    const servers = aceptadas.map((url, i) => ({
+    const servers = buenasDeLaFicha.map((url, i) => ({
       id: `${id}_manual_${i}`,
       name: `Manual ${i + 1}`,
       embed_url: url,
@@ -1271,7 +1296,32 @@ export class CatalogService {
       runtime: detalle.runtime ?? null,
       metadata_source: 'tmdb',
       servers,
-      seasons: [],
+      /**
+       * Los capítulos se agrupan por temporada. Cada uno lleva SUS urls: en una serie el vídeo
+       * vive aquí, no en `servers`, y confundirlo es lo que hacía que una serie se anunciara
+       * entera por lo que traía su portada (FUENTES.md §4).
+       */
+      seasons: Object.values(
+        capitulosBuenos.reduce((acc: Record<number, any>, cap) => {
+          acc[cap.season] ??= { season_number: cap.season, episodes: [] };
+          acc[cap.season].episodes.push({
+            episode_number: cap.episode,
+            season_number: cap.season,
+            servers: cap.urls.map((url, i) => ({
+              id: `${id}_s${cap.season}e${cap.episode}_manual_${i}`,
+              name: `Manual ${i + 1}`,
+              embed_url: url,
+              direct_stream: url,
+              direct_mode: 'public' as const,
+              direct_kind: /\.m3u8(\?|$)/i.test(url) ? ('hls' as const) : ('mp4' as const),
+              status: 'online' as const,
+              source_id: 'manual',
+              verified_at: new Date().toISOString(),
+            })),
+          });
+          return acc;
+        }, {})
+      ),
       has_streams: true,
       source_url: null,
       source_urls: [],
@@ -1286,7 +1336,7 @@ export class CatalogService {
 
     await this.invalidateItem({ id });
     await this.invalidateListings();
-    return { ok: true, id, titulo, aceptadas, rechazadas };
+    return { ok: true, id, titulo, aceptadas, rechazadas, capitulos_ok: capitulosBuenos.length };
   }
 
   /**

@@ -106,6 +106,38 @@ router.get('/api/v1/panel/contenido', async (req: Request, res: Response, next: 
 });
 
 /**
+ * Los capítulos de una serie, según TMDB, para que el panel pueda pedir una url POR CAPÍTULO.
+ * Sin esto, la fuente propia solo servía para películas: en una serie el vídeo vive en cada
+ * episodio, y una lista suelta de urls no dice a cuál pertenece cada una.
+ */
+router.get('/api/v1/panel/manual/episodios', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const tmdbId = Number(req.query.tmdb_id);
+    if (!Number.isFinite(tmdbId) || tmdbId <= 0) {
+      return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'Se requiere tmdb_id');
+    }
+    const detalle = await TmdbService.getTmdbDetails(tmdbId, 'tvseries');
+    const cuantas = Number(detalle?.number_of_seasons) || 0;
+    if (!cuantas) return res.json({ status: 'success', temporadas: [] });
+
+    const seasons = await TmdbService.getTmdbSeasons(tmdbId, cuantas, null, []);
+    res.json({
+      status: 'success',
+      titulo: detalle?.name || detalle?.title || '',
+      temporadas: (seasons || []).map((t: any) => ({
+        season_number: t.season_number,
+        episodes: (t.episodes || []).map((e: any) => ({
+          episode_number: e.episode_number,
+          name: e.name || '',
+        })),
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
  * AÑADIR UNA FICHA A MANO — la fuente propia.
  *
  * Se elige un título de TMDB (con `/panel/media/search`) y se pegan una o varias urls directas.
@@ -120,11 +152,18 @@ router.post('/api/v1/panel/manual', async (req: Request, res: Response, next: Ne
     const urls = Array.isArray(b.urls)
       ? (b.urls as unknown[]).map(u => String(u))
       : String(b.urls || '').split(/[\s,;]+/);
+    const episodios = Array.isArray(b.episodios)
+      ? (b.episodios as any[]).map(e => ({
+          season: Number(e?.season) || 1,
+          episode: Number(e?.episode) || 1,
+          urls: Array.isArray(e?.urls) ? e.urls.map((u: unknown) => String(u)) : [],
+        }))
+      : [];
 
     if (!Number.isFinite(tmdbId) || tmdbId <= 0) {
       return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'Se requiere un tmdb_id válido');
     }
-    const r = await CatalogService.anadirFichaManual({ tmdbId, tipo: tipo as any, urls });
+    const r = await CatalogService.anadirFichaManual({ tmdbId, tipo: tipo as any, urls, episodios });
     if (!r.ok) {
       return res.status(422).json({ status: 'error', message: r.error, aceptadas: r.aceptadas, rechazadas: r.rechazadas });
     }
