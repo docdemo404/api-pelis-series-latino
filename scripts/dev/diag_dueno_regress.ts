@@ -11,6 +11,10 @@ const filas: Fila[] = [
   { id: 'gintama',                    type: 'movie',    tmdb_id: 432985,  title: 'Gintama (peli, tioplus)' },
   { id: 'ver-serie-gintama',          type: 'tvseries', tmdb_id: 57041,   title: 'Gintama (serie, cinecalidad)' },
   { id: 'mo',                         type: 'tvseries', tmdb_id: 138502,  title: 'Mo (serie, tioplus)' },
+  // EL CASO QUE SE ESCAPÓ AL PRIMER ARREGLO: las dos son SERIES, así que la clase de la ruta no
+  // desempata y solo lo separa preferir el candidato más específico.
+  { id: 'animal',                     type: 'tvseries', tmdb_id: 137646,  title: 'Animal 2021 (serie, tioplus)' },
+  { id: 'ver-serie-animal',           type: 'tvseries', tmdb_id: 243200,  title: 'Animal 2025 (serie, cinecalidad)' },
   { id: 'carrie-1976',                type: 'movie',    tmdb_id: 10600,   title: 'Carrie 1976' },
   { id: 'carrie-2013',                type: 'movie',    tmdb_id: 76757,   title: 'Carrie 2013' },
 ];
@@ -21,6 +25,9 @@ const casos: Array<[string, string, string | null]> = [
   ['https://www.cinecalidad.am/ver-pelicula/sakamoto-days/', 'colisión entre webs', 'ver-pelicula-sakamoto-days'],
   ['https://tioplus.app/anime/sakamoto-days',                'colisión entre webs', 'sakamoto-days'],
   ['https://www.cinecalidad.am/ver-serie/gintama/',          'colisión de clase',   'ver-serie-gintama'],
+  // Mismo nombre, misma clase, dos webs: aquí el tipo no ayuda y manda la especificidad.
+  ['https://www.cinecalidad.am/ver-serie/animal/',           'misma clase, dos webs', 'ver-serie-animal'],
+  ['https://tioplus.app/serie/animal',                       'misma clase, dos webs', 'animal'],
   ['https://tioplus.app/pelicula/gintama',                   'colisión de clase',   'gintama'],
   // EL CRUCE DE VERDAD: "Moon Knight" apuntando a la página propia de la serie "Mo".
   ['https://tioplus.app/serie/mo',                           'cruce real',          'mo'],

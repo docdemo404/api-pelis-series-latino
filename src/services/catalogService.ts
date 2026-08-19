@@ -262,7 +262,26 @@ export function duenoDeLaPagina<T extends { id: string; type?: string | null }>(
   url: string,
   porId: Map<string, T>
 ): T | undefined {
-  return candidateIdsForUrl(url)
+  /**
+   * DEL CANDIDATO MÁS ESPECÍFICO AL MÁS GENERAL, y esto es la mitad del arreglo.
+   *
+   * `candidateIdsForUrl` devuelve dos formas de la misma url: el último segmento pelado
+   * (`animal`) y el camino entero convertido en slug (`ver-serie-animal`). La primera es la que
+   * usan los ids de TioPlus y la segunda la de Cinecalidad — y la pelada casa con CUALQUIER sitio
+   * que publique ese nombre, así que tomarla antes reparte la página de una web a la ficha de
+   * otra.
+   *
+   * Exigir además que coincida la clase de la ruta (`esPaginaPropia`) tapa el caso fácil —una es
+   * película y la otra serie— y NO el difícil: «Animal» son dos SERIES, la de 2021 en TioPlus y
+   * la de 2025 en Cinecalidad. Ahí el tipo no desempata y la pelada volvía a ganar, así que la
+   * auditoría del crawl seguía denunciando un cruce que no existe.
+   *
+   * Ordenar por longitud descendente pone delante la forma derivada del camino, que es la que
+   * lleva la estructura del sitio dentro. Y no rompe a TioPlus: para `/serie/animal` prueba
+   * primero `serie-animal`, que no es el id de nadie, y cae en `animal`, que sí.
+   */
+  return [...candidateIdsForUrl(url)]
+    .sort((a, b) => b.length - a.length)
     .map(c => porId.get(c))
     .find((r): r is T =>
       !!r && esPaginaPropia(r.id, url, r.type === 'tvseries' ? 'tvseries' : 'movie'));
