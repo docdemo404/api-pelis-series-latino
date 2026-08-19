@@ -10,12 +10,32 @@ name: Que todo lo que se anuncia se pueda reproducir
 #   1. El crawl tarda 111-151 min (medido) y la tarea tiene 360 de techo. La extracción de 900
 #      fichas son otros ~100. Quedaba demasiado justo para algo que no puede fallar.
 #   2. Si el crawl revienta a la mitad, la extracción no debería caer con él.
-#   3. Se quiere MÁS a menudo que el crawl. Con 1.743 fichas de atraso, una vez al día tarda dos
-#      días en ponerse al corriente; cada 8 h, unas horas.
+#   3. Se quiere MÁS a menudo que el crawl.
 #
 # EL ORDEN NO ES NEGOCIABLE: extraer rescata fichas, comprobar deja mudas a las que mentían, y
-# recuperar series devuelve las que sí se ven. Solo cuando los cuatro han terminado tiene sentido
+# recuperar series devuelve las que sí se ven. Solo cuando esos han terminado tiene sentido
 # decidir qué se anuncia. Al revés, el último paso escondería justo lo que los anteriores arreglan.
+#
+# ── POR QUÉ SON SEIS TRABAJOS Y NO SEIS PASOS ────────────────────────────────────────────────
+#
+# Eran seis pasos de un mismo trabajo, y eso hacía que la muerte de UNO se llevara por delante a
+# todos los siguientes. Medido el 2026-08-19: OCHO corridas seguidas sin un solo éxito. Las dos
+# últimas murieron en el mismo sitio —`--directos-falsos`, a los 81 y a los 124 minutos— sin error
+# y sin agotar el tope de 330: «The runner has received a shutdown signal». El paso iba bien
+# (1600/2500 comprobados) y de pronto el runner desaparecía.
+#
+# No se ha podido averiguar POR QUÉ se apaga el runner; no queda rastro en los registros. Pero sí
+# se puede hacer que deje de importar. Los `if: always()` que ya había no sirven de nada aquí: no
+# es un paso que falla, es el trabajo entero que se evapora, y con él los cinco pasos restantes
+# —incluido el que ajusta qué se anuncia—.
+#
+# Con un trabajo por tarea, cada uno corre en SU runner. Si uno se apaga, los demás siguen: el
+# encadenado es `needs` + `if: always()`, que conserva el orden sin heredar la muerte. Cuesta unos
+# 6 min de preparación repetida y a cambio el catálogo deja de depender de que ninguna de las seis
+# tareas tenga un mal día.
+#
+# El coste real de aquello: 9.886 fichas con algo extraíble pendiente, porque el trabajo llevaba
+# más de un día sin llegar al final.
 
 on:
   schedule:
@@ -36,33 +56,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  reproducible:
+  # 1. EXTRAER. Recorre el catálogo, ordena por antigüedad y se lleva las más atrasadas, así que
+  #    las tandas avanzan en vez de repetir la misma cabecera de lista.
+  #    Medido: 900 fichas en 57 min, con acierto en 291 de ellas (32 %).
+  extraer:
     runs-on: ubuntu-latest
-    timeout-minutes: 330
-
+    timeout-minutes: 170
     steps:
-      - name: Checkout del código fuente
-        uses: actions/checkout@v4
-
-      - name: Configurar Node.js 22
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: 'npm'
-
-      - name: Instalar dependencias
-        run: npm ci
-
-      # Comprobación de tipos ANTES de tocar nada. `npx ts-node` compila de verdad (sin
-      # --transpile-only), así que un error de tipos no falla rápido: falla DESPUÉS de instalar,
-      # en cada paso, y con el log lleno de otra cosa. Pasó: un `Cannot find name 'year'` en
-      # repairCatalog.ts tumbó los cuatro pasos de reparación del crawl durante días, y no se vio
-      # en local porque tsconfig.json no incluía ese fichero. Ahora los incluye, y esto lo cobra.
+      - run: npm ci
       - name: Comprobar que todo compila
         run: npx tsc --noEmit
-
-      # 1. EXTRAER. Recorre el catálogo entero, ordena por antigüedad y se lleva las 900 más
-      #    atrasadas, así que las tandas avanzan en vez de repetir la misma cabecera de lista.
       - name: Extraer el vídeo directo de los embed
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
@@ -73,12 +81,23 @@ jobs:
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
         run: npx ts-node scripts/refreshCatalog.ts --direct-only --direct=${{ github.event.inputs.fichas || 900 }}
 
-      # 2. Y de lo que dice tener vídeo directo, comprobar que su endpoint contesta. Un servidor
-      #    rotulado "Vídeo directo" que da 502 es peor que un embed: el reproductor lo elige
-      #    PRIMERO justo por estar mejor rotulado. Prueba dos veces antes de retirar nada, porque
-      #    un 502 puede ser un 429 pasajero y degradar un servidor bueno es cambiar de problema.
+  # 2. Y de lo que dice tener vídeo directo, comprobar que su endpoint contesta. Un servidor
+  #    rotulado "Vídeo directo" que da 502 es peor que un embed: el reproductor lo elige PRIMERO
+  #    justo por estar mejor rotulado. Prueba dos veces antes de retirar nada, porque un 502 puede
+  #    ser un 429 pasajero y degradar un servidor bueno es cambiar de problema.
+  falsos:
+    needs: extraer
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+      - run: npm ci
       - name: Retirar los "vídeo directo" cuyo endpoint no responde
-        if: always()
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
@@ -87,20 +106,27 @@ jobs:
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
         run: npx ts-node scripts/repairCatalog.ts --directos-falsos --apply --limit=2500
 
-      # 3. Una pasada corta de comprobación. El grueso lo lleva `verificar.yml`, que repasa el
-      #    conjunto ENTERO cada 2 h — que es lo que hace que ningún sello caduque.
-      #
-      #    El paso anterior pregunta al endpoint si contesta. Este acuña el enlace, baja el
-      #    manifiesto, revisa las variantes y se descarga un SEGMENTO REAL — la misma comprobación
-      #    que hace el reproductor. Medido sobre 60 embeds publicados: 1 de cada 6 no entrega
-      #    vídeo aunque su página cargue perfectamente. Y es el único paso que entra en
-      #    `seasons[].episodes[].servers`, donde viven los enlaces de las series.
-      #
-      #    Deja `verified_at` en los que pasan, que es lo que hace que el `primary_stream` sea
-      #    siempre algo probado. La ventana es rotatoria: cada corrida coge una tanda distinta y
-      #    la vuelta completa llega sola.
+  # 3. Una pasada corta de comprobación. El grueso lo lleva `verificar.yml`, que repasa el conjunto
+  #    ENTERO cada 2 h — que es lo que hace que ningún sello caduque.
+  #
+  #    El trabajo anterior pregunta al endpoint si contesta. Este acuña el enlace, baja el
+  #    manifiesto, revisa las variantes y se descarga un SEGMENTO REAL — la misma comprobación que
+  #    hace el reproductor. Medido sobre 60 embeds publicados: 1 de cada 6 no entrega vídeo aunque
+  #    su página cargue perfectamente. Y es el único paso que entra en `seasons[].episodes[]
+  #    .servers`, donde viven los enlaces de las series.
+  verificar:
+    needs: falsos
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+      - run: npm ci
       - name: Comprobar que lo publicado entrega vídeo de verdad
-        if: always()
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
@@ -109,12 +135,23 @@ jobs:
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
         run: npx ts-node scripts/repairCatalog.ts --verificar --apply --limit=400
 
-      # 4. DEVOLVER LAS SERIES QUE SÍ SE VEN. Una serie resuelve sus capítulos al abrirla, así que
-      #    las que nadie abre nunca se quedan sin nada escrito y el paso 5 las esconde. Aquí se les
-      #    abre un capítulo de verdad; desde que `getEpisode` persiste lo que resuelve, con eso
-      #    basta para que vuelvan. Sin este paso el catálogo de series solo puede encoger.
+  # 4. DEVOLVER LAS SERIES QUE SÍ SE VEN. Una serie resuelve sus capítulos al abrirla, así que las
+  #    que nadie abre nunca se quedan sin nada escrito y el último trabajo las esconde. Aquí se les
+  #    abre un capítulo de verdad; desde que `getEpisode` persiste lo que resuelve, con eso basta
+  #    para que vuelvan. Sin esto el catálogo de series solo puede encoger.
+  series:
+    needs: verificar
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+      - run: npm ci
       - name: Devolver al catálogo las series escondidas que reproducen
-        if: always()
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -124,17 +161,26 @@ jobs:
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
         run: npx ts-node scripts/repairCatalog.ts --series-ocultas --apply --limit=300
 
-      # 5. COMPROBAR CAPÍTULOS UNO A UNO. Un capítulo sin nada reproducible no debe anunciarse, y
-      #    una temporada sin capítulos anunciables tampoco — pero eso solo se puede decidir sobre
-      #    capítulos COMPROBADOS. Los enlaces de un episodio se resuelven al abrirlo, así que la
-      #    mayoría están vacíos por no haberse pedido nunca, no por estar rotos: esconder por lista
-      #    vacía dejaría casi todas las series sin un solo capítulo. Esto es lo que convierte «sin
-      #    comprobar» en un veredicto, sellando `checked_at` con enlaces o sin ellos.
-      #
-      #    El grueso lo lleva `episodios.yml`, que tiene presupuesto propio y corre cada 4 h. Aquí
-      #    va una tanda corta para que este trabajo no dependa de aquel.
+  # 5. COMPROBAR CAPÍTULOS UNO A UNO. Un capítulo sin nada reproducible no debe anunciarse, y una
+  #    temporada sin capítulos anunciables tampoco — pero eso solo se puede decidir sobre capítulos
+  #    COMPROBADOS. Los enlaces de un episodio se resuelven al abrirlo, así que la mayoría están
+  #    vacíos por no haberse pedido nunca, no por estar rotos: esconder por lista vacía dejaría casi
+  #    todas las series sin un solo capítulo. Esto convierte «sin comprobar» en un veredicto.
+  #
+  #    El grueso lo lleva `episodios.yml`, con presupuesto propio cada 4 h. Aquí va una tanda corta.
+  episodios:
+    needs: series
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+      - run: npm ci
       - name: Comprobar capítulos uno a uno
-        if: always()
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -144,12 +190,26 @@ jobs:
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
         run: npx ts-node scripts/repairCatalog.ts --episodios --apply --limit=600
 
-      # 6. Y recién ahora, qué se anuncia. Va en los DOS sentidos: esconde las fichas que se
-      #    quedaron sin nada reproducible y devuelve las que han recuperado vídeo directo. Sin
-      #    esa segunda mitad, cada corrida encogería el catálogo un poco más y lo que arreglan
-      #    los extractores no volvería nunca.
+  # 6. Y recién ahora, qué se anuncia. Va en los DOS sentidos: esconde las fichas que se quedaron
+  #    sin nada reproducible y devuelve las que han recuperado vídeo directo. Sin esa segunda
+  #    mitad, cada corrida encogería el catálogo un poco más y lo que arreglan los extractores no
+  #    volvería nunca.
+  #
+  #    Es el trabajo que más veces se quedó sin ejecutar, y el único cuyo resultado ve el
+  #    espectador. Por eso es el último y por eso va con `if: always()`.
+  anunciar:
+    needs: episodios
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+      - run: npm ci
       - name: Ajustar qué fichas se anuncian según lo que puedan reproducir
-        if: always()
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
