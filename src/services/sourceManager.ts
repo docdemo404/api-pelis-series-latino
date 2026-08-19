@@ -36,8 +36,21 @@ function fusionarConLosPorDefecto(guardadas: SourceConfig[]): SourceConfig[] {
       orden,
     };
   });
-  // Y las que solo estén en el almacén (alguien las añadió por el panel) se conservan.
-  const extras = Array.from(porId.values()).map((fuente, i) => ({ fuente, orden: DEFAULT_SOURCES.length + i }));
+  /**
+   * LO QUE SOLO ESTÁ EN EL ALMACÉN SE DESCARTA, y esto es un cambio deliberado.
+   *
+   * Antes se conservaba «por si alguien la añadió desde el panel». Pero el panel NO sabe añadir
+   * fuentes: `updateSourcesAsync` recorre las que ya hay y solo les cambia `enabled` y
+   * `priority`. Así que una fuente que solo vive en el almacén no es algo que alguien creara —
+   * es algo que se quitó del código y quedó fosilizado ahí.
+   *
+   * Pasó con `supabase`, que se retiró de `DEFAULT_SOURCES` por no ser una web que se scrapee
+   * (es donde se guarda lo scrapeado) y siguió apareciendo en el panel como «Prioridad #4 ·
+   * Fuente Activa», con su interruptor, porque la copia guardada sobrevivía a la fusión.
+   *
+   * El código manda sobre qué fuentes EXISTEN; el almacén, solo sobre cómo están configuradas.
+   */
+  const extras: Array<{ fuente: SourceConfig; orden: number }> = [];
 
   /**
    * Y SE RENUMERAN, para que no queden dos fuentes con la misma prioridad.
