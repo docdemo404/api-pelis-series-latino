@@ -94,7 +94,7 @@ const MARCADOR_TIPO = /\s*\[(?:v[íi]deo\s+directo|embed)\]\s*$/i;
  * cada vez que alguien abre una ficha, `revisarServidores` comprueba la cabeza de la lista y la
  * vuelve a sellar, así que lo que más se ve es lo que más fresco está.
  */
-const VERIFICADO_VIGENTE_MS = 6 * 60 * 60 * 1000;
+export const VERIFICADO_VIGENTE_MS = 6 * 60 * 60 * 1000;
 
 /**
  * Lo que cuesta ENTREGAR este servidor, del más barato al más caro. Menor es mejor.

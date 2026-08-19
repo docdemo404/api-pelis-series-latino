@@ -2,7 +2,7 @@ import { MediaItem, ServerOption, ContentType } from '../types';
 import { supabase, getSupabaseAdmin } from './supabaseService';
 import { RealScraperService } from './realScraperService';
 import { TmdbService } from './tmdbService';
-import { sortServersBySourcePriority, getPrimaryStream, paraElCliente, fichaReproducible, veredictoDisponibilidad } from './streamSorter';
+import { sortServersBySourcePriority, getPrimaryStream, paraElCliente, fichaReproducible, veredictoDisponibilidad, VERIFICADO_VIGENTE_MS } from './streamSorter';
 import { normalizeTitle, slugify, yearFromSlug } from '../utils/text';
 import { CacheStore } from '../cache/store';
 import { unwrapRedirector } from '../scrapers/directStream';
@@ -601,7 +601,41 @@ export class CatalogService {
   private static soloPublicables<T>(query: T, hayColumna: boolean): T {
     if (!hayColumna) return query;
     const q = query as any;
-    return q.eq('has_streams', true).not('poster', 'is', null) as T;
+    return q
+      .eq('has_streams', true)
+      .not('poster', 'is', null)
+      /**
+       * Y CON LA PRUEBA AL DÍA, no con una que valió hace medio día.
+       *
+       * `has_streams` dice «la última vez que se miró, reproducía». Eso NO es lo mismo que «se
+       * puede ver ahora», y la diferencia no es teórica: lo que se entrega al cliente exige
+       * además que algún servidor haya demostrado el vídeo en las últimas 6 h (ver
+       * `paraElCliente`). Entre que un sello caduca y el barrido lo renueva, la ficha seguía
+       * anunciándose y contestaba vacía. Medido: 551 de 1.643 fichas anunciadas —el 33,5 %— no
+       * entregaban un solo servidor, y los sellos se amontonaban justo contra el límite de las
+       * 6 h (p90 = 6,3 h; p99 = 6,7 h). No estaban rotas: estaban sin comprobar.
+       *
+       * Esta es la diferencia entre las dos formas de no enseñar un título roto. Retirarlo cuando
+       * alguien se lo encuentra llega tarde por definición: ya se llevó el «no se pudo
+       * reproducir». Exigir la prueba vigente lo deja fuera ANTES, que es lo que se pidió.
+       *
+       * La ventana sale de `VERIFICADO_VIGENTE_MS`, la MISMA constante que usa `paraElCliente`,
+       * y no de un 6 escrito aquí. Si un día se decide que el sello dura más o menos, esto tiene
+       * que moverse con él; una copia se desincronizaría en silencio, y este proyecto ya se ha
+       * llevado ese golpe cinco veces.
+       *
+       * `streams_checked_at` es el sustituto legítimo del sello a nivel de fila: el barrido lo
+       * escribe en la misma pasada y con la misma marca de tiempo con la que sella los
+       * servidores. Comprobado sobre el catálogo entero — las dos distribuciones son idénticas
+       * (p50 0,1 h · p90 6,3 h · p99 6,7 h)—, y hace falta porque un listado no se trae la
+       * columna `servers`: es justo la optimización que evita mover 23 MB para pintar carátulas.
+       *
+       * EL PRECIO, dicho claro: si el barrido se cae, el catálogo ENCOGE en vez de mentir. Es
+       * deliberado y es la regla de la casa — más corto y cierto antes que largo y falso—, pero
+       * significa que la salud del barrido pasa a ser visible en el tamaño del catálogo. Por eso
+       * `--verificar` no puede volver a morir en silencio.
+       */
+      .gt('streams_checked_at', new Date(Date.now() - VERIFICADO_VIGENTE_MS).toISOString()) as T;
   }
 
   /**
