@@ -59,8 +59,32 @@ const HOSTS_DE_FICHERO_DIRECTO = [
   /remux\.unlimplay\.com\/remux\?/i,
 ];
 
+/**
+ * La forma ESTABLE de una URL de archive.org.
+ *
+ * archive.org reparte cada fichero entre nodos y publica el enlace del nodo que le toca en ese
+ * momento: `https://dn711505.ca.archive.org/0/items/<id>/<fichero>`. Ese hostname NO es
+ * permanente —el fichero se mueve, el nodo se cae o se rebalancea— y guardarlo es guardar algo
+ * que se pudre, que es exactamente lo que este catálogo dejó de hacer.
+ *
+ * La forma canónica `https://archive.org/download/<id>/<fichero>` redirige al nodo que esté sano
+ * en cada petición. Medido el 2026-08-19 sobre el mismo fichero de 1,78 GB:
+ *
+ *   nodo dn711505…   httpClient 206 en 10,9 s · streamClient **500**
+ *   /download/…      httpClient 206 en 2,3 s  · streamClient 206 en 2,1 s
+ *
+ * O sea que el nodo no solo caduca: ya falla hoy con el cliente que usa el verificador del crawl
+ * (`entregaVideo`), y el fallo se leería como «este fichero no reproduce» cuando reproduce.
+ *
+ * Lo que no sea de archive.org sale tal cual.
+ */
+export function canonicalArchiveOrg(url: string): string {
+  const m = /^https?:\/\/[a-z0-9-]+\.(?:[a-z]{2}\.)?archive\.org\/\d+\/items\/([^/]+)\/(.+)$/i.exec(url || '');
+  return m ? `https://archive.org/download/${m[1]}/${m[2]}` : url;
+}
+
 /** ¿Esta URL apunta al fichero de vídeo, por extensión o por ser un host de fichero directo? */
-function esFicheroDirecto(url: string): boolean {
+export function esFicheroDirecto(url: string): boolean {
   return /\.(m3u8|mp4|txt|mkv|webm)(\?|$)/i.test(url) || HOSTS_DE_FICHERO_DIRECTO.some(re => re.test(url));
 }
 
@@ -1069,46 +1093,58 @@ export function deferredDirectFields(embedUrl: string): DirectFields {
 /**
  * Traduce una extracción a los campos que viajan en el `ServerOption`.
  *
- * Cuando la URL es efímera (todos los hosts conocidos hoy) se publica la URL de ESTA API en
- * vez de la del CDN: así el cliente guarda un enlace estable y la caducidad se resuelve por
- * dentro. La URL cruda no se propaga nunca hacia la base de datos.
+ * Cuando la URL es efímera —la inmensa mayoría— se publica la URL de ESTA API en vez de la del
+ * CDN: así el cliente guarda un enlace estable y la caducidad se resuelve por dentro.
  *
- * `direct_mode` dice qué HARÁ esa URL al pedirla: casi siempre un 302 al CDN (`redirect`), y
- * solo reenvío de bytes (`proxy`) en los hosts que atan por IP o exigen cabeceras que un
- * navegador no puede poner. Es un anuncio, no una orden: la decisión real la vuelve a tomar
- * /api/v1/stream/direct al reproducir, así que un valor guardado que se quede viejo no rompe
- * nada — como mucho desactualiza lo que se muestra.
+ * PERO SI LA URL NO LLEVA NINGUNA MARCA EFÍMERA, se entrega tal cual (modo `public`). Este caso
+ * existía, se quitó y vuelve; los tres motivos por los que se quitó y qué ha pasado con cada uno
+ * están explicados enteros en `enlaceDirecto` (services/streamSorter.ts) — resumen: el de CORS
+ * solo afecta a un reproductor web y el cliente real es ExoPlayer; la verificación se movió a la
+ * entrada; y el grave —turboviplay firmando URLs que se guardaban como permanentes— lo ataja
+ * `isPubliclyShareable`, que ve la firma y no la deja pasar.
+ *
+ * Aquí importa porque esta función corre AL ACUÑAR: `playbackHealth` la usa para rehacer los
+ * campos de un servidor que resucita, y sin esta rama un servidor `public` que se cayera un rato
+ * volvía convertido en `proxy` para siempre.
+ *
+ * `direct_mode` dice qué HARÁ esa URL al pedirla: `public` la sirve el CDN directamente, y en el
+ * resto casi siempre un 302 (`redirect`), con reenvío de bytes (`proxy`) solo en los hosts que
+ * atan por IP o exigen cabeceras que un navegador no puede poner. Es un anuncio, no una orden: la
+ * decisión real la vuelve a tomar /api/v1/stream/direct al reproducir, así que un valor guardado
+ * que se quede viejo no rompe nada — como mucho desactualiza lo que se muestra.
  */
 export function describeDirect(embedUrl: string, direct: DirectStream): DirectFields {
   // Hay hosts cuyo vídeo no se puede servir desde aquí por ninguna vía (ver
   // `noSePuedeServirDirecto`). Extraerlo salió bien, pero entregarlo no, así que no se anuncia:
   // el servidor se queda con su embed, que es lo que de verdad reproduce.
   if (policyFor(embedUrl).noSePuedeServirDirecto) return {};
-  // YA NO SE PUBLICA NINGUNA URL CRUDA DE CDN, aunque parezca permanente.
-  //
-  // Existía el modo `public` para los mp4 sin firma ni caducidad: se entregaba la URL del CDN tal
-  // cual y el cliente se ahorraba el salto por la API. Llegó a 1 115 servidores (1,5%) y trajo
-  // tres problemas, los tres reportados o medidos:
-  //
-  //   1. CORS. archive.org (189 servidores) no manda `Access-Control-Allow-Origin`, así que un
-  //      reproductor web que lea el vídeo por fetch/MSE lo tiene bloqueado y no hay nada que el
-  //      cliente pueda hacer: la URL no es nuestra y no podemos añadirle cabeceras.
-  //   2. Se saltaba TODA la verificación. Una URL cruda no pasa por /stream/direct, así que
-  //      ninguna de las comprobaciones de destino vivo llega a ejecutarse sobre ella.
-  //   3. Caducaba igual. 192 de esos servidores apuntaban a `cdn3.turboviplay.com`, que firma sus
-  //      URLs — o sea que el enlace "permanente" que se guardó lleva meses muerto.
-  //
-  // Ahora todo pasa por la API, que decide en cada reproducción y puede proxear si hace falta.
-  const mode: DirectMode = bestMode(embedUrl, direct.kind);
+
   let host = '';
   try {
     host = new URL(direct.url).hostname;
   } catch {}
 
+  /**
+   * La URL permanente se entrega tal cual, sin envolverla.
+   *
+   * Se mira `direct.url` —la URL extraída— y no el embed: son cosas distintas y solo la primera
+   * es la que va a pedir el reproductor. El envoltorio `?link=…` de FuegoCine, por ejemplo, lleva
+   * parámetros que `hasVolatileToken` marcaría como firma cuando el fichero de dentro no la tiene.
+   */
+  if (isPubliclyShareable(direct.url)) {
+    return {
+      direct_stream: direct.url,
+      direct_kind: direct.kind,
+      direct_mode: 'public',
+      direct_host: host || undefined,
+      headers: requiredHeaders(embedUrl, USER_AGENT),
+    };
+  }
+
   return {
     direct_stream: directEndpointUrl(embedUrl, direct.kind),
     direct_kind: direct.kind,
-    direct_mode: mode,
+    direct_mode: bestMode(embedUrl, direct.kind),
     direct_host: host || undefined,
     headers: requiredHeaders(embedUrl, USER_AGENT),
   };

@@ -21,7 +21,7 @@ import { CatalogService } from '../src/services/catalogService';
 import { TmdbService } from '../src/services/tmdbService';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
 import { canonicalTitle, searchIndexKey, yearFromSlug } from '../src/utils/text';
-import { mereceRepasoDeExtraccion, hasVolatileToken } from '../src/scrapers/directStream';
+import { mereceRepasoDeExtraccion, hasVolatileToken, canonicalArchiveOrg } from '../src/scrapers/directStream';
 import { streamClient } from '../src/utils/httpClient';
 import { CacheStore } from '../src/cache/store';
 import { MediaItem } from '../src/types';
@@ -30,10 +30,25 @@ import { MediaItem } from '../src/types';
 // (secret del workflow / variable de entorno). Sin ella el upsert fallará con RLS.
 const db = getSupabaseAdmin();
 
+/**
+ * De dónde salen los títulos de esta pasada.
+ *
+ * Por defecto, crawl COMPLETO: todas las categorías de tioplus paginadas hasta agotar + todo
+ * FuegoCine. Es lo que da recuperación total y scroll infinito en la búsqueda.
+ *
+ * `--solo=<fuente>` lo recorta a una web (`fuegocine`, `peliculas`, `series`, `animes`). Se
+ * añadió para poder dedicarle una pasada entera a FuegoCine, que es la única web probada que
+ * publica ficheros PERMANENTES: de las 961 urls sin caducidad que llegó a tener el catálogo, 708
+ * eran del CDN de Rumble y 145 de archive.org, y las 853 llegaron por su envoltorio `?link=`. En
+ * el crawl completo comparte las horas con otras tres webs y solo se le rasca por encima.
+ *
+ * Lo que viene después es EL MISMO CAMINO —TMDB, `quedarseConLoQueReproduce`, la escritura—, así
+ * que esto no es un scraper aparte que pueda desincronizarse: es la misma pasada con otra puerta.
+ */
 async function collectCatalog(): Promise<MediaItem[]> {
-  // Crawl COMPLETO (todas las categorías de tioplus paginadas hasta agotar + todo FuegoCine),
-  // no solo home/últimos. Es lo que da recuperación total y scroll infinito en la búsqueda.
-  return RealScraperService.crawlFullCatalog();
+  const solo = (process.argv.find(a => a.startsWith('--solo=')) || '').split('=')[1];
+  if (solo) console.log(`   (solo «${solo}»)`);
+  return RealScraperService.crawlFullCatalog(solo || undefined);
 }
 
 /** Comprueba si una columna opcional ya existe (migración aplicada). */
@@ -596,8 +611,11 @@ async function urlsBuenasDe(servidores: any[], fuente: string): Promise<any[]> {
     const embed = String(sv?.embed_url || '');
     if (!embed) continue;
     // Un mismo servidor puede ofrecer la url por el envoltorio y a pelo: se miran las dos.
-    for (const cand of [urlDentroDelEnvoltorio(embed), embed]) {
-      if (!cand) continue;
+    for (const crudo of [urlDentroDelEnvoltorio(embed), embed]) {
+      if (!crudo) continue;
+      // El enlace de NODO de archive.org (`dn711505.ca.archive.org/0/items/…`) no es permanente y
+      // encima le da 500 a este mismo cliente. Se guarda su forma canónica. Ver `canonicalArchiveOrg`.
+      const cand = canonicalArchiveOrg(crudo);
       if (!FICHERO_PERMANENTE.some(re => re.test(cand))) continue;
       if (hasVolatileToken(cand)) continue;
       if (salida.some(x => x.sv.direct_stream === cand)) continue;
@@ -636,9 +654,16 @@ async function quedarseConLoQueReproduce(items: MediaItem[]): Promise<MediaItem[
   console.log(`🎬 Extrayendo la url directa de ${items.length} títulos (solo entra lo que reproduzca)...`);
   const buenos: MediaItem[] = [];
   const CONC = 8;
-  // Presupuesto: el trabajo tiene 6 h y el crawl ya gastó las suyas. Lo que no dé tiempo a
-  // comprobar sale en la corrida siguiente, igual que en el resto de pasadas de este proyecto.
-  const limite = Date.now() + 200 * 60_000;
+  /**
+   * Presupuesto: el trabajo tiene 6 h y el crawl ya gastó las suyas. Lo que no dé tiempo a
+   * comprobar sale en la corrida siguiente, igual que en el resto de pasadas de este proyecto.
+   *
+   * Ajustable con `--minutos=`: una pasada `--solo=fuegocine` no gasta horas recolectando cuatro
+   * webs, así que puede dedicar mucho más tiempo a lo caro, que es bajarse un trozo de cada
+   * fichero para comprobar que reproduce.
+   */
+  const minutos = Number((process.argv.find(a => a.startsWith('--minutos=')) || '').split('=')[1]) || 200;
+  const limite = Date.now() + minutos * 60_000;
   let mirados = 0;
 
   for (let i = 0; i < items.length; i += CONC) {

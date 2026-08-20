@@ -1,7 +1,46 @@
 import { ServerOption, DirectMode } from '../types';
 import { SourceManager, SourceConfig } from './sourceManager';
 import { bestMode } from '../scrapers/hostPolicy';
-import { directEndpointUrl } from '../scrapers/directStream';
+import { directEndpointUrl, isPubliclyShareable, esFicheroDirecto } from '../scrapers/directStream';
+
+/**
+ * ¿Esta URL se puede entregar TAL CUAL, sin pasar por esta API?
+ *
+ * Vive en una sola función porque la misma pregunta se hace en tres sitios —aquí en
+ * `effectiveDirectMode` y `enlaceDirecto`, y en `describeDirect` al acuñar— y las tres tienen que
+ * contestar lo mismo. Cuando una era más laxa que otra salía lo peor de los dos mundos: la ficha
+ * anunciaba la URL cruda del CDN con el modo `proxy` puesto, y eso no lo reproduce nadie.
+ *
+ * Se pregunta por la URL QUE SE VA A ENTREGAR, nunca por el embed que la produjo: un envoltorio
+ * `?link=…` de FuegoCine lleva parámetros que parecen firma y el fichero de dentro no la tiene.
+ *
+ * `isPubliclyShareable` ya exige las dos condiciones —ni marca efímera (`hasVolatileToken`) ni
+ * host que ate por IP—, así que no hay que repetir ninguna aquí.
+ */
+function seEntregaTalCual(url: string | undefined | null): boolean {
+  return Boolean(url) && /^https?:\/\//i.test(url as string) && isPubliclyShareable(url as string);
+}
+
+/**
+ * La URL permanente de este servidor, si la tiene. `undefined` si hay que pasar por la API.
+ *
+ * Son DOS sitios donde mirar, y el segundo no es una comodidad: es lo que repara las filas ya
+ * escritas. La lista que sale de `sortServersBySourcePriority` no solo se entrega, también SE
+ * GUARDA —`catalogService` la persiste tal cual—, así que mientras la reescritura estuvo activa
+ * el `direct_stream` de la base quedó apuntando a `/api/v1/stream/direct`. La URL cruda no se
+ * perdió: `embed_url` sigue siendo el fichero. Sin este rescate haría falta volver a rastrear
+ * cada ficha para recuperar algo que ya está guardado.
+ *
+ * `esFicheroDirecto` es imprescindible en el segundo caso y no sobra: en un servidor normal
+ * `embed_url` es la PÁGINA de un reproductor ajeno, no un vídeo, y muchas de esas páginas pasan
+ * `isPubliclyShareable` sin problema porque no llevan firma. Entregarla como vídeo directo le
+ * daría al reproductor un HTML y un error que no dice por qué.
+ */
+function urlPublicaDe(server: ServerOption): string | undefined {
+  if (seEntregaTalCual(server.direct_stream)) return server.direct_stream;
+  if (esFicheroDirecto(server.embed_url || '') && seEntregaTalCual(server.embed_url)) return server.embed_url;
+  return undefined;
+}
 
 /**
  * Cómo se va a servir este servidor HOY, no cómo se guardó.
@@ -25,8 +64,18 @@ import { directEndpointUrl } from '../scrapers/directStream';
  */
 export function effectiveDirectMode(server: ServerOption): DirectMode | undefined {
   if (!server.direct_stream) return undefined;
-  // El modo `public` ya no existe, ni siquiera para las 1 115 fichas que lo llevan guardado: se
-  // recalcula como cualquier otra. Ver `enlaceDirecto` justo debajo.
+
+  /**
+   * PRIMERO LO QUE NO LLEVA FIRMA, y va antes que `bestMode` A PROPÓSITO.
+   *
+   * `bestMode` arranca por la política del host, y un host que no está en la tabla cae en
+   * `CONSERVATIVE`, que trae `ipBound: true` y devuelve `proxy` sin mirar nada más. Para un embed
+   * desconocido eso está bien —lo que no se ha medido se reenvía—, pero aquí es falso por
+   * construcción: una URL SIN firma no puede estar atada a ninguna IP, porque no hay firma que
+   * atar. Era esta línea la que mandaba al proxy un mp4 público de archive.org.
+   */
+  if (urlPublicaDe(server)) return 'public';
+
   if (!server.embed_url) return server.direct_mode;
   return bestMode(server.embed_url, server.direct_kind ?? 'hls', { sendsReferer: true });
 }
@@ -34,24 +83,39 @@ export function effectiveDirectMode(server: ServerOption): DirectMode | undefine
 /**
  * El `direct_stream` que se entrega hoy, aunque en la DB se guardara la URL cruda del CDN.
  *
- * Hubo un modo `public` que publicaba directamente el enlace del CDN cuando el mp4 no llevaba
- * firma: se ahorraba el salto por la API. Quedaron 1 115 servidores así (1,5 %) y salió mal por
- * tres sitios a la vez —lo reportó un cliente y lo confirmó la medición—:
+ * VUELVE EL MODO `public`, y conviene saber por qué se había quitado antes de tocarlo otra vez.
+ * Publicaba el enlace del CDN tal cual cuando el mp4 no llevaba firma, ahorrando el salto por la
+ * API. Llegó a 1 115 servidores (1,5 %) y se retiró por tres motivos. Ninguno era falso; dos han
+ * dejado de aplicar y el tercero está atajado:
  *
- *   1. CORS. archive.org (189) no manda `Access-Control-Allow-Origin` NINGUNO, así que un
- *      reproductor web que lea por fetch/MSE lo tiene bloqueado, y como la URL no es nuestra no
- *      hay forma de añadirle la cabecera.
- *   2. Se saltaba TODA la verificación de destino vivo: lo que no pasa por /stream/direct no se
- *      comprueba.
- *   3. Caducaba igual. 192 apuntaban a `cdn3.turboviplay.com`, que firma sus URLs — el enlace
- *      "permanente" que se guardó lleva meses muerto.
+ *   1. CORS. archive.org no manda `Access-Control-Allow-Origin` NINGUNO, así que un reproductor
+ *      WEB que lea por fetch/MSE lo tiene bloqueado y no hay forma de añadir la cabecera a una
+ *      URL ajena. SIGUE SIENDO CIERTO para navegadores — y da igual: el cliente de este catálogo
+ *      es la app Android con ExoPlayer, a la que CORS no le afecta, y no hay reproductor web.
+ *   2. Se saltaba TODA la verificación de destino vivo, porque lo que no pasa por /stream/direct
+ *      no se comprueba. YA NO: desde que solo entra en la base lo que tiene URL permanente, cada
+ *      una se comprueba bajando bytes de vídeo ANTES de escribirla (`urlsBuenasDe` en
+ *      refreshCatalog) y el barrido la vuelve a mirar. La verificación se movió de la salida a la
+ *      entrada, que es donde sirve para no anunciar basura.
+ *   3. Caducaba igual: 192 de esos servidores apuntaban a `cdn3.turboviplay.com`, que firma sus
+ *      URLs, o sea que el enlace "permanente" que se guardó llevaba meses muerto. ESTE ERA EL
+ *      GRAVE, y es justo lo que ataja `seEntregaTalCual` → `isPubliclyShareable`: turboviplay
+ *      lleva su firma en la URL, `hasVolatileToken` la ve, y nunca vuelve a colarse como público.
  *
- * Se corrige en la SALIDA y no solo en el scraper para no tener que esperar a que se vuelvan a
- * rastrear esas fichas: en cuanto se piden, ya salen apuntando a la API.
+ * O sea que la condición no es "parece permanente": es "no lleva NINGUNA marca efímera y su host
+ * no ata por IP", comprobado sobre la URL que se va a entregar. Si algún día hace falta un
+ * reproductor web, lo que hay que revisar es el punto 1, no volver a apagar esto entero.
+ *
+ * Lo demás sigue igual: se corrige en la SALIDA y no solo en el scraper, para no tener que
+ * esperar a que se vuelvan a rastrear las fichas ya guardadas.
  */
 export function enlaceDirecto(server: ServerOption): string | undefined {
   const actual = server.direct_stream;
   if (!actual || !server.embed_url) return actual;
+  // Lo permanente se entrega tal cual. Va PRIMERO porque también rescata las filas que se
+  // guardaron ya reescritas: ver `urlPublicaDe`.
+  const publica = urlPublicaDe(server);
+  if (publica) return publica;
   // Lo que ya apunta a la API (relativo o absoluto) se queda como está.
   if (!/^https?:\/\//i.test(actual) || actual.includes('/api/v1/stream/direct')) return actual;
   return directEndpointUrl(server.embed_url, server.direct_kind === 'mp4' ? 'mp4' : 'hls');

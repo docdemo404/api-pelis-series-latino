@@ -1687,20 +1687,40 @@ export class RealScraperService {
   /**
    * Crawl COMPLETO del catálogo de todas las fuentes activas para scripts/refreshCatalog.ts.
    * Deduplica por id. La resolución de TMDB y la escritura las hace el job de refresh.
+   *
+   * `solo` recorta a UNA web. No es una comodidad de desarrollo: el crawl completo tarda horas
+   * repartidas entre cuatro webs, y cuando una de ellas es la que de verdad aporta —FuegoCine da
+   * 708 de las 961 urls permanentes que llegó a tener el catálogo, todas por su envoltorio
+   * `?link=`— conviene poder dedicarle una pasada entera a ella sola. Lo que viene después
+   * (TMDB, `quedarseConLoQueReproduce`, la escritura) es exactamente el mismo camino.
    */
-  static async crawlFullCatalog(): Promise<MediaItem[]> {
+  static async crawlFullCatalog(solo?: string): Promise<MediaItem[]> {
+    const dedup = (listas: MediaItem[][]): MediaItem[] => {
+      const seen = new Set<string>();
+      return listas.flat().filter(it => {
+        if (!it.id || seen.has(it.id)) return false;
+        seen.add(it.id);
+        return true;
+      });
+    };
+
+    if (solo === 'fuegocine') {
+      // El tope alto es a propósito: el de por defecto son 5.000 ENTRADAS del feed, y FuegoCine
+      // publica cada capítulo de serie como su propia entrada, así que 3.215 títulos son muchas
+      // más entradas que títulos. Con 5.000 se cortaba a mitad del archivo sin decirlo.
+      return dedup([await this.scrapeAllFuegocine(40000).catch(() => [] as MediaItem[])]);
+    }
+    if (solo === 'peliculas' || solo === 'series' || solo === 'animes') {
+      return dedup([await this.scrapeAllOfType(solo).catch(() => [] as MediaItem[])]);
+    }
+
     const [peliculas, series, animes, fuego] = await Promise.all([
       this.scrapeAllOfType('peliculas').catch(() => [] as MediaItem[]),
       this.scrapeAllOfType('series').catch(() => [] as MediaItem[]),
       this.scrapeAllOfType('animes').catch(() => [] as MediaItem[]),
       this.scrapeAllFuegocine().catch(() => [] as MediaItem[])
     ]);
-    const seen = new Set<string>();
-    return [...peliculas, ...series, ...animes, ...fuego].filter(it => {
-      if (!it.id || seen.has(it.id)) return false;
-      seen.add(it.id);
-      return true;
-    });
+    return dedup([peliculas, series, animes, fuego]);
   }
 
   /**

@@ -6,7 +6,7 @@ import { sortServersBySourcePriority, getPrimaryStream, paraElCliente, fichaRepr
 import { normalizeTitle, slugify, yearFromSlug, searchIndexKey } from '../utils/text';
 import { httpClient } from '../utils/httpClient';
 import { CacheStore } from '../cache/store';
-import { unwrapRedirector } from '../scrapers/directStream';
+import { unwrapRedirector, canonicalArchiveOrg } from '../scrapers/directStream';
 import { revisarServidores, aplicarVeredictosRecordados } from './playbackHealth';
 
 // TTL del caché de catálogo/búsqueda. Con Redis (KV_REST_API_* / UPSTASH_*) las entradas
@@ -1217,9 +1217,18 @@ export class CatalogService {
     ok: boolean; id?: string; titulo?: string;
     aceptadas: string[]; rechazadas: string[]; capitulos_ok?: number; error?: string;
   }> {
-    const urls = Array.from(new Set(opts.urls.map(u => u.trim()).filter(Boolean)));
+    /**
+     * Se normaliza ANTES de comprobar, para que lo que se prueba sea lo que se guarda.
+     *
+     * `canonicalArchiveOrg` cambia el enlace del nodo que archive.org enseña en su web por su
+     * forma canónica. No es cosmético: pegando el del nodo, el verificador del crawl recibe un
+     * 500 de ese nodo y da el fichero por muerto teniéndolo vivo. Ver esa función.
+     */
+    const limpiar = (lista: string[]) =>
+      Array.from(new Set(lista.map(u => canonicalArchiveOrg(u.trim())).filter(Boolean)));
+    const urls = limpiar(opts.urls);
     const porCapitulo = (opts.episodios || [])
-      .map(e => ({ ...e, urls: Array.from(new Set(e.urls.map(u => u.trim()).filter(Boolean))) }))
+      .map(e => ({ ...e, urls: limpiar(e.urls) }))
       .filter(e => e.urls.length);
     if (!urls.length && !porCapitulo.length) {
       return { ok: false, aceptadas: [], rechazadas: [], error: 'No se pasó ninguna url' };
