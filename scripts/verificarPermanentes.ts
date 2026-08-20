@@ -139,7 +139,39 @@ async function sigueVivo(url: string): Promise<{ ok: boolean; motivo: string; si
      * aunque el fichero esté. Sin esta línea, el barrido lo daría por bueno. Ver `entregaVideo`
      * en refreshCatalog para el caso que lo destapó (`files.eintim.me`).
      */
-    if (r.status !== 206) return { ok: false, motivo: `ignora el Range (http ${r.status})` };
+    /**
+     * SI IGNORA EL `Range`, SE LE DA UNA SEGUNDA OPORTUNIDAD ANTES DE CONDENARLO.
+     *
+     * Medido sobre el mismo fichero de `files.eintim.me`, tres peticiones seguidas con el mismo
+     * User-Agent de navegador:
+     *
+     *   intento 1   200  y empieza a mandar el fichero entero (128 MB antes de cortar)
+     *   intento 2   206  con los 64 KB pedidos
+     *   intento 3   206
+     *
+     * O sea que no es un host que no sepa hacer rangos: es el origen despertando. La primera
+     * petición sobre un fichero frío la sirve de corrido y a partir de ahí ya responde bien.
+     *
+     * Condenar al primer intento habría sacado del catálogo ficheros perfectamente utilizables
+     * —y el host más numeroso que tiene—. Comprobarlo una sola vez y darlo por bueno tampoco
+     * vale: sin rangos no se puede adelantar. Así que se pregunta otra vez, y solo si insiste en
+     * el 200 se retira.
+     */
+    if (r.status !== 206) {
+      const segunda = await streamClient.get(url, {
+        headers: { Range: 'bytes=0-65535' },
+        responseType: 'arraybuffer',
+        timeout: 10000,
+        validateStatus: () => true,
+        maxRedirects: 5,
+      } as any);
+      if (segunda.status !== 206) {
+        return { ok: false, motivo: `ignora el Range (http ${segunda.status})` };
+      }
+      const kb2 = ((segunda.data as ArrayBuffer)?.byteLength ?? 0) / 1024;
+      if (kb2 <= 8) return { ok: false, motivo: `solo ${kb2.toFixed(1)} KB` };
+      return { ok: true, motivo: '' };
+    }
     const kb = ((r.data as ArrayBuffer)?.byteLength ?? 0) / 1024;
     if (kb <= 8) return { ok: false, motivo: `solo ${kb.toFixed(1)} KB` };
     return { ok: true, motivo: '' };

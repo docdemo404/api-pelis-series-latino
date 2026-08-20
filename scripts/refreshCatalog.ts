@@ -607,6 +607,9 @@ async function entregaVideo(url: string): Promise<{ ok: boolean; kbs: number }> 
     /**
      * EL HOST TIENE QUE HONRAR EL `Range`, y esto es tan importante como que el fichero exista.
      *
+     * Con una segunda oportunidad si el primer intento lo ignora: ver la nota de `sigueVivo` en
+     * verificarPermanentes — la primera peticion sobre un fichero frio la sirven de corrido.
+     *
      * Se pidieron 64 KB. Un `206 Partial Content` dice que el host entendió y mandó ese trozo;
      * un `200` dice que va a mandar el fichero ENTERO, y con eso no se puede reproducir bien:
      * ExoPlayer necesita rangos para saltar, así que cada vez que alguien adelanta o retrocede
@@ -619,7 +622,19 @@ async function entregaVideo(url: string): Promise<{ ok: boolean; kbs: number }> 
      *
      * Comprobarlo al ENTRAR es lo que evita meter en el catálogo cosas que no se pueden manejar.
      */
-    if (r.status !== 206) return { ok: false, kbs: 0 };
+    if (r.status !== 206) {
+      const segunda = await streamClient.get(url, {
+        headers: { Range: 'bytes=0-65535' },
+        responseType: 'arraybuffer',
+        timeout: 25000,
+        validateStatus: () => true,
+        maxRedirects: 5,
+      });
+      if (segunda.status !== 206) return { ok: false, kbs: 0 };
+      const kb2 = ((segunda.data as ArrayBuffer)?.byteLength ?? 0) / 1024;
+      if (kb2 <= 8) return { ok: false, kbs: 0 };
+      return { ok: true, kbs: kb2 / Math.max((Date.now() - t0) / 1000, 0.001) };
+    }
 
     const kb = ((r.data as ArrayBuffer)?.byteLength ?? 0) / 1024;
     if (kb <= 8) return { ok: false, kbs: 0 };
