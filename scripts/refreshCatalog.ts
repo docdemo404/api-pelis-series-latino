@@ -21,7 +21,7 @@ import { CatalogService } from '../src/services/catalogService';
 import { TmdbService } from '../src/services/tmdbService';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
 import { canonicalTitle, searchIndexKey, yearFromSlug } from '../src/utils/text';
-import { mereceRepasoDeExtraccion, hasVolatileToken, canonicalArchiveOrg } from '../src/scrapers/directStream';
+import { mereceRepasoDeExtraccion, hasVolatileToken, canonicalArchiveOrg, esUrlDeFicheroPermanente } from '../src/scrapers/directStream';
 import { streamClient } from '../src/utils/httpClient';
 import { CacheStore } from '../src/cache/store';
 import { MediaItem } from '../src/types';
@@ -549,27 +549,6 @@ function parseVerifyFlag(argv: string[]): number {
 
 
 /** Hosts cuya url ES el fichero de vídeo: se piden y devuelven bytes, sin firma que caduque. */
-const FICHERO_PERMANENTE = [
-  /pixeldrain\.com\/api\/file\//i,
-  /archive\.org\/download\//i,
-  /1a-\d+\.com\/video\//i,
-  /cdn\.rumble\.cloud\/video\//i,
-  /*
-   * `remux.unlimplay.com/remux?id=…` ESTUVO AQUÍ Y NO DEBÍA.
-   *
-   * Se coló porque devuelve vídeo y su url no lleva firma, así que cumplía la forma de lo
-   * permanente. Pero no es un fichero: es un REMUXER —reensambla el vídeo al vuelo por cada
-   * petición— y eso está atado a la sesión y a lo que el servicio quiera durar. Guardarlo es
-   * guardar una promesa, no una dirección.
-   *
-   * Medido el 2026-08-20: devuelve 403 con una página HTML, con User-Agent de navegador y sin
-   * él. Los títulos que lo tenían («23 000 vidas», «Zona de riesgo») fueron los dos primeros
-   * que cazó el barrido de permanentes, y el usuario reportó el mismo enlace.
-   *
-   * Se quita de la lista para no volver a meterlo. Lo ya guardado lo retira el barrido solo.
-   */
-  /\.(mp4|mkv|webm)(\?|$)/i,
-];
 
 /** La dirección real que un envoltorio lleva dentro de sus parámetros (`?link=…`). */
 function urlDentroDelEnvoltorio(embed: string): string | null {
@@ -673,7 +652,7 @@ async function urlsBuenasDe(servidores: any[], fuente: string): Promise<any[]> {
       // El enlace de NODO de archive.org (`dn711505.ca.archive.org/0/items/…`) no es permanente y
       // encima le da 500 a este mismo cliente. Se guarda su forma canónica. Ver `canonicalArchiveOrg`.
       const cand = canonicalArchiveOrg(crudo);
-      if (!FICHERO_PERMANENTE.some(re => re.test(cand))) continue;
+      if (!esUrlDeFicheroPermanente(cand)) continue;
       if (hasVolatileToken(cand)) continue;
       if (vistos.has(cand)) continue;
       vistos.add(cand);

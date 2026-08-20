@@ -60,6 +60,31 @@ const HOSTS_DE_FICHERO_DIRECTO = [
 ];
 
 /**
+ * ¿Esta URL es un FICHERO que se puede guardar para siempre?
+ *
+ * Vive aquí y no en el crawl porque hacen falta dos respuestas idénticas en dos sitios: el
+ * crawl la usa para decidir qué ENTRA, y el barrido de permanentes para decidir qué SE QUEDA.
+ * Cuando estaban por separado pasó exactamente lo que tenía que pasar — se quitó
+ * `remux.unlimplay.com` de la lista del crawl y el barrido siguió tratando como buenos los que
+ * ya estaban guardados, así que se seguían entregando.
+ *
+ * Lo que hay aquí son hosts cuya URL ES el fichero y no caduca. `remux.unlimplay.com` estuvo y
+ * no debía: es un remuxer que reensambla el vídeo al vuelo por cada petición —atado a sesión— y
+ * hoy contesta 403 con una página HTML. Guardar eso es guardar una promesa, no una dirección.
+ */
+export function esUrlDeFicheroPermanente(url: string): boolean {
+  return FICHEROS_PERMANENTES.some(re => re.test(url || ''));
+}
+
+const FICHEROS_PERMANENTES: RegExp[] = [
+  /pixeldrain\.com\/api\/file\//i,
+  /archive\.org\/download\//i,
+  /1a-\d+\.com\/video\//i,
+  /cdn\.rumble\.cloud\/video\//i,
+  /\.(mp4|mkv|webm)(\?|$)/i,
+];
+
+/**
  * La forma ESTABLE de una URL de archive.org.
  *
  * archive.org reparte cada fichero entre nodos y publica el enlace del nodo que le toca en ese

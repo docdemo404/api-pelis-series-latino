@@ -1378,6 +1378,8 @@ export class CatalogService {
   static async contenidoParaPanel(opts: {
     tipo?: 'movie' | 'tvseries';
     q?: string;
+    /** Solo los títulos que traen algún enlace de esta fuente. Vacío = todas. */
+    fuente?: string;
     pagina?: number;
     porPagina?: number;
   } = {}): Promise<{ total: number; pagina: number; filas: Array<Record<string, unknown>> }> {
@@ -1395,15 +1397,33 @@ export class CatalogService {
     const { data, count, error } = await q.range(desde, desde + porPagina - 1);
     if (error) return { total: 0, pagina, filas: [] };
 
-    /** De qué web salió un enlace. Se mira el `source_id` que guardó el crawl y, si falta, la url. */
+    /**
+     * De qué web salió un enlace.
+     *
+     * LA URL MANDA SOBRE EL `source_id` GUARDADO cuando las dos hablan, y no al revés. Parece lo
+     * contrario de lo razonable —el crawl sabe de qué página sacó el enlace— hasta que se mira
+     * qué pasa cuando el crawl se equivocó: las primeras fichas de archive.org se guardaron
+     * rotuladas «tioplus», porque `fuenteDeLaUrl` no conocía ese host y su `return` final es ese.
+     * Quedaron mal etiquetadas para siempre, y el panel las enseñaba mal.
+     *
+     * Un `archive.org/download/…` es de archive.org, lo diga la etiqueta o no. Reconocer el host
+     * arregla lo ya guardado sin tener que reescribir la base, y de paso hace que un fallo así
+     * no vuelva a fosilizarse.
+     */
     const fuenteDe = (sv: any): string => {
-      const id = String(sv?.source_id || '').toLowerCase();
-      if (id) return id;
-      const u = String(sv?.embed_url || sv?.direct_stream || '');
+      // Lo puesto a mano se queda como manual: `manual` no dice dónde vive el fichero, dice que
+      // lo puso una persona, y eso es lo que le da la prioridad 1.
+      if (String(sv?.source_id || '').toLowerCase() === 'manual') return 'manual';
+      const u = String(sv?.direct_stream || sv?.embed_url || '');
+      if (/archive\.org/i.test(u)) return 'archive';
       if (/cinecalidad/i.test(u)) return 'cinecalidad';
       if (/fuegocine|blogfc|repfuegocinefree/i.test(u)) return 'fuegocine';
+      const id = String(sv?.source_id || '').toLowerCase();
+      if (id) return id;
       return 'tioplus';
     };
+
+    const filtroFuente = String(opts.fuente || '').toLowerCase();
 
     const filas = (data || []).map((r: any) => {
       const deLaFicha: any[] = Array.isArray(r.servers) ? r.servers : [];
@@ -1424,7 +1444,22 @@ export class CatalogService {
       };
     });
 
-    return { total: count ?? filas.length, pagina, filas };
+    /**
+     * EL FILTRO POR FUENTE SE APLICA AQUÍ Y NO EN POSTGRES, y conviene saber por qué.
+     *
+     * La fuente de un enlace no es una columna: sale de mirar cada objeto del array `servers`
+     * —su `source_id` o su url—. Filtrar eso en la consulta pediría recorrer el JSON en SQL, y
+     * además daría un `count` que no cuadra con lo que se puede paginar.
+     *
+     * El precio es que el total y las páginas siguen siendo los del filtro de tipo y título, así
+     * que una página puede salir con menos filas de las pedidas. Se dice en el panel en vez de
+     * disimularlo: es más honesto que inventar una paginación que no existe.
+     */
+    const visibles = filtroFuente
+      ? filas.filter((f: any) => (f.fuentes as string[]).includes(filtroFuente))
+      : filas;
+
+    return { total: count ?? filas.length, pagina, filas: visibles };
   }
 
   /**

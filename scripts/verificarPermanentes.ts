@@ -51,6 +51,7 @@ import { streamClient } from '../src/utils/httpClient';
 import { CacheStore } from '../src/cache/store';
 import { CatalogService } from '../src/services/catalogService';
 import { fichaReproducible } from '../src/services/streamSorter';
+import { esUrlDeFicheroPermanente } from '../src/scrapers/directStream';
 
 const db = getSupabaseAdmin();
 const numero = (bandera: string, porDefecto: number) =>
@@ -171,6 +172,36 @@ async function sigueVivo(url: string): Promise<{ ok: boolean; motivo: string; si
 /** Desde dónde se pide el trozo de prueba. Ver la nota de `sigueVivo`. */
 const DESDE_MEDIO = 1000000;
 
+/**
+ * QUITA DE LA FILA LO QUE HOY YA NO ENTRARÍA. Devuelve cuántos ha quitado.
+ *
+ * Desellar no basta cuando el host ha salido de la lista de permanentes. Un servidor sin sello
+ * sigue guardado esperando que alguna vuelta lo absuelva, y eso está bien para un corte de red;
+ * pero si su host ya no se acepta, esa absolución no puede llegar nunca. Mientras tanto sigue
+ * ahí, ocupando sitio y —esto es lo que se vio— volviendo a sellarse cuando una tanda del crawl
+ * escrita antes del cambio pasa por encima de la ficha.
+ *
+ * Pasó con `remux.unlimplay.com`: se quitó de la lista, el barrido le quitaba el sello, y cinco
+ * títulos seguían entregándolo igual. Lo que hoy no entraría, no se queda.
+ */
+function purgarLoQueYaNoVale(fila: any): number {
+  let quitados = 0;
+  const limpiar = (servidores: any[] | null | undefined): any[] =>
+    (servidores || []).filter((s: any) => {
+      const url = String(s?.direct_stream || s?.embed_url || '');
+      if (s?.direct_mode !== 'public' || !url) return true;
+      if (esUrlDeFicheroPermanente(url)) return true;
+      quitados++;
+      return false;
+    });
+
+  fila.servers = limpiar(fila.servers);
+  for (const t of fila.seasons || []) {
+    for (const e of t?.episodes || []) e.servers = limpiar(e?.servers);
+  }
+  return quitados;
+}
+
 /** Los servidores `public` de una fila, estén en la ficha o colgando de un capítulo. */
 function permanentesDe(fila: any): Array<{ sv: any; donde: string }> {
   const salida: Array<{ sv: any; donde: string }> = [];
@@ -188,7 +219,7 @@ function permanentesDe(fila: any): Array<{ sv: any; donde: string }> {
   return salida;
 }
 
-const cuenta = { miradas: 0, vivas: 0, retiradas: 0, sinVeredicto: 0, fichas: 0, dejanDeAnunciarse: 0 };
+const cuenta = { miradas: 0, vivas: 0, retiradas: 0, sinVeredicto: 0, fichas: 0, dejanDeAnunciarse: 0, purgados: 0 };
 /** Los listados se purgan la PRIMERA vez que algo se retira, no una vez por ficha. */
 let listadosPurgados = false;
 
@@ -260,6 +291,15 @@ async function guardarFicha(fila: any): Promise<void> {
 
       for (const fila of data as any[]) {
         if (!meToca(String(fila.id))) continue;
+
+        // Primero fuera lo que hoy no entraría; luego ya se comprueba lo que quede.
+        const quitados = purgarLoQueYaNoVale(fila);
+        if (quitados > 0) {
+          cuenta.purgados += quitados;
+          console.log(`   🗑 ${String(fila.title).slice(0, 44)} · ${quitados} servidor(es) de un host que ya no se acepta`);
+          await guardarFicha(fila);
+        }
+
         const suyas = permanentesDe(fila);
         if (!suyas.length) continue;
         filasEncoladas++;
@@ -326,6 +366,7 @@ async function guardarFicha(fila: any): Promise<void> {
     `\n✅ ${cuenta.miradas} urls de ${cuenta.fichas} fichas · ${cuenta.vivas} siguen · ` +
     `${cuenta.retiradas} retiradas` + (cuenta.sinVeredicto ? ` · ${cuenta.sinVeredicto} sin veredicto (no se tocan)` : '')
   );
+  if (cuenta.purgados) console.log(`   ${cuenta.purgados} servidor(es) borrados por venir de un host que ya no se acepta.`);
   if (cuenta.dejanDeAnunciarse) console.log(`   ${cuenta.dejanDeAnunciarse} título(s) dejan de anunciarse.`);
   if (!apply) console.log(`\n   (ensayo — con --apply se escribe)`);
 })();

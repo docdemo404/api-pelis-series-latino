@@ -223,6 +223,14 @@
               <button type="button" class="btn btn-sm btn-dark text-white border-secondary filtro-tipo" data-tipo="movie">Películas</button>
               <button type="button" class="btn btn-sm btn-dark text-white border-secondary filtro-tipo" data-tipo="tvseries">Series</button>
             </div>
+            <select id="contenidoFuente" class="form-select form-select-sm bg-dark text-white border-secondary" style="max-width:190px">
+              <option value="">Todas las fuentes</option>
+              <option value="manual">Fuente propia</option>
+              <option value="archive">Internet Archive</option>
+              <option value="fuegocine">FuegoCine</option>
+              <option value="cinecalidad">Cinecalidad</option>
+              <option value="tioplus">TioPlus</option>
+            </select>
             <input id="contenidoBuscar" type="search" class="form-control form-control-sm bg-dark text-white border-secondary" style="max-width:260px" placeholder="Buscar por título…">
             <span id="contenidoTotal" class="text-secondary small ms-auto"></span>
           </div>
@@ -489,20 +497,32 @@
       cinecalidad: 'text-info',
       fuegocine: 'text-warning',
       tioplus: 'text-success',
+      archive: 'text-primary',
+      manual: 'text-danger',
     }[f] || 'text-secondary');
+
+    let contFuente = '';
 
     async function cargarContenido() {
       contTabla.innerHTML = '<tr><td colspan="5" class="text-secondary small py-3">⏳ Cargando…</td></tr>';
       try {
         const url = '/api/v1/panel/contenido?page=' + contPagina +
           (contTipo ? '&tipo=' + contTipo : '') +
+          (contFuente ? '&fuente=' + encodeURIComponent(contFuente) : '') +
           (contQ ? '&q=' + encodeURIComponent(contQ) : '');
         const j = await (await fetch(url)).json();
         const filas = j.filas || [];
-        document.getElementById('contenidoTotal').textContent = (j.total || 0).toLocaleString('es-ES') + ' títulos';
+        // Con filtro de fuente el total sigue siendo el de tipo+título: la fuente se decide
+        // mirando dentro de cada fila y no se puede contar en la consulta. Se dice, en vez de
+        // enseñar un número que no cuadra con lo que hay debajo.
+        document.getElementById('contenidoTotal').textContent = contFuente
+          ? filas.length + ' de esta fuente en esta página'
+          : (j.total || 0).toLocaleString('es-ES') + ' títulos';
         document.getElementById('contenidoPagina').textContent = 'Página ' + (j.pagina || 1);
         if (!filas.length) {
-          contTabla.innerHTML = '<tr><td colspan="5" class="text-secondary small py-3">Sin resultados. Si la base se acaba de vaciar, el crawl todavía la está llenando.</td></tr>';
+          contTabla.innerHTML = contFuente
+            ? '<tr><td colspan="5" class="text-secondary small py-3">Ningún título de esta fuente en esta página. Prueba la siguiente.</td></tr>'
+            : '<tr><td colspan="5" class="text-secondary small py-3">Sin resultados. Si la base se acaba de vaciar, el crawl todavía la está llenando.</td></tr>';
           return;
         }
         contTabla.innerHTML = filas.map(f =>
@@ -532,6 +552,9 @@
       b.classList.add('active');
       contTipo = b.dataset.tipo; contPagina = 1; cargarContenido();
     }));
+    document.getElementById('contenidoFuente').addEventListener('change', (e) => {
+      contFuente = e.target.value; contPagina = 1; cargarContenido();
+    });
     let temporizador;
     document.getElementById('contenidoBuscar').addEventListener('input', (e) => {
       clearTimeout(temporizador);

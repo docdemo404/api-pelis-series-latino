@@ -96,6 +96,7 @@ router.get('/api/v1/panel/contenido', async (req: Request, res: Response, next: 
       ...(await CatalogService.contenidoParaPanel({
         tipo,
         q: String(req.query.q || '').trim() || undefined,
+        fuente: String(req.query.fuente || '').trim().toLowerCase() || undefined,
         pagina: Number(req.query.page) || 1,
         porPagina: Number(req.query.limit) || 50,
       })),
