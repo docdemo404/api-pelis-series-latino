@@ -643,9 +643,24 @@ async function urlsBuenasDe(servidores: any[], fuente: string): Promise<any[]> {
   }
   if (!candidatos.length) return [];
 
-  const medidos = await Promise.all(
-    candidatos.map(async c => ({ ...c, medida: await entregaVideo(c.url) }))
-  );
+  /**
+   * En paralelo, pero CON TECHO. Y el techo no es cortesía con los hosts: es supervivencia.
+   *
+   * La primera versión medía todos los candidatos de una ficha con un `Promise.all` a pelo. Como
+   * el crawl mira varios títulos a la vez, eso llegaba a ochenta conexiones salientes abiertas de
+   * golpe — y ahí GitHub CANCELA el runner. Medido: las tandas de FuegoCine mueren siempre poco
+   * después de arrancar la extracción, mientras que el barrido de permanentes, con 8 a la vez,
+   * corre entero. La diferencia es la ráfaga, no el total.
+   *
+   * Con cuatro por ficha el coste sigue siendo el PEOR de los timeouts y no la suma, que es lo
+   * que se ganó al dejar de ir en serie; solo se le quita el pico.
+   */
+  const POR_FICHA = 4;
+  const medidos: Array<{ sv: any; url: string; medida: { ok: boolean; kbs: number } }> = [];
+  for (let i = 0; i < candidatos.length; i += POR_FICHA) {
+    const lote = candidatos.slice(i, i + POR_FICHA);
+    medidos.push(...await Promise.all(lote.map(async c => ({ ...c, medida: await entregaVideo(c.url) }))));
+  }
 
   // El mejor primero; los demás quedan detrás como respaldo.
   return medidos
@@ -735,7 +750,12 @@ async function quedarseConLoQueReproduce(
   const buenos: MediaItem[] = [];
   /** Cuántos de `buenos` ya se han entregado a `alEncontrar`. */
   let entregados = 0;
-  const CONC = 8;
+  /**
+   * Cuántos títulos a la vez. Bajó de 8 a 4 por la misma razón que el techo de
+   * `urlsBuenasDe`: lo que tumba al runner es la RÁFAGA de conexiones salientes, y 8
+   * títulos x 4 candidatos ya son 32 en vuelo. Menos pico, más corridas que llegan al final.
+   */
+  const CONC = 4;
   /**
    * Presupuesto: el trabajo tiene 6 h y el crawl ya gastó las suyas. Lo que no dé tiempo a
    * comprobar sale en la corrida siguiente, igual que en el resto de pasadas de este proyecto.
