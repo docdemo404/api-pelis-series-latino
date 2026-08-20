@@ -554,7 +554,20 @@ const FICHERO_PERMANENTE = [
   /archive\.org\/download\//i,
   /1a-\d+\.com\/video\//i,
   /cdn\.rumble\.cloud\/video\//i,
-  /remux\.unlimplay\.com\/remux/i,
+  /*
+   * `remux.unlimplay.com/remux?id=…` ESTUVO AQUÍ Y NO DEBÍA.
+   *
+   * Se coló porque devuelve vídeo y su url no lleva firma, así que cumplía la forma de lo
+   * permanente. Pero no es un fichero: es un REMUXER —reensambla el vídeo al vuelo por cada
+   * petición— y eso está atado a la sesión y a lo que el servicio quiera durar. Guardarlo es
+   * guardar una promesa, no una dirección.
+   *
+   * Medido el 2026-08-20: devuelve 403 con una página HTML, con User-Agent de navegador y sin
+   * él. Los títulos que lo tenían («23 000 vidas», «Zona de riesgo») fueron los dos primeros
+   * que cazó el barrido de permanentes, y el usuario reportó el mismo enlace.
+   *
+   * Se quita de la lista para no volver a meterlo. Lo ya guardado lo retira el barrido solo.
+   */
   /\.(mp4|mkv|webm)(\?|$)/i,
 ];
 
@@ -590,6 +603,24 @@ async function entregaVideo(url: string): Promise<{ ok: boolean; kbs: number }> 
     });
     if (r.status >= 400) return { ok: false, kbs: 0 };
     if (/text\/html/i.test(String(r.headers['content-type'] || ''))) return { ok: false, kbs: 0 };
+
+    /**
+     * EL HOST TIENE QUE HONRAR EL `Range`, y esto es tan importante como que el fichero exista.
+     *
+     * Se pidieron 64 KB. Un `206 Partial Content` dice que el host entendió y mandó ese trozo;
+     * un `200` dice que va a mandar el fichero ENTERO, y con eso no se puede reproducir bien:
+     * ExoPlayer necesita rangos para saltar, así que cada vez que alguien adelanta o retrocede
+     * la descarga reempieza desde el byte cero. Se atasca, acaba en error, y de paso se baja un
+     * gigabyte que nadie pidió.
+     *
+     * Se descubrió con `files.eintim.me`, el host más numeroso del catálogo: contesta 206 a un
+     * User-Agent de navegador y 200 —ignorando el Range— al de OkHttp, que es el que mandaba la
+     * app. El enlace parecía bueno aquí y no se podía adelantar allí.
+     *
+     * Comprobarlo al ENTRAR es lo que evita meter en el catálogo cosas que no se pueden manejar.
+     */
+    if (r.status !== 206) return { ok: false, kbs: 0 };
+
     const kb = ((r.data as ArrayBuffer)?.byteLength ?? 0) / 1024;
     if (kb <= 8) return { ok: false, kbs: 0 };
     return { ok: true, kbs: kb / Math.max((Date.now() - t0) / 1000, 0.001) };

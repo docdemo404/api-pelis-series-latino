@@ -132,6 +132,14 @@ async function sigueVivo(url: string): Promise<{ ok: boolean; motivo: string; si
     if (r.status >= 400) return { ok: false, motivo: `http ${r.status}` };
     const tipo = String(r.headers['content-type'] || '');
     if (/text\/html/i.test(tipo)) return { ok: false, motivo: 'html en vez de vídeo' };
+
+    /**
+     * Y que siga honrando el `Range`. Un host puede dejar de hacerlo sin borrar nada —cambia de
+     * proxy, mete un Cloudflare delante— y desde ese momento el título ya no se puede adelantar
+     * aunque el fichero esté. Sin esta línea, el barrido lo daría por bueno. Ver `entregaVideo`
+     * en refreshCatalog para el caso que lo destapó (`files.eintim.me`).
+     */
+    if (r.status !== 206) return { ok: false, motivo: `ignora el Range (http ${r.status})` };
     const kb = ((r.data as ArrayBuffer)?.byteLength ?? 0) / 1024;
     if (kb <= 8) return { ok: false, motivo: `solo ${kb.toFixed(1)} KB` };
     return { ok: true, motivo: '' };
