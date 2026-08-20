@@ -1,7 +1,21 @@
 import { ServerOption } from '../types';
 import { CacheStore } from '../cache/store';
 import { mintDirect, MintedStream } from './directResolver';
-import { unwrapRedirector, describeDirect } from '../scrapers/directStream';
+import { unwrapRedirector, describeDirect, esFicheroDirecto, isPubliclyShareable } from '../scrapers/directStream';
+
+/**
+ * ¿Este servidor es un FICHERO permanente y no una página de reproductor?
+ *
+ * Las dos condiciones importan. `esFicheroDirecto` distingue el mp4 del reproductor —sin ella
+ * esto absolvería a cualquier embed sin firma, que son casi todos—, e `isPubliclyShareable`
+ * exige que la url no lleve caducidad ni ate por IP, que es lo que la hace comprobable una vez y
+ * fiable después. Es la misma pregunta que `urlPublicaDe` en `streamSorter`, hecha desde el otro
+ * lado del sistema: allí decide qué se entrega, aquí qué NO hace falta volver a sondear.
+ */
+function esFicheroPermanente(s: ServerOption): boolean {
+  const url = s?.direct_stream && /^https?:\/\//i.test(s.direct_stream) ? s.direct_stream : s?.embed_url;
+  return Boolean(url) && esFicheroDirecto(url as string) && isPubliclyShareable(url as string);
+}
 import { verifyEmbedStatus } from '../scrapers/embedHealth';
 import {
   bajarManifiesto,
@@ -435,6 +449,28 @@ export async function revisarServidores(
     const servidor = salida[i];
     if (!servidor?.embed_url) continue;
 
+    /**
+     * UN FICHERO NO SE JUZGA CON LAS REGLAS DE UN REPRODUCTOR.
+     *
+     * Un servidor `public` no lleva detrás una página con un reproductor: su `embed_url` ES el
+     * mp4. Pasarlo por esta revisión hacía dos cosas, las dos malas, y las dos medidas sobre la
+     * ficha manual de Shrek (1,78 GB en archive.org):
+     *
+     *   · Lo declaraba MUERTO. El inspector de embeds pide HTML y busca un reproductor dentro;
+     *     recibe un mp4 y no encuentra ninguno, así que el veredicto es «muerto» sobre un fichero
+     *     que se descarga perfectamente. Entonces `sinVideoDirecto` le quitaba el `direct_stream`
+     *     y la ficha se quedaba sin nada que entregar.
+     *   · Y ni siquiera terminaba: sondear ese mp4 se pasó de NUEVE MINUTOS sin devolver
+     *     veredicto, contra un presupuesto de 4 s para la pasada entera.
+     *
+     * No se pierde comprobación, que es lo que importa: a estos se les exige haberse descargado
+     * de verdad ANTES de entrar en la base (`urlsBuenasDe` en el crawl, `anadirFichaManual` en el
+     * panel), y su sello dura 7 días —no 6 horas— justamente porque una url sin firma no caduca
+     * sola (ver `verificadoVigente`). Lo único que puede pasarles es que RETIREN el fichero, y de
+     * eso se encarga el barrido, que sí sabe pedirle un trozo a un mp4.
+     */
+    if (esFicheroPermanente(servidor)) continue;
+
     let veredicto = veredictoRecordado(servidor.embed_url);
     let sinVideo = false;
     /** Lo que esta pasada haya medido del maestro. Vacío si el veredicto salió del caché. */
@@ -642,6 +678,9 @@ export function aplicarVeredictosRecordados(servers: ServerOption[]): ServerOpti
   let cambiado = false;
   const salida = servers.map(s => {
     if (!s?.embed_url) return s;
+    // Misma razón que en `revisarServidores`: el veredicto recordado de un fichero permanente
+    // vino de juzgarlo como reproductor, y quitarle el `direct_stream` deja la ficha muda.
+    if (esFicheroPermanente(s)) return s;
     if (veredictoRecordado(s.embed_url) !== 'muerto') return s;
     if (s.status === 'offline' && !s.direct_stream) return s;
     cambiado = true;
