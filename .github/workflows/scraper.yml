@@ -6,7 +6,26 @@ on:
     # refresh de home/últimos, así que se corre a diario en lugar de cada 6 h para no saturar
     # las fuentes; los listados (getAll) ya se auto-refrescan en vivo entre corridas.
     - cron: '0 4 * * *'
-  workflow_dispatch: # Permite ejecución manual desde la interfaz de GitHub
+  # Permite ejecución manual desde la interfaz de GitHub, y con dos mandos:
+  #
+  # `solo` dedica la pasada a UNA web. Existe para FuegoCine, que es la única probada que publica
+  # ficheros PERMANENTES —708 de las 961 urls sin caducidad que llegó a tener el catálogo salieron
+  # de su envoltorio `?link=`, más 145 de archive.org por la misma vía— y que en el crawl completo
+  # comparte las horas con otras tres webs, así que solo se le rasca por encima.
+  #
+  # `minutos` es el presupuesto de la parte cara: bajarse un trozo de cada fichero para comprobar
+  # que reproduce. Una pasada `solo=fuegocine` no gasta horas recolectando cuatro webs, así que
+  # puede dedicarle mucho más tiempo.
+  workflow_dispatch:
+    inputs:
+      solo:
+        description: 'Crawlear UNA sola web: fuegocine, peliculas, series o animes. Vacío = todas.'
+        required: false
+        default: ''
+      minutos:
+        description: 'Minutos para comprobar urls directas (por defecto 200).'
+        required: false
+        default: ''
 
 jobs:
   refresh-catalog:
@@ -56,7 +75,25 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           # Necesaria para escribir en media_items (la tabla tiene RLS activado)
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: npx ts-node scripts/refreshCatalog.ts --streams=300 --verify=1500
+          # Los mandos de `workflow_dispatch` llegan por ENTORNO, no interpolados en la línea de
+          # comandos: un valor que viniera con `;` dentro se ejecutaría en el runner. Y aun así se
+          # validan abajo contra una lista cerrada, que es lo que de verdad cierra la puerta.
+          SOLO: ${{ inputs.solo }}
+          MINUTOS: ${{ inputs.minutos }}
+        run: |
+          ARGS="--streams=300 --verify=1500"
+          case "$SOLO" in
+            fuegocine|peliculas|series|animes) ARGS="$ARGS --solo=$SOLO" ;;
+            "") ;;
+            *) echo "::error::solo='$SOLO' no es una fuente conocida"; exit 1 ;;
+          esac
+          case "$MINUTOS" in
+            '') ;;
+            *[!0-9]*) echo "::error::minutos='$MINUTOS' no es un número"; exit 1 ;;
+            *) ARGS="$ARGS --minutos=$MINUTOS" ;;
+          esac
+          echo "refreshCatalog $ARGS"
+          npx ts-node scripts/refreshCatalog.ts $ARGS
 
       # RED DE SEGURIDAD — que ninguna ficha sirva el vídeo de otra película.
       #
