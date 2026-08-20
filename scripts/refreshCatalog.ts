@@ -750,6 +750,8 @@ async function quedarseConLoQueReproduce(
   const buenos: MediaItem[] = [];
   /** Cuántos de `buenos` ya se han entregado a `alEncontrar`. */
   let entregados = 0;
+  /** Cuándo se entregó la última tanda, para el disparo por tiempo. */
+  let ultimoGuardado = Date.now();
   /**
    * Cuántos títulos a la vez. Bajó de 8 a 4 por la misma razón que el techo de
    * `urlsBuenasDe`: lo que tumba al runner es la RÁFAGA de conexiones salientes, y 8
@@ -808,19 +810,23 @@ async function quedarseConLoQueReproduce(
       buenos.push(item);
     }));
     /**
-     * Guardar lo encontrado cada 15 títulos con vídeo.
+     * Guardar lo encontrado: cada 5 títulos con vídeo, O CADA TRES MINUTOS si hay algo pendiente.
      *
-     * Empezó en 40 y se bajó con una medición delante: las tandas en GitHub mueren a los pocos
-     * minutos de arrancar la extracción, y a ~29 % de rendimiento hacen falta unos 50 títulos
-     * mirados para juntar 15. Con el umbral en 40 se necesitaban 140, y una corrida cancelada
-     * pronto no llegaba a escribir NADA — que es el fallo que esto vino a arreglar.
+     * El umbral por cantidad empezó en 40, bajó a 15, y seguía sin servir. La medición: una tanda
+     * en GitHub aguanta unos once minutos de extracción antes de que cancelen el runner, y en ese
+     * rato se miran ~20 títulos, de los que ~6 tienen url permanente. Con el umbral en 15 la
+     * corrida moría sin escribir NADA — que es exactamente el fallo que este guardado vino a
+     * arreglar, repetido dos veces por no ajustar el número a lo medido.
      *
-     * No se baja más: escribir de uno en uno multiplica las peticiones a Supabase sin ganar nada,
-     * porque lo que se guarda de menos al morir es como mucho la tanda en curso.
+     * Por eso hay ADEMÁS un disparo por tiempo. Un umbral por cantidad depende del rendimiento de
+     * la fuente, que es lo que no se controla: una web con pocos ficheros permanentes nunca junta
+     * la cuenta y se pierde igual todo lo que midió. El reloj no depende de nada.
      */
-    if (alEncontrar && buenos.length - entregados >= 15) {
+    const haceMuchoQueNoSeGuarda = buenos.length > entregados && Date.now() - ultimoGuardado > 3 * 60_000;
+    if (alEncontrar && (buenos.length - entregados >= 5 || haceMuchoQueNoSeGuarda)) {
       const lote = buenos.slice(entregados);
       entregados = buenos.length;
+      ultimoGuardado = Date.now();
       await alEncontrar(lote);
     }
 
