@@ -3097,12 +3097,26 @@ export class CatalogService {
       return { ...dbResult, items: await this.sinRetirados(dbResult.items) };
     }
 
-    // 2. FALLBACK: DB vacía o RPC ausente → scrape en vivo LEAN, paginado en memoria.
-    const pool = await this.liveSearch(q, 150);
-    const ranked = this.scoreAndSortResults(pool, q);
-    const out = { items: ranked.slice(offset, offset + safeLimit), total: ranked.length };
-    await CacheStore.set(cacheKey, out, CACHE_TTL_SECONDS);
-    return { ...out, items: await this.sinRetirados(out.items) };
+    /**
+     * 2. NO HAY NADA. Y eso es una respuesta, no un motivo para salir a buscar por ahí.
+     *
+     * Aquí había un scrape EN VIVO de todas las fuentes. Tenía sentido cuando la base estaba
+     * vacía y el buscador era la única forma de encontrar algo. Con el catálogo poblado hace dos
+     * cosas malas a la vez, las dos medidas:
+     *
+     *   · TARDA 28,7 SEGUNDOS. Buscar «avatar» —que no está en el catálogo— se iba a recorrer
+     *     las webs en vivo. Las que sí están tardan 1 s, y cacheadas 0,35.
+     *   · Y DEVUELVE TÍTULOS QUE NO SE PUEDEN VER. Lo que sale de ese scrape no está en la base,
+     *     así que no tiene url permanente comprobada: son exactamente las fichas fantasma que
+     *     este modelo entero existe para no volver a tener. El buscador era la última puerta por
+     *     la que seguían entrando.
+     *
+     * El catálogo solo anuncia lo que ha demostrado reproducir, y el buscador tiene que decir lo
+     * mismo que el catálogo. Si no está, no está.
+     */
+    const vacio = { items: [] as MediaItem[], total: 0 };
+    await CacheStore.set(cacheKey, vacio, CACHE_TTL_SECONDS);
+    return vacio;
   }
 
   /**
