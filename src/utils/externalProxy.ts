@@ -52,3 +52,28 @@ export function proxyUrlFor(embedUrl: string): string | null {
   const s = crypto.createHmac('sha256', key).update(e).digest('hex');
   return `${base}/?e=${e}&s=${s}`;
 }
+
+/**
+ * URL de la CACHÉ POR TROZOS del Worker para un fichero permanente, ya firmada.
+ *
+ * Es prima de `proxyUrlFor` pero para otra cosa, y conviene no confundirlas: aquella manda un
+ * EMBED para que el proxy lo acuñe y descargue él (hosts atados por IP); esta manda un FICHERO ya
+ * conocido para que lo sirva por trozos desde R2.
+ *
+ * Lo que arregla, medido host por host el 2026-08-20:
+ *
+ *   files.eintim.me   contesta 200 a un rango de en medio 5 de cada 6 veces → no se puede saltar
+ *   archive.org       ~10 s hasta el primer byte, en cada petición, sin caché de origen
+ *   firestream.to     0,7 MB/s
+ *
+ * Con la caché delante, los tres se convierten en lo mismo: un host que contesta 206 al instante.
+ *
+ * Devuelve null si no hay Worker configurado, y entonces se entrega la url del origen como
+ * siempre. Eso es lo que permite apagar todo esto cambiando una variable de entorno.
+ */
+export function cacheUrlFor(fileUrl: string): string | null {
+  const url = proxyUrlFor(fileUrl);
+  if (!url) return null;
+  // `proxyUrlFor` apunta a la raíz; la caché por trozos vive en /v.
+  return url.replace(/\/\?e=/, '/v?e=');
+}

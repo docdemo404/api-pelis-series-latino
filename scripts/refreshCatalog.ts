@@ -570,7 +570,7 @@ function urlDentroDelEnvoltorio(embed: string): string | null {
  * nadie por lento —este proyecto ya se tumbó entero con una regla así, y `goodstream` tarda 26 s
  * y reproduce—: se ordena, que es distinto de condenar.
  */
-async function entregaVideo(url: string): Promise<{ ok: boolean; kbs: number }> {
+async function entregaVideo(url: string): Promise<{ ok: boolean; kbs: number; total: number }> {
   const t0 = Date.now();
   const pedir = (rango: string) => streamClient.get(url, {
     headers: { Range: rango },
@@ -583,6 +583,17 @@ async function entregaVideo(url: string): Promise<{ ok: boolean; kbs: number }> 
   const kbDe = (r: any) => ((r.data as ArrayBuffer)?.byteLength ?? 0) / 1024;
   const esHtml = (r: any) => /text\/html/i.test(String(r.headers['content-type'] || ''));
   const velocidad = (kb: number) => kb / Math.max((Date.now() - t0) / 1000, 0.001);
+  /**
+   * EL TAMAÑO TOTAL VIENE GRATIS EN LA RESPUESTA, y hace falta para saber si el fichero se puede
+   * ver de verdad. `Content-Range: bytes 1000000-1065535/1181412452` — el número de después de la
+   * barra es el fichero entero. Con eso y la duración se sabe cuánto ancho de banda PIDE, que es
+   * la mitad que faltaba: hasta ahora se medía lo que el host DA y no había con qué compararlo.
+   */
+  const totalDe = (r: any) => {
+    const m = /\/(\d+)\s*$/.exec(String(r.headers['content-range'] || ''));
+    if (m) return Number(m[1]);
+    return Number(r.headers['content-length']) || 0;
+  };
 
   try {
     /**
@@ -596,20 +607,20 @@ async function entregaVideo(url: string): Promise<{ ok: boolean; kbs: number }> 
     // Más corto que el offset: es un fichero pequeño, no un fallo.
     if (r.status === 416) {
       const chico = await pedir('bytes=0-65535');
-      if (chico.status >= 400 || esHtml(chico)) return { ok: false, kbs: 0 };
+      if (chico.status >= 400 || esHtml(chico)) return { ok: false, kbs: 0, total: 0 };
       const kb = kbDe(chico);
-      if (kb <= 8) return { ok: false, kbs: 0 };
-      return { ok: true, kbs: velocidad(kb) };
+      if (kb <= 8) return { ok: false, kbs: 0, total: 0 };
+      return { ok: true, kbs: velocidad(kb), total: totalDe(chico) };
     }
 
-    if (r.status >= 400) return { ok: false, kbs: 0 };
-    if (esHtml(r)) return { ok: false, kbs: 0 };
-    if (r.status !== 206) return { ok: false, kbs: 0 };
+    if (r.status >= 400) return { ok: false, kbs: 0, total: 0 };
+    if (esHtml(r)) return { ok: false, kbs: 0, total: 0 };
+    if (r.status !== 206) return { ok: false, kbs: 0, total: 0 };
     const kb = kbDe(r);
-    if (kb <= 8) return { ok: false, kbs: 0 };
-    return { ok: true, kbs: velocidad(kb) };
+    if (kb <= 8) return { ok: false, kbs: 0, total: 0 };
+    return { ok: true, kbs: velocidad(kb), total: totalDe(r) };
   } catch {
-    return { ok: false, kbs: 0 };
+    return { ok: false, kbs: 0, total: 0 };
   }
 }
 
@@ -623,7 +634,7 @@ const DESDE_MEDIO = 1000000;
  * buenos, y el cliente los quiere TODOS — el mejor para reproducir y los demás como respaldo, que
  * es lo único que le permite recuperarse solo si uno se cae a mitad.
  */
-async function urlsBuenasDe(servidores: any[], fuente: string): Promise<any[]> {
+async function urlsBuenasDe(servidores: any[], fuente: string, minutos?: number): Promise<any[]> {
   /**
    * PRIMERO SE ARMA LA LISTA DE CANDIDATOS, que no cuesta red, y LUEGO SE MIDEN TODOS A LA VEZ.
    *
@@ -674,7 +685,7 @@ async function urlsBuenasDe(servidores: any[], fuente: string): Promise<any[]> {
    * que se ganó al dejar de ir en serie; solo se le quita el pico.
    */
   const POR_FICHA = 4;
-  const medidos: Array<{ sv: any; url: string; medida: { ok: boolean; kbs: number } }> = [];
+  const medidos: Array<{ sv: any; url: string; medida: { ok: boolean; kbs: number; total: number } }> = [];
   for (let i = 0; i < candidatos.length; i += POR_FICHA) {
     const lote = candidatos.slice(i, i + POR_FICHA);
     medidos.push(...await Promise.all(lote.map(async c => ({ ...c, medida: await entregaVideo(c.url) }))));
@@ -705,6 +716,20 @@ async function urlsBuenasDe(servidores: any[], fuente: string): Promise<any[]> {
        * una promesa — por eso desempata, no manda.
        */
       kbps: Math.round(m.medida.kbs),
+      /**
+       * CUÁNTO ANCHO DE BANDA PIDE ESTE FICHERO, en KB/s, para compararlo con lo que el host da.
+       *
+       * Tamaño entre duración. Es la pieza que faltaba: se medía la velocidad del host y no había
+       * con qué contrastarla, así que un archive.org a 1,1 MB/s parecía igual de bueno sirviendo
+       * un mp4 de 835 MB que un mkv de 3.312 — y con el segundo se corta.
+       *
+       * Solo se guarda cuando se conoce la duración; sin ella no se inventa nada y el ordenador
+       * usa el criterio siguiente. `runtime` viene de TMDB y ya está resuelto cuando corre esta
+       * fase, así que casi siempre está.
+       */
+      kbps_necesarios: minutos && minutos > 0 && m.medida.total > 0
+        ? Math.round(m.medida.total / 1024 / (minutos * 60))
+        : undefined,
     }));
 }
 
@@ -814,7 +839,7 @@ async function quedarseConLoQueReproduce(
       if (!detalle?.servers?.length) return;
 
       const fuente = fuenteDeLaUrl(pagina);
-      const servidores = await urlsBuenasDe(detalle.servers as any[], fuente);
+      const servidores = await urlsBuenasDe(detalle.servers as any[], fuente, (item as any).runtime);
 
       /**
        * Y LOS CAPÍTULOS, que es donde vive el vídeo de una serie. Una serie no se reproduce por
@@ -825,7 +850,7 @@ async function quedarseConLoQueReproduce(
       for (const t of ((detalle as any).seasons || [])) {
         const capitulos: any[] = [];
         for (const e of (t?.episodes || [])) {
-          const suyos = await urlsBuenasDe(e?.servers || [], fuente);
+          const suyos = await urlsBuenasDe(e?.servers || [], fuente, (item as any).runtime);
           if (suyos.length) capitulos.push({ ...e, servers: suyos });
         }
         if (capitulos.length) temporadas.push({ ...t, episodes: capitulos });

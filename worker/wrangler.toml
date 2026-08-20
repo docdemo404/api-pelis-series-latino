@@ -9,3 +9,19 @@ compatibility_date = "2026-07-29"
 # ya se ha llevado dos sustos por dar por bueno algo sin mirarlo desplegado.
 [observability]
 enabled = true
+
+# EL BUCKET DE LA CACHÉ POR TROZOS.
+#
+# R2 y no la caché del borde por dos razones. La primera es el dinero: R2 NO cobra tráfico de
+# salida, que es exactamente lo caro de servir vídeo. La segunda es que la caché del borde es por
+# PoP y se desaloja sola, así que un trozo guardado para un espectador puede no estar para el
+# siguiente; R2 es un sitio, y lo que se guarda ahí lo encuentran todos.
+#
+# Los 10 GB del plan gratuito no son "cinco películas": son TROZOS sueltos, y todo el mundo ve los
+# mismos principios. Cuando se llene, lo que se pierde es velocidad y nunca contenido — el Worker
+# siempre puede volver al origen.
+#
+# Antes de desplegar: npx wrangler r2 bucket create api-pelis-cache
+[[r2_buckets]]
+binding = "CACHE"
+bucket_name = "api-pelis-cache"

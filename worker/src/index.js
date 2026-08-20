@@ -1,3 +1,4 @@
+import { servirConCache } from './cacheDeTrozos.js';
 /**
  * ───────────────────────────────────────────────────────────────────────────────────────────
  * PROXY DE VÍDEO EN CLOUDFLARE — el que quita el techo de ancho de banda.
@@ -187,7 +188,7 @@ function respuestaVideo(upstream) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const origenWorker = url.origin;
 
@@ -211,6 +212,21 @@ export default {
       if (!/^https?:\/\//i.test(embedUrl)) throw new Error('embed no válido');
     } catch {
       return new Response('parámetro ?e= no válido', { status: 400, headers: CORS });
+    }
+
+    /**
+     * ── Fichero permanente, con caché por trozos en R2 ───────────────────────────────────
+     *
+     * Es la ruta de todo lo que el catálogo publica como url directa: mp4 planos servidos por
+     * archive.org, el CDN de Rumble, eintim y demás. Lo que hace y por qué está en
+     * cacheDeTrozos.js — resumen: unifica hosts que fallan por motivos distintos, y de paso los
+     * hace rápidos.
+     *
+     * Comparte la firma con el resto del Worker: sin ella esto sería un proxy abierto que
+     * cualquiera podría usar para servir lo que quisiera a nuestra costa.
+     */
+    if (url.pathname === '/v') {
+      return servirConCache(request, env, ctx, embedUrl);
     }
 
     // ── Segmento o variante: la URL real viaja en ?u= ────────────────────────────────────

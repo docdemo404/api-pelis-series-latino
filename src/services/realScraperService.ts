@@ -460,24 +460,60 @@ export function claseDeArchive(subject: unknown): ContentType | null {
 }
 
 /**
- * Los ficheros de vídeo de un item, el mejor primero.
+ * Los ficheros de vídeo de un item, EL MÁS REPRODUCIBLE PRIMERO.
  *
- * Se descarta `.ia.mp4`: es la recodificación que archive.org genera para su reproductor web, de
- * bastante peor calidad que el original. Si se ordenara solo por tamaño no haría falta… salvo
- * cuando es el único que queda, y entonces se estaría publicando la copia mala como si fuera la
- * buena.
+ * Ordenaba por tamaño descendente, o sea que elegía siempre la copia más pesada. Sobre el host
+ * más lento del catálogo eso es exactamente al revés de lo que conviene. En Fight Club, el mismo
+ * item ofrece las dos:
  *
- * El mínimo de tamaño va bajo a propósito (40 MB): sirve para dejar fuera tráileres y muestras,
- * no para juzgar la calidad. Un capítulo de serie de 20 minutos pesa poco y es legítimo.
+ *   (1999) Fight Club (David Fincher).mkv    3.312 MB   original     ← se elegía esta
+ *   (1999) Fight Club (David Fincher).mp4      835 MB   derivative
+ *
+ * Cuatro veces más bytes por el mismo minuto de película. Y archive.org da ~1,1 MB/s: a 3.312 MB
+ * para 139 minutos son 3,2 Mbps, que con esa conexión va justo y se corta; a 835 MB son 0,8 Mbps,
+ * que entra de sobra. No es un ajuste de calidad, es la diferencia entre verla y no verla.
+ *
+ * Dos criterios, en este orden:
+ *
+ *   1. `.mp4` antes que `.mkv`, `.webm` o `.avi`. No es solo tamaño: ExoPlayer abre un mp4
+ *      progresivo sin sorpresas, y en un mkv depende del códec que lleve dentro.
+ *   2. Entre las del mismo tipo, LA MÁS LIGERA que siga siendo la obra completa.
+ *
+ * El suelo contra coger un tráiler o una muestra es doble: `MINIMO_VIDEO_BYTES` en absoluto, y un
+ * cuarto del fichero mayor del item en relativo. Un derivado legítimo pesa una fracción del
+ * original —aquí, la cuarta parte—, no una centésima.
+ *
+ * Se sigue descartando `.ia.mp4`, que es la recodificación de archive para su propio reproductor
+ * web y sí es de bastante peor calidad. Los derivados buenos se llaman `<nombre>.mp4`.
+ *
+ * El mínimo absoluto va bajo a propósito (40 MB): un capítulo de serie de 20 minutos pesa poco y
+ * es legítimo.
  */
 const MINIMO_VIDEO_BYTES = 40 * 1024 * 1024;
+
+/** Y al menos esta fracción del fichero mayor del item: por debajo es un extra, no la obra. */
+const FRACCION_MINIMA_DEL_MAYOR = 0.25;
+
 export function ficherosDeVideoArchive(files: any[]): Array<{ name: string; size: number }> {
-  return (files || [])
+  const candidatos = (files || [])
     .map(f => ({ name: String(f?.name || ''), size: Number(f?.size || 0) }))
     .filter(f => /\.(mp4|mkv|webm|avi)$/i.test(f.name))
     .filter(f => !/\.ia\.mp4$/i.test(f.name))
-    .filter(f => f.size >= MINIMO_VIDEO_BYTES)
-    .sort((a, b) => b.size - a.size);
+    .filter(f => f.size >= MINIMO_VIDEO_BYTES);
+
+  if (!candidatos.length) return [];
+
+  const mayor = Math.max(...candidatos.map(f => f.size));
+  const completos = candidatos.filter(f => f.size >= mayor * FRACCION_MINIMA_DEL_MAYOR);
+
+  const esMp4 = (n: string) => /\.mp4$/i.test(n);
+
+  return completos.sort((a, b) => {
+    // Primero el contenedor que el reproductor abre sin pensar.
+    if (esMp4(a.name) !== esMp4(b.name)) return esMp4(a.name) ? -1 : 1;
+    // Y entre iguales, la más ligera: menos bytes por minuto es menos que descargar.
+    return a.size - b.size;
+  });
 }
 
 /**

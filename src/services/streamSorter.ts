@@ -2,6 +2,7 @@ import { ServerOption, DirectMode } from '../types';
 import { SourceManager, SourceConfig } from './sourceManager';
 import { bestMode } from '../scrapers/hostPolicy';
 import { directEndpointUrl, isPubliclyShareable, esFicheroDirecto } from '../scrapers/directStream';
+import { cacheUrlFor } from '../utils/externalProxy';
 
 /**
  * ¿Esta URL se puede entregar TAL CUAL, sin pasar por esta API?
@@ -112,10 +113,20 @@ export function effectiveDirectMode(server: ServerOption): DirectMode | undefine
 export function enlaceDirecto(server: ServerOption): string | undefined {
   const actual = server.direct_stream;
   if (!actual || !server.embed_url) return actual;
-  // Lo permanente se entrega tal cual. Va PRIMERO porque también rescata las filas que se
-  // guardaron ya reescritas: ver `urlPublicaDe`.
+  /**
+   * Lo permanente se entrega tal cual, PERO POR LA CACHÉ SI LA HAY.
+   *
+   * Va primero porque también rescata las filas que se guardaron ya reescritas (ver
+   * `urlPublicaDe`), y ahora además decide por dónde sale.
+   *
+   * La traducción a la caché se hace AQUÍ, en la salida, y no al guardar. Es deliberado y es la
+   * lección más cara de este proyecto: lo que se persiste se fosiliza. Guardando la url del
+   * origen y traduciéndola al servir, el Worker se puede apagar, cambiar de dominio o quitar sin
+   * tocar una sola fila — y las miles de fichas ya guardadas se benefician sin volver a
+   * rastrearlas.
+   */
   const publica = urlPublicaDe(server);
-  if (publica) return publica;
+  if (publica) return cacheUrlFor(publica) || publica;
   // Lo que ya apunta a la API (relativo o absoluto) se queda como está.
   if (!/^https?:\/\//i.test(actual) || actual.includes('/api/v1/stream/direct')) return actual;
   return directEndpointUrl(server.embed_url, server.direct_kind === 'mp4' ? 'mp4' : 'hls');
@@ -359,6 +370,30 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
     const verA = verificadoVigente(a);
     const verB = verificadoVigente(b);
     if (verA !== verB) return verA ? -1 : 1;
+
+    /**
+     * LO QUE NO DA EL ANCHO DE BANDA, AL FONDO. No se retira: se deja de ofrecer primero.
+     *
+     * `kbps` es lo que el host DIO al comprobarlo y `kbps_necesarios` lo que el fichero PIDE
+     * (su tamaño entre su duración). Cuando lo segundo supera a lo primero, ese servidor se va a
+     * cortar — no es una opinión, es aritmética: no caben los bytes en el tiempo.
+     *
+     * Se hunde en vez de retirarse porque una medición es de un momento y estos hosts van a
+     * rachas: archive.org daba 1,33 MB/s por la mañana y 35 KB/s por la tarde. Retirando, los
+     * títulos entrarían y saldrían del catálogo según la hora, que es peor que tardar.
+     *
+     * Con un 20 % de margen: si va justo pero llega, no se castiga. Y solo cuando se conocen las
+     * dos cifras — sin duración no hay `kbps_necesarios` y aquí no se inventa nada.
+     */
+    const alcanza = (s: ServerOption): boolean => {
+      const da = Number((s as any).kbps) || 0;
+      const pide = Number((s as any).kbps_necesarios) || 0;
+      if (da <= 0 || pide <= 0) return true;
+      return da >= pide * 1.2;
+    };
+    const alcanzaA = alcanza(a);
+    const alcanzaB = alcanza(b);
+    if (alcanzaA !== alcanzaB) return alcanzaA ? -1 : 1;
 
     /**
      * ENTRE DOS QUE SE ENTREGAN IGUAL DE BIEN, EL MÁS RÁPIDO MEDIDO.
