@@ -48,6 +48,9 @@ const TROZO = 8 * 1024 * 1024;
 /** Lo que se espera como mucho al origen. archive.org tarda hasta 25 s solo en el primer byte. */
 const TOPE_ORIGEN_MS = 45_000;
 
+/** Cuántas veces se le insiste al origen cuando contesta 5xx. Ver `traerTrozo`. */
+const INTENTOS_ORIGEN = 3;
+
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 
@@ -97,10 +100,26 @@ async function traerTrozo(env, url, indice, ctx) {
   const inicio = indice * TROZO;
   const fin = inicio + TROZO - 1;
 
-  const respuesta = await fetch(url, {
-    headers: { 'User-Agent': UA, Range: `bytes=${inicio}-${fin}` },
-    signal: AbortSignal.timeout(TOPE_ORIGEN_MS),
-  });
+  /**
+   * SE INSISTE CUANDO EL ORIGEN DA 5xx, en vez de rendirse a la primera.
+   *
+   * archive.org devuelve 500, 502 y 503 a puñados cuando va cargado —se vio en el mismo fichero
+   * que un minuto antes servía bien—, y eso no dice nada sobre el fichero: dice que el host está
+   * teniendo un mal momento. Rendirse ahí le da al espectador un error sobre una película que
+   * está perfectamente ahí.
+   *
+   * Tres intentos con espera creciente. Un 4xx no se reintenta: eso sí es el host declarando algo
+   * sobre el recurso.
+   */
+  let respuesta = null;
+  for (let intento = 1; intento <= INTENTOS_ORIGEN; intento++) {
+    respuesta = await fetch(url, {
+      headers: { 'User-Agent': UA, Range: `bytes=${inicio}-${fin}` },
+      signal: AbortSignal.timeout(TOPE_ORIGEN_MS),
+    });
+    if (respuesta.status < 500) break;
+    if (intento < INTENTOS_ORIGEN) await new Promise(r => setTimeout(r, 500 * intento));
+  }
 
   if (respuesta.status === 206) {
     const bytes = new Uint8Array(await respuesta.arrayBuffer());

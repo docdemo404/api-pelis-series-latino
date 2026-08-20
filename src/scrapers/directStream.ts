@@ -73,7 +73,19 @@ const HOSTS_DE_FICHERO_DIRECTO = [
  * hoy contesta 403 con una página HTML. Guardar eso es guardar una promesa, no una dirección.
  */
 export function esUrlDeFicheroPermanente(url: string): boolean {
-  return FICHEROS_PERMANENTES.some(re => re.test(url || ''));
+  if (!url) return false;
+  // Los hosts cuya url ES el fichero aunque no acabe en extensión, por su patrón.
+  if (FICHEROS_PERMANENTES.some(re => re.test(url))) return true;
+  /**
+   * Y la extensión, EN LA RUTA. Mismo motivo que en `esFicheroDirecto`: el envoltorio de
+   * FuegoCine (`blogspot.com/?…&link=https://…/video.mp4`) acaba en `.mp4` sin ser un fichero, y
+   * por aquí se colaba en la base como si fuera una url permanente. No lo es: es una página.
+   */
+  try {
+    return /\.(mp4|mkv|webm)$/i.test(new URL(url).pathname);
+  } catch {
+    return false;
+  }
 }
 
 const FICHEROS_PERMANENTES: RegExp[] = [
@@ -81,7 +93,10 @@ const FICHEROS_PERMANENTES: RegExp[] = [
   /archive\.org\/download\//i,
   /1a-\d+\.com\/video\//i,
   /cdn\.rumble\.cloud\/video\//i,
-  /\.(mp4|mkv|webm)(\?|$)/i,
+  // OJO: la extensión `.mp4`/`.mkv`/`.webm` ya NO va aquí. Estaba, y como estos patrones se
+  // prueban contra la url entera, colaba el envoltorio de FuegoCine —que lleva el fichero en un
+  // parámetro `link=` y por eso termina en `.mp4`— como si fuera una url permanente. Ahora la
+  // extensión se comprueba contra la RUTA, abajo.
 ];
 
 /**
