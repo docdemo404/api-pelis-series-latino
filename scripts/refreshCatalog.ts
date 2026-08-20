@@ -700,8 +700,18 @@ async function guardarFilas(
   return { ok, fail, merged };
 }
 
-/** De qué web viene la ficha. Se guarda para poder verlo en el panel. */
+/**
+ * De qué web viene la ficha. Se guarda para poder verlo en el panel y para ORDENAR.
+ *
+ * No es solo etiqueta: `sortServersBySourcePriority` decide con este valor qué servidor intenta
+ * primero el cliente, así que una fuente mal atribuida hereda la prioridad de otra.
+ *
+ * archive.org faltaba, y como el `return` final es `tioplus`, sus 14 fichas se guardaron con los
+ * servidores rotulados «tioplus» — la fuente que el panel enseña la última y que además publica
+ * urls que caducan, justo lo contrario de lo que archive.org es.
+ */
 function fuenteDeLaUrl(url: string): string {
+  if (/archive\.org/i.test(url)) return 'archive';
   if (/cinecalidad/i.test(url)) return 'cinecalidad';
   if (/fuegocine|blogfc|repfuegocinefree/i.test(url)) return 'fuegocine';
   return 'tioplus';
