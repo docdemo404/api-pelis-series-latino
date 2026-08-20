@@ -361,6 +361,28 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
     if (verA !== verB) return verA ? -1 : 1;
 
     /**
+     * ENTRE DOS QUE SE ENTREGAN IGUAL DE BIEN, EL MÁS RÁPIDO MEDIDO.
+     *
+     * `kbps` lo escribe el crawl al comprobar la url —descargando 64 KB de verdad— y hasta ahora
+     * se tiraba: el desempate saltaba directo a la prioridad de fuente, que dice de quién te
+     * puedes fiar pero no cuál llega antes. Con archive.org en prioridad 2 eso se notó enseguida:
+     * sus ficheros van a ~1 MB/s y se ponían por delante de CDN bastante más rápidos que estaban
+     * en la misma ficha.
+     *
+     * Se compara solo si los DOS traen medida; si falta una no se inventa nada y decide el
+     * criterio siguiente. Y con un margen del 25 %, porque una diferencia pequeña entre dos
+     * mediciones hechas en momentos distintos no significa nada — sin margen, el orden bailaría
+     * en cada crawl por ruido.
+     */
+    const kbpsA = Number((a as any).kbps) || 0;
+    const kbpsB = Number((b as any).kbps) || 0;
+    if (kbpsA > 0 && kbpsB > 0) {
+      const mejor = Math.max(kbpsA, kbpsB);
+      const peor = Math.min(kbpsA, kbpsB);
+      if (peor === 0 || mejor / peor >= 1.25) return kbpsB - kbpsA;
+    }
+
+    /**
      * 4. ENTRE DOS QUE FUNCIONAN, EL QUE NO PASA POR AQUÍ.
      *
      * `direct_mode` no es decoración: dice por dónde viajan los bytes. Un `redirect` los manda del

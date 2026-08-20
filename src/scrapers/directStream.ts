@@ -792,7 +792,24 @@ export async function extractDirectFast(
   if (!embedUrl) return { direct: null, conclusive: true };
 
   try {
-    // Lo primero y más barato: puede que el vídeo venga ya en la propia URL del embed.
+    /**
+     * LO PRIMERO: PUEDE QUE LA URL YA SEA EL FICHERO.
+     *
+     * Faltaba, y dejaba a la API sin poder servir su propio catálogo. Un `direct_stream` en modo
+     * `public` ES un mp4; al pedírselo a `/api/v1/stream/direct` se intentaba extraer un
+     * reproductor de dentro de un vídeo, no se encontraba ninguno —claro— y contestaba
+     * `DIRECT_UNAVAILABLE`.
+     *
+     * Importa por un caso muy concreto y muy real: un DNS privado que bloquea el host del CDN.
+     * El fichero está, la API lo alcanza, y el aparato no puede resolver el nombre. Con esta
+     * rama, la app puede pedir ese mismo vídeo por NUESTRO dominio —que sí resuelve— y verlo.
+     * Sin ella no había salida que no fuera apagar el DNS.
+     */
+    if (esFicheroDirecto(embedUrl)) {
+      return { direct: { url: embedUrl, kind: kindOf(embedUrl) }, conclusive: true };
+    }
+
+    // Y si no, puede que el vídeo venga dentro de un parámetro de la propia URL del embed.
     const fromParam = extractFromUrlParam(embedUrl);
     if (fromParam) return { direct: fromParam, conclusive: true };
 

@@ -692,6 +692,19 @@ async function urlsBuenasDe(servidores: any[], fuente: string): Promise<any[]> {
       status: 'online',
       verified_at: new Date().toISOString(),
       source_id: fuente,
+      /**
+       * LO QUE SE MIDIÓ AL COMPROBARLA, EN KB/s, GUARDADO.
+       *
+       * Aquí se ordenaba por velocidad y ese orden se perdía enseguida:
+       * `sortServersBySourcePriority` reordena por prioridad de FUENTE, así que un archive.org
+       * —que va a ~1 MB/s— se ponía delante de un CDN tres veces más rápido solo por venir de
+       * una fuente mejor colocada. La prioridad de fuente dice de quién te puedes fiar; no dice
+       * cuál va a llegar antes.
+       *
+       * Guardándolo, el ordenador puede usarlo. Es una foto del momento en que se comprobó, no
+       * una promesa — por eso desempata, no manda.
+       */
+      kbps: Math.round(m.medida.kbs),
     }));
 }
 
