@@ -196,6 +196,8 @@ async function sigueVivo(url: string): Promise<{ ok: boolean; motivo: string; si
       const status = r.status;
       const html = esHtml(r);
       const rango = String(r.headers['content-range'] || '');
+      const tipoContenido = String(r.headers['content-type'] || '');
+      const largoContenido = Number(r.headers['content-length']) || 0;
       cerrar(r);
 
       /**
@@ -213,6 +215,26 @@ async function sigueVivo(url: string): Promise<{ ok: boolean; motivo: string; si
       if (status >= 400) return { ok: false, motivo: `http ${status}` };
       if (html) return { ok: false, motivo: 'html en vez de vídeo' };
       if (status === 206 && rango) return { ok: true, motivo: '' };
+
+      /**
+       * UN 200 CON VÍDEO DENTRO SIGUE SIENDO UN FICHERO VIVO — desde que existe el Worker.
+       *
+       * Que el origen ignore el `Range` era motivo de retirada porque sin rangos no se puede
+       * adelantar: el reproductor pedía el minuto 40, recibía el fichero desde el principio y se
+       * quedaba descargando. Con la caché por trozos delante eso ya no ocurre — el Worker pide,
+       * cachea y SIEMPRE contesta 206, así que el cliente ve un host que se comporta.
+       *
+       * Retirar por esto ahora sería tirar contenido que se puede servir perfectamente. Y no es
+       * poco: `files.eintim.me` son 98 servidores y contesta 200 cinco de cada seis veces.
+       *
+       * Lo que sí se sigue exigiendo es que haya VÍDEO: content-type de vídeo y un tamaño de
+       * película. Un 200 con una página de error dentro no salva a nadie.
+       */
+      if (status === 200 && hayWorker) {
+        if (/^video\//i.test(tipoContenido) && largoContenido > MINIMO_PELICULA_BYTES) {
+          return { ok: true, motivo: '' };
+        }
+      }
 
       ultimoMotivo = `no sabe hacer rangos (http ${status})`;
       // Una espera corta entre intentos: es un capricho del origen, no una carrera.
@@ -232,6 +254,17 @@ async function sigueVivo(url: string): Promise<{ ok: boolean; motivo: string; si
 
 /** Cuántas veces se le pregunta a un host antes de darle por incapaz de hacer rangos. */
 const INTENTOS = 3;
+
+/**
+ * ¿Hay caché por trozos delante? Cambia qué se puede perdonar.
+ *
+ * Con el Worker puesto, un origen que ignora el `Range` deja de ser un problema del cliente: el
+ * Worker lo normaliza. Sin él, sí lo es, y entonces sí hay que retirar.
+ */
+const hayWorker = Boolean(process.env.VIDEO_PROXY_URL && process.env.VIDEO_PROXY_KEY);
+
+/** Un fichero de vídeo de verdad pesa esto como mínimo. Una página de error, no. */
+const MINIMO_PELICULA_BYTES = 40 * 1024 * 1024;
 
 /** Desde dónde se pide el trozo de prueba. Ver la nota de `sigueVivo`. */
 const DESDE_MEDIO = 1000000;

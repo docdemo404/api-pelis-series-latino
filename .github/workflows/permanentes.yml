@@ -78,5 +78,9 @@ jobs:
           # hasta 12 h. Retirar sin purgar es dejarlo roto por fuera.
           UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          # Con la caché por trozos delante, un origen que ignora el `Range` deja de ser motivo
+          # de retirada: el Worker lo normaliza. Sin estas dos, el barrido vuelve a ser estricto.
+          VIDEO_PROXY_URL: ${{ secrets.VIDEO_PROXY_URL }}
+          VIDEO_PROXY_KEY: ${{ secrets.VIDEO_PROXY_KEY }}
           PARTE: ${{ matrix.parte }}
         run: npx ts-node scripts/verificarPermanentes.ts --apply --minutos=22 --conc=8 --parte=$PARTE --de=8
