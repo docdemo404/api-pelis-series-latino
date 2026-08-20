@@ -20,9 +20,19 @@ export const DEFAULT_SOURCES: SourceConfig[] = [
    * a mano y otra scrapeada, la de casa es la que más probabilidades tiene de seguir ahí mañana.
    */
   { id: 'manual', name: 'Fuente propia (panel)', enabled: true, priority: 1 },
-  { id: 'cinecalidad', name: 'Cinecalidad', enabled: true, priority: 2 },
-  { id: 'tioplus', name: 'TioPlus / PelisPlus Latino', enabled: true, priority: 3 },
-  { id: 'fuegocine', name: 'FuegoCine', enabled: true, priority: 4 },
+  /**
+   * Internet Archive va SEGUNDA, solo por detrás de lo puesto a mano, y la razón es la misma que
+   * pone a la fuente propia la primera: no depende de que nadie siga vivo. Sus ficheros son
+   * públicos y sin firma, así que la url que se guarda hoy sirve dentro de un mes — mientras que
+   * las otras tres publican enlaces que caducan y hay que volver a acuñar en cada reproducción.
+   *
+   * La prioridad ordena los servidores DENTRO de una ficha, así que esto decide qué intenta
+   * primero el cliente cuando un título tiene servidores de varias webs.
+   */
+  { id: 'archive', name: 'Internet Archive', enabled: true, priority: 2 },
+  { id: 'cinecalidad', name: 'Cinecalidad', enabled: true, priority: 3 },
+  { id: 'tioplus', name: 'TioPlus / PelisPlus Latino', enabled: true, priority: 4 },
+  { id: 'fuegocine', name: 'FuegoCine', enabled: true, priority: 5 },
 ];
 
 /**

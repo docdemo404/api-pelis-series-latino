@@ -380,6 +380,188 @@ function fuegocineDetalles($: cheerio.CheerioAPI): {
   };
 }
 
+/**
+ * ══════════════════════════════════════════════════════════════════════════════════════════
+ * INTERNET ARCHIVE — la única fuente cuyos ficheros no caducan POR DISEÑO.
+ *
+ * Todas las demás webs firman sus urls de vídeo con una caducidad dentro, y por eso el catálogo
+ * dejó de guardarlas. archive.org publica ficheros públicos sin firma, tiene API abierta (nada
+ * de scrapear HTML) y no pone captcha. Encaja con el modelo entero.
+ *
+ * PERO SU METADATA LA ESCRIBE QUIEN SUBE, y eso obliga a una regla de identidad propia. Medido
+ * el 2026-08-20 sobre 1.000 items de cada `subject`:
+ *
+ *   `metadata.year` NO ES EL AÑO DE LA OBRA. Es el de la edición o el de la subida, y discrepa
+ *   del año real en el 31 % de las películas que lo llevan también en el título. El caso que lo
+ *   dejó claro: «007 - Nuestro hombre de Bond Street (1984)» tiene `year: 1997` — el año del
+ *   doblaje. Emparejar con TMDB usando ese año elige otra película, y una ficha sirviendo el
+ *   vídeo de otra es el peor fallo de este proyecto (FUENTES.md §1).
+ *
+ * De ahí que aquí el año salga del TÍTULO o de la ficha estructurada de la descripción, y que
+ * un item sin año NO ENTRE. Cuesta contenido —solo el 4 % de las películas y el 2 % de las
+ * series llevan el año en el título— y es el precio de no inventar identidades.
+ *
+ * Y ese mismo item de 007 enseña la otra trampa: tiene CERO ficheros de vídeo. Es una subida de
+ * doblaje con carátula. Por eso no basta con que la metadata cuadre: tiene que haber fichero.
+ * ══════════════════════════════════════════════════════════════════════════════════════════
+ */
+const ARCHIVE_BASE = 'https://archive.org';
+
+/**
+ * El año de la OBRA. Nunca `metadata.year` — ver el bloque de arriba.
+ *
+ * Dos sitios, los dos escritos por quien sube pero los dos referidos a la obra y no a la subida:
+ * el `(AAAA)` del título, y la ficha estructurada que muchos ponen en la descripción
+ * («Año: 1984»). Si ninguno lo dice, se devuelve '' y el item se descarta más arriba.
+ */
+export function anioDeArchive(titulo: string, descripcion: string): string {
+  const t = /\((19|20)\d{2}\)/.exec(String(titulo || ''));
+  if (t) return t[0].slice(1, 5);
+  const d = /(?:a[ñn]o|year)\s*(?:de\s+estreno\s*)?:?\s*(?:<[^>]*>\s*)*((?:19|20)\d{2})/i.exec(String(descripcion || ''));
+  return d ? d[1] : '';
+}
+
+/**
+ * ¿Es un PACK y no una obra? Se mira ANTES de tocar TMDB.
+ *
+ * archive.org está lleno de subidas como «PELÍCULAS DE OLMEDO Y PORCEL 37 PELICULAS» o
+ * «Peliculas De Accion Completas Gratis 2018»: un item con veinte películas dentro. Emparejarlo
+ * con TMDB produce una ficha que dice ser una obra y entrega otra en cada reproducción.
+ */
+const PACK_ARCHIVE: RegExp[] = [
+  /\d+\s*pel[ií]culas/i,
+  /completas\s+gratis/i,
+  /\b(pack|colecci[óo]n|coleccion|saga\s+completa|recopilaci[óo]n)\b/i,
+  /\b\d{1,3}\s*-\s*\d{1,3}\b/,
+];
+export function esPackArchive(titulo: string): boolean {
+  const t = String(titulo || '');
+  return PACK_ARCHIVE.some(re => re.test(t));
+}
+
+/**
+ * La clase que DECLARA la fuente en sus etiquetas (FUENTES.md §2.2), nunca deducida del título.
+ *
+ * `subject` es una lista libre que escribe quien sube, así que se aceptan las grafías que se han
+ * visto de verdad: la ficha de Shrek que ya estaba en el catálogo viene etiquetada «Pelis», no
+ * «Pelicula». Lo que NO se hace es adivinar: sin una etiqueta de clase, el item no entra.
+ *
+ * La serie se comprueba primero porque un item puede llevar las dos («Serie», «Peliculas») y en
+ * ese caso manda la más específica: una serie mal clasificada como película se anuncia entera
+ * por lo que traiga su primer fichero, que es el fallo de FUENTES.md §4.
+ */
+export function claseDeArchive(subject: unknown): ContentType | null {
+  const etiquetas = (Array.isArray(subject) ? subject : [subject])
+    .map(s => String(s || '').toLowerCase());
+  const hay = (re: RegExp) => etiquetas.some(t => re.test(t));
+  if (hay(/^series?$|^serie\s|telenovela|temporada/i)) return 'tvseries';
+  if (hay(/^pel[ií]culas?$|^pelis?$|^movies?$|^cine$|^largometraje$/i)) return 'movie';
+  return null;
+}
+
+/**
+ * Los ficheros de vídeo de un item, el mejor primero.
+ *
+ * Se descarta `.ia.mp4`: es la recodificación que archive.org genera para su reproductor web, de
+ * bastante peor calidad que el original. Si se ordenara solo por tamaño no haría falta… salvo
+ * cuando es el único que queda, y entonces se estaría publicando la copia mala como si fuera la
+ * buena.
+ *
+ * El mínimo de tamaño va bajo a propósito (40 MB): sirve para dejar fuera tráileres y muestras,
+ * no para juzgar la calidad. Un capítulo de serie de 20 minutos pesa poco y es legítimo.
+ */
+const MINIMO_VIDEO_BYTES = 40 * 1024 * 1024;
+export function ficherosDeVideoArchive(files: any[]): Array<{ name: string; size: number }> {
+  return (files || [])
+    .map(f => ({ name: String(f?.name || ''), size: Number(f?.size || 0) }))
+    .filter(f => /\.(mp4|mkv|webm|avi)$/i.test(f.name))
+    .filter(f => !/\.ia\.mp4$/i.test(f.name))
+    .filter(f => f.size >= MINIMO_VIDEO_BYTES)
+    .sort((a, b) => b.size - a.size);
+}
+
+/**
+ * El capítulo que DECLARA el nombre del fichero. `null` si no lo declara.
+ *
+ * Un item de serie suele ser una temporada entera con los capítulos sueltos, y hay que emparejar
+ * fichero → capítulo. SI EL NOMBRE NO LO DICE, ESE FICHERO NO SE USA: colocar un vídeo en el
+ * capítulo equivocado es el fallo que FUENTES.md §4 llama el peor sin dar error — el enlace
+ * existe, reproduce, y entrega otra cosa. Adivinar por el orden alfabético es exactamente eso.
+ */
+export function capituloDeArchive(nombre: string): { season: number; episode: number } | null {
+  const n = String(nombre || '');
+  let m = /[sS](\d{1,2})[\s._-]*[eE](\d{1,3})/.exec(n);
+  if (m) return { season: Number(m[1]), episode: Number(m[2]) };
+  m = /\b(\d{1,2})\s*[xX]\s*(\d{1,3})\b/.exec(n);
+  if (m) return { season: Number(m[1]), episode: Number(m[2]) };
+  m = /(?:cap[ií]tulo|capitulo|cap|episodio|ep)[\s._-]*(\d{1,3})\b/i.exec(n);
+  if (m) return { season: 1, episode: Number(m[1]) };
+  m = /\s-\s*(\d{1,3})\s*-\s/.exec(n);
+  if (m) return { season: 1, episode: Number(m[1]) };
+  return null;
+}
+
+/**
+ * El NOMBRE DE LA OBRA, sacado del título que escribió quien subió el fichero.
+ *
+ * Hace falta porque en archive.org el título no es un campo de catálogo: es el nombre que le puso
+ * una persona, y viene con todo lo que a esa persona le pareció útil. Medido abriendo las diez
+ * primeras películas que pasan el filtro de identidad, el matcher de TMDB falló en cuatro y las
+ * cuatro por lo mismo — ruido, no ambigüedad:
+ *
+ *   «Volver Al Futuro en español latino»      → no casó con Volver al futuro
+ *   «Fight Club (David Fincher)»              → no casó con El club de la lucha
+ *   «12 Hombres En Pugna (VOSE)»              → no casó con Doce hombres sin piedad
+ *   «¡Qué Verde Era Mi Valle! - 1941»         → no casó con ¡Qué verde era mi valle!
+ *
+ * Sin match no hay ficha: el título se queda con un tmdb_id sintético negativo, sin carátula ni
+ * sinopsis, y el catálogo gana un enlace que no sabe enseñar. Por eso esto limpia de verdad.
+ *
+ * Lo que NO se toca es el año: se lee ANTES (`anioDeArchive`) y sigue siendo la señal que impide
+ * que un título limpio empareje con la obra equivocada. Limpiar el nombre sin exigir el año sería
+ * volver a fusionar por título, que es lo que FUENTES.md §1 prohíbe.
+ */
+export function tituloDeArchive(crudo: string): string {
+  let t = String(crudo || '');
+
+  // Lo que va entre corchetes es siempre añadido del que sube: «[Doblaje + Carátula VHS]».
+  t = t.replace(/\[[^\]]*\]/g, ' ');
+  // El año, en cualquiera de sus formas: «(1941)», «- 1941», « 1941» al final.
+  t = t.replace(/\((19|20)\d{2}\)/g, ' ').replace(/[\s-]+(19|20)\d{2}\s*$/g, ' ');
+  // Paréntesis con el director o la versión: «(David Fincher)», «(VOSE)», «( Alfred Hitchcock)».
+  t = t.replace(/\([^)]*\)/g, ' ');
+
+  /**
+   * Coletillas de idioma, formato y fuente. Se quitan de DONDE ESTÉN, no solo del final: aparecen
+   * también en medio («Volver Al Futuro en español latino [1080p] remasterizada»).
+   */
+  const COLETILLAS = [
+    /\b(en\s+)?(audio\s+)?espa[ñn]ol\s+latino\b/gi,
+    /\b(en\s+)?(audio\s+)?latino\b/gi,
+    /\b(en\s+)?castellano\b/gi,
+    /\bespa[ñn]ol\b/gi,
+    /\bdoblaje[s]?(\s+\w+)?\b/gi,
+    /\bsubtitulad[ao]s?\b/gi,
+    /\bv\.?o\.?s\.?[ae]?\b/gi,
+    /\b(dual|remasterizad[ao]|completa|pel[ií]cula\s+completa)\b/gi,
+    /\b(1080p|720p|480p|360p|4k|hd|full\s*hd|dvdrip|brrip|bluray|blu-ray|web-?dl|hdtv)\b/gi,
+    /\bmp4\b/gi,
+  ];
+  for (const re of COLETILLAS) t = t.replace(re, ' ');
+
+  // Signos sueltos que deja la limpieza, y espacios de más.
+  t = t.replace(/[-–—_.]+\s*$/g, ' ').replace(/^\s*[-–—_.]+/g, ' ');
+  t = t.replace(/\s{2,}/g, ' ').trim();
+
+  // Si la limpieza se lo comió entero, vale más el original que una cadena vacía.
+  return t || String(crudo || '').trim();
+}
+
+/** La url canónica y estable de un fichero. Ver `canonicalArchiveOrg` para por qué no la del nodo. */
+export function urlDeFicheroArchive(identifier: string, nombre: string): string {
+  return `${ARCHIVE_BASE}/download/${identifier}/${nombre.split('/').map(encodeURIComponent).join('/')}`;
+}
+
 export class RealScraperService {
   /**
    * Lee de la PÁGINA de origen solo lo que el emparejado con TMDB necesita: título, año,
@@ -404,6 +586,37 @@ export class RealScraperService {
      * ni el título original: se devuelven vacíos a propósito, porque inventarlos es peor que no
      * tenerlos. Ver la nota de `scrapeCinecalidadDetail`.
      */
+    /**
+     * ARCHIVE.ORG no tiene página que leer: sus señales están en `/metadata/<id>`.
+     *
+     * Da título y AÑO —el de la obra, sacado del título o de la ficha de la descripción, nunca
+     * `metadata.year`, que es el de la subida— y la clase que declara en `subject`. Lo que NO da
+     * es `imageHint`: su miniatura es un fotograma del propio fichero y no identifica ninguna
+     * ficha de TMDB. Se devuelve vacío a propósito: inventarlo sería peor que no tenerlo.
+     */
+    if (/archive\.org\/(details|metadata|download)\//i.test(url)) {
+      const m = /archive\.org\/(?:details|metadata|download)\/([^/?#]+)/i.exec(url);
+      if (!m) return null;
+      try {
+        const res = await httpClient.get(`${ARCHIVE_BASE}/metadata/${encodeURIComponent(decodeURIComponent(m[1]))}`,
+          { timeout: 20000, validateStatus: () => true } as any);
+        if (res.status >= 400) return null;
+        const md = (res.data as any)?.metadata || {};
+        const crudo = String(md.title || '').trim();
+        if (!crudo) return null;
+        return {
+          title: tituloDeArchive(crudo),
+          year: anioDeArchive(crudo, String(md.description || '')),
+          originalTitle: '',
+          imageHint: '',
+          type: claseDeArchive(md.subject),
+          episode: null,
+        };
+      } catch {
+        return null;
+      }
+    }
+
     if (/cinecalidad\./i.test(url)) {
       try {
         const res = await httpGet(url);
@@ -614,6 +827,11 @@ export class RealScraperService {
   static async scrapeDetail(tioplusUrl: string): Promise<MediaItem | null> {
     if (tioplusUrl.includes('fuegocine.com')) {
       return this.scrapeFuegocineDetail(tioplusUrl);
+    }
+
+    // Internet Archive: no hay HTML que leer, su ficha es una llamada a `/metadata/<id>`.
+    if (/archive\.org\/(details|metadata|download)\//i.test(tioplusUrl)) {
+      return this.scrapeArchiveDetail(tioplusUrl);
     }
 
     // Cinecalidad publica en varios dominios (.am, .ec, .rs…) con la misma plantilla dooplay.
@@ -1122,6 +1340,8 @@ export class RealScraperService {
         finalResults.push(...fuegocineItems);
       } else if (src.id === 'cinecalidad') {
         finalResults.push(...await this.scrapeCinecalidadSearch(q, limit));
+      } else if (src.id === 'archive') {
+        finalResults.push(...await this.scrapeArchiveSearch(q, limit));
       }
     }
 
@@ -1677,6 +1897,261 @@ export class RealScraperService {
   }
 
   /**
+   * Una tanda del buscador de archive.org, ya filtrada.
+   *
+   * Se usa su API `scrape`, que es la que pagina de verdad con cursor. La antigua
+   * `advancedsearch.php` contesta hoy `QUERY_NOT_READY` sobre estas mismas consultas.
+   *
+   * AQUÍ SE DESCARTA BARATO, antes de pedirle nada a TMDB ni a `/metadata`: sin clase declarada,
+   * sin año o con pinta de pack, el item no llega a costar una petición. De 1.000 items de
+   * `subject:"Pelicula"` sobreviven unas decenas, y ese número es el precio de no inventar
+   * identidades (ver el bloque de arriba).
+   */
+  private static parseArchiveItems(items: any[], tipoPedido: ContentType): MediaItem[] {
+    const salida: MediaItem[] = [];
+    const vistos = new Set<string>();
+
+    for (const it of items || []) {
+      const identifier = String(it?.identifier || '');
+      const tituloCrudo = String(it?.title || '').trim();
+      if (!identifier || !tituloCrudo || vistos.has(identifier)) continue;
+
+      const clase = claseDeArchive(it?.subject);
+      if (!clase || clase !== tipoPedido) continue;
+      if (esPackArchive(tituloCrudo)) continue;
+
+      const year = anioDeArchive(tituloCrudo, String(it?.description || ''));
+      if (!year) continue;
+
+      // El título se limpia de lo que la subida le añade —el año, las coletillas entre
+      // corchetes—, porque lo que se le pasa al matcher tiene que ser el nombre de la obra.
+      const title = tituloDeArchive(tituloCrudo);
+      if (!title) continue;
+
+      vistos.add(identifier);
+      salida.push({
+        id: `archive-${identifier}`,
+        tmdb_id: 0,
+        imdb_id: null,
+        type: clase,
+        title,
+        original_title: title,
+        aliases: [title],
+        overview: '',
+        rating: 0,
+        release_date: year,
+        genres: [],
+        subcategories: ['Internet Archive'],
+        // Sin carátula: archive.org sirve una miniatura del propio fichero, que no identifica
+        // nada. La buena la traerá TMDB al enriquecer, y si no hay match no habrá ficha.
+        poster: null,
+        backdrop: null,
+        logo: null,
+        trailer: null,
+        cast: [],
+        dubbing_cast: [],
+        servers: [],
+        _source_url: `${ARCHIVE_BASE}/details/${identifier}`,
+      } as MediaItem);
+    }
+    return salida;
+  }
+
+  /**
+   * Recorre el archivo de una clase paginando con el cursor de la API `scrape`.
+   *
+   * El tope sale del `limit`, nunca de un número escrito aquí (FUENTES.md §6 ter). Se para
+   * cuando la API deja de dar cursor —se acabó el archivo— o al llenar el cupo.
+   *
+   * `count=100` es el MÍNIMO que acepta esta API: pedir menos devuelve `RangeException`.
+   */
+  static async scrapeArchiveLatest(tipo: ContentType, limit = 200): Promise<MediaItem[]> {
+    const etiquetas = tipo === 'tvseries' ? ['Serie', 'Series'] : ['Pelicula', 'Pelis'];
+    const items: MediaItem[] = [];
+    const vistos = new Set<string>();
+
+    for (const etiqueta of etiquetas) {
+      let cursor = '';
+      // Guarda de seguridad: sin ella un cursor que se repitiera daría vueltas para siempre.
+      for (let tanda = 0; items.length < limit && tanda < 200; tanda++) {
+        const params = new URLSearchParams({
+          q: `mediatype:movies AND subject:"${etiqueta}"`,
+          fields: 'identifier,title,subject,description',
+          count: '100',
+        });
+        if (cursor) params.set('cursor', cursor);
+        try {
+          const res = await httpClient.get(
+            `${ARCHIVE_BASE}/services/search/v1/scrape?${params.toString()}`,
+            { timeout: 30000, validateStatus: () => true } as any
+          );
+          if (res.status >= 400) break;
+          const data = res.data as any;
+          const lote = (data?.items || []).filter(Boolean);
+          if (!lote.length) break;
+
+          for (const m of this.parseArchiveItems(lote, tipo)) {
+            if (vistos.has(m.id) || items.length >= limit) continue;
+            vistos.add(m.id);
+            items.push(m);
+          }
+          cursor = String(data?.cursor || '');
+          if (!cursor) break;
+        } catch {
+          break;
+        }
+      }
+    }
+    return items;
+  }
+
+  /** Búsqueda en vivo. Misma API y mismos filtros: lo que no entra en el crawl tampoco al buscar. */
+  static async scrapeArchiveSearch(query: string, limit = 12): Promise<MediaItem[]> {
+    const q = query.trim();
+    if (!q) return [];
+    // Se limpian comillas y barras para que el término no pueda cerrar la cláusula y añadir otra.
+    const termino = q.replace(/["\\()]/g, ' ').slice(0, 80).trim();
+    if (!termino) return [];
+    const salida: MediaItem[] = [];
+
+    for (const par of [['Pelicula', 'movie'], ['Serie', 'tvseries']] as Array<[string, ContentType]>) {
+      if (salida.length >= limit) break;
+      const params = new URLSearchParams({
+        q: `mediatype:movies AND subject:"${par[0]}" AND title:(${termino})`,
+        fields: 'identifier,title,subject,description',
+        count: '100',
+      });
+      try {
+        const res = await httpClient.get(
+          `${ARCHIVE_BASE}/services/search/v1/scrape?${params.toString()}`,
+          { timeout: 20000, validateStatus: () => true } as any
+        );
+        if (res.status >= 400) continue;
+        const lote = ((res.data as any)?.items || []).filter(Boolean);
+        for (const m of this.parseArchiveItems(lote, par[1])) {
+          if (salida.length >= limit) break;
+          salida.push(m);
+        }
+      } catch { /* la búsqueda en vivo nunca puede tumbar la respuesta */ }
+    }
+    return salida;
+  }
+
+  /**
+   * La ficha de un item: sus ficheros convertidos en servidores.
+   *
+   * UNA llamada a `/metadata/<id>` trae la metadata y la lista de ficheros entera, así que aquí
+   * no hay HTML que scrapear ni páginas que paginar.
+   *
+   * Los ficheros entran TODOS como servidores, el más grande primero: el mejor para reproducir y
+   * los demás de respaldo, que es lo que le permite a la app recuperarse sola si uno falla. Con
+   * `direct_mode: 'public'` porque la url no lleva firma — pero SIN `verified_at`: el sello lo
+   * pone quien se haya descargado bytes de verdad (`urlsBuenasDe` en el crawl), no esta función.
+   * Anunciar un sello que nadie ha comprobado es exactamente lo que llenó el catálogo de fichas
+   * que no reproducían.
+   *
+   * En una serie los servidores NO cuelgan de la ficha sino de cada capítulo, y solo entran los
+   * ficheros cuyo NOMBRE declara qué capítulo son. Ver `capituloDeArchive`.
+   */
+  static async scrapeArchiveDetail(url: string): Promise<MediaItem | null> {
+    const m = /archive\.org\/(?:details|metadata|download)\/([^/?#]+)/i.exec(url || '');
+    if (!m) return null;
+    const identifier = decodeURIComponent(m[1]);
+
+    let data: any;
+    try {
+      const res = await httpClient.get(`${ARCHIVE_BASE}/metadata/${encodeURIComponent(identifier)}`,
+        { timeout: 30000, validateStatus: () => true } as any);
+      if (res.status >= 400) return null;
+      data = res.data;
+    } catch {
+      return null;
+    }
+
+    const md = data?.metadata || {};
+    const tituloCrudo = String(md.title || '').trim();
+    if (!tituloCrudo) return null;
+
+    const clase = claseDeArchive(md.subject);
+    if (!clase) return null;
+    if (esPackArchive(tituloCrudo)) return null;
+
+    const year = anioDeArchive(tituloCrudo, String(md.description || ''));
+    if (!year) return null;
+
+    const ficheros = ficherosDeVideoArchive(data?.files || []);
+    if (!ficheros.length) return null;
+
+    const title = tituloDeArchive(tituloCrudo);
+
+    const servidorDe = (nombre: string, i: number): ServerOption => {
+      const directo = urlDeFicheroArchive(identifier, nombre);
+      return {
+        id: `archive-${identifier}_${i}`,
+        name: `Archive ${i + 1}`,
+        embed_url: directo,
+        direct_stream: directo,
+        direct_mode: 'public',
+        direct_kind: 'mp4',
+        status: 'online',
+        source_id: 'archive',
+      } as ServerOption;
+    };
+
+    const base: any = {
+      id: `archive-${identifier}`,
+      tmdb_id: 0,
+      imdb_id: null,
+      type: clase,
+      title,
+      original_title: title,
+      aliases: [title],
+      overview: '',
+      rating: 0,
+      release_date: year,
+      genres: [],
+      subcategories: ['Internet Archive'],
+      poster: null,
+      backdrop: null,
+      logo: null,
+      trailer: null,
+      cast: [],
+      dubbing_cast: [],
+      servers: [],
+      _source_url: `${ARCHIVE_BASE}/details/${identifier}`,
+    };
+
+    if (clase === 'movie') {
+      base.servers = ficheros.map((f, i) => servidorDe(f.name, i));
+      return base as MediaItem;
+    }
+
+    // Serie: fichero → capítulo por el NOMBRE, y lo que no lo declare se queda fuera.
+    const porTemporada = new Map<number, Map<number, ServerOption[]>>();
+    ficheros.forEach((f, i) => {
+      const cap = capituloDeArchive(f.name);
+      if (!cap) return;
+      if (!porTemporada.has(cap.season)) porTemporada.set(cap.season, new Map());
+      const temporada = porTemporada.get(cap.season) as Map<number, ServerOption[]>;
+      if (!temporada.has(cap.episode)) temporada.set(cap.episode, []);
+      (temporada.get(cap.episode) as ServerOption[]).push(servidorDe(f.name, i));
+    });
+    if (porTemporada.size === 0) return null;
+
+    base.seasons = Array.from(porTemporada.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([season_number, caps]) => ({
+        season_number,
+        episodes: Array.from(caps.entries())
+          .sort((a, b) => a[0] - b[0])
+          .map(([episode_number, servers]) => ({ season_number, episode_number, servers })),
+      }));
+    base.total_seasons = base.seasons.length;
+    base.total_episodes = base.seasons.reduce((n: number, t: any) => n + t.episodes.length, 0);
+    return base as MediaItem;
+  }
+
+  /**
    * Crawl PROFUNDO de una categoría tioplus. Reutiliza scrapeLatest, que ya pagina el índice
    * y corta cuando una página no aporta títulos nuevos; con un límite alto recorre todo.
    */
@@ -1709,6 +2184,14 @@ export class RealScraperService {
       // publica cada capítulo de serie como su propia entrada, así que 3.215 títulos son muchas
       // más entradas que títulos. Con 5.000 se cortaba a mitad del archivo sin decirlo.
       return dedup([await this.scrapeAllFuegocine(40000).catch(() => [] as MediaItem[])]);
+    }
+    if (solo === 'archive') {
+      // Su archivo se recorre entero por clase; el filtro de identidad ya deja fuera casi todo.
+      const [pelis, series] = await Promise.all([
+        this.scrapeArchiveLatest('movie', 20000).catch(() => [] as MediaItem[]),
+        this.scrapeArchiveLatest('tvseries', 20000).catch(() => [] as MediaItem[]),
+      ]);
+      return dedup([pelis, series]);
     }
     if (solo === 'peliculas' || solo === 'series' || solo === 'animes') {
       return dedup([await this.scrapeAllOfType(solo).catch(() => [] as MediaItem[])]);
@@ -1743,6 +2226,23 @@ export class RealScraperService {
       type === 'peliculas' ? 'movie' : 'tvseries',
       Math.max(10, Math.floor(limit / 2))
     ).catch(() => [] as MediaItem[]);
+
+    /**
+     * Y ARCHIVE.ORG, por la misma puerta y por la misma razón.
+     *
+     * Es el punto 4 de FUENTES.md §6 ter y el que más se olvida: una fuente que no se engancha
+     * aquí queda escrita y muda — sabe leer una ficha y nadie le pasa nunca una url. Le pasó a
+     * Cinecalidad hasta que el usuario preguntó por qué no salía Breaking Bad.
+     *
+     * Los animes no se le piden: su archivo no distingue esa clase, y pedírselos devolvería
+     * series etiquetadas como si fueran anime.
+     */
+    const deArchive = type === 'animes'
+      ? Promise.resolve([] as MediaItem[])
+      : this.scrapeArchiveLatest(
+          type === 'peliculas' ? 'movie' : 'tvseries',
+          Math.max(10, Math.floor(limit / 2))
+        ).catch(() => [] as MediaItem[]);
 
     const items: MediaItem[] = [];
     const seen = new Set<string>();
@@ -1831,11 +2331,18 @@ export class RealScraperService {
      *
      * Se le reserva un tercio del cupo. Si trae menos, lo que sobre se queda para la otra.
      */
-    const extra = await deCinecalidad;
+    const [extra, extraArchive] = await Promise.all([deCinecalidad, deArchive]);
     const vistos = new Set(items.map(x => x.id));
     const nuevos = extra.filter(it => !vistos.has(it.id));
+    const nuevosArchive = extraArchive.filter(it => !vistos.has(it.id));
     const reservado = Math.min(nuevos.length, Math.max(1, Math.ceil(limit / 3)));
-    const salida = items.slice(0, Math.max(0, limit - reservado)).concat(nuevos.slice(0, reservado));
-    return salida;
+    // Archive tiene su propio sitio reservado, y por la misma razón que Cinecalidad: si solo
+    // entrara con el hueco que dejen las otras, TioPlus llenaría el cupo y esta fuente aportaría
+    // cero pasada tras pasada. Un cuarto, que es lo que cabe sin ahogar a las demás.
+    const reservadoArchive = Math.min(nuevosArchive.length, Math.max(1, Math.ceil(limit / 4)));
+    const cupoTioplus = Math.max(0, limit - reservado - reservadoArchive);
+    return items.slice(0, cupoTioplus)
+      .concat(nuevos.slice(0, reservado))
+      .concat(nuevosArchive.slice(0, reservadoArchive));
   }
 }

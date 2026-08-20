@@ -191,7 +191,17 @@ export function candidateIdsForUrl(url: string): string[] {
   if (!url) return [];
   const path = String(url).replace(/^https?:\/\/[^/]+/i, '');
   const last = path.split('/').filter(Boolean).pop() || '';
-  return Array.from(new Set([last, last.toLowerCase(), slugify(path)])).filter(Boolean);
+  /**
+   * EL MOLDE DE ARCHIVE.ORG, que lleva prefijo. Sus ids de fila son `archive-<identifier>` y no
+   * el identifier pelado, a propósito: `shrek3_202506` a secas competiría con los slugs de las
+   * otras webs por el mismo nombre, que es cómo `/ver-serie/animal/` acabó reconociendo como
+   * suya la ficha `animal` de otro sitio. Sin registrarlo aquí, `esPaginaPropia` diría que la
+   * página de la que salió la ficha no es suya, y la ficha perdería todas las comprobaciones
+   * que dependen de reconocer su propio origen.
+   */
+  const deArchive = /archive\.org\/(?:details|metadata|download)\//i.test(String(url))
+    ? [`archive-${last}`] : [];
+  return Array.from(new Set([...deArchive, last, last.toLowerCase(), slugify(path)])).filter(Boolean);
 }
 
 /**
@@ -208,6 +218,13 @@ export function tipoDeLaRuta(url: string): ContentType | null {
   if (/\/ver-pelicula\//i.test(url)) return 'movie';
   if (/\/ver-serie\//i.test(url) || /\/ver-el-episodio\//i.test(url)) return 'tvseries';
   if (/\/(serie|anime|dorama)\//i.test(url)) return 'tvseries';
+  /**
+   * ARCHIVE.ORG NO LO DECLARA EN LA RUTA, y aquí se dice en voz alta para que nadie lo añada.
+   * Todos sus items cuelgan de `/details/<id>` sean lo que sean; la clase la dice su `subject`
+   * (ver `claseDeArchive`). Devolver un tipo adivinado desde esta url sería peor que devolver
+   * null: este valor MANDA sobre lo que crea el matcher, así que una suposición aquí convierte
+   * una serie en película con su póster y su sinopsis.
+   */
   return null;
 }
 
