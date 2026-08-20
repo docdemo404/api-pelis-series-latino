@@ -6,7 +6,7 @@ on:
     # refresh de home/últimos, así que se corre a diario en lugar de cada 6 h para no saturar
     # las fuentes; los listados (getAll) ya se auto-refrescan en vivo entre corridas.
     - cron: '0 4 * * *'
-  # Permite ejecución manual desde la interfaz de GitHub, y con dos mandos:
+  # Permite ejecución manual desde la interfaz de GitHub, con cuatro mandos:
   #
   # `solo` dedica la pasada a UNA web. Existe para FuegoCine, que es la única probada que publica
   # ficheros PERMANENTES —708 de las 961 urls sin caducidad que llegó a tener el catálogo salieron
@@ -14,8 +14,14 @@ on:
   # comparte las horas con otras tres webs, así que solo se le rasca por encima.
   #
   # `minutos` es el presupuesto de la parte cara: bajarse un trozo de cada fichero para comprobar
-  # que reproduce. Una pasada `solo=fuegocine` no gasta horas recolectando cuatro webs, así que
-  # puede dedicarle mucho más tiempo.
+  # que reproduce.
+  #
+  # `limite` y `saltar_guardados` van JUNTOS, y existen por una medición incómoda: dos pasadas
+  # `solo=fuegocine` seguidas fueron canceladas por GitHub a los 16 min y medio las dos (16m30s y
+  # 16m36s), cinco minutos después de empezar a extraer. No es un tope de la plataforma —el crawl
+  # completo ha corrido 3h44m— sino que esta pasada aprieta la red mucho más. Con un tope por
+  # corrida que quepa en esa ventana, y saltando lo ya guardado, cada lanzamiento coge un tramo
+  # nuevo y el archivo se recorre en varias vueltas en vez de repetir siempre el principio.
   workflow_dispatch:
     inputs:
       solo:
@@ -26,6 +32,15 @@ on:
         description: 'Minutos para comprobar urls directas (por defecto 200).'
         required: false
         default: ''
+      limite:
+        description: 'Tope de títulos por corrida. Con `saltar_guardados`, cada lanzamiento coge un tramo nuevo.'
+        required: false
+        default: ''
+      saltar_guardados:
+        description: 'Saltar los títulos que ya están en la base, para avanzar en vez de repetir.'
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   refresh-catalog:
@@ -80,10 +95,12 @@ jobs:
           # validan abajo contra una lista cerrada, que es lo que de verdad cierra la puerta.
           SOLO: ${{ inputs.solo }}
           MINUTOS: ${{ inputs.minutos }}
+          LIMITE: ${{ inputs.limite }}
+          SALTAR: ${{ inputs.saltar_guardados }}
         run: |
           ARGS="--streams=300 --verify=1500"
           case "$SOLO" in
-            fuegocine|peliculas|series|animes) ARGS="$ARGS --solo=$SOLO" ;;
+            fuegocine|archive|peliculas|series|animes) ARGS="$ARGS --solo=$SOLO" ;;
             "") ;;
             *) echo "::error::solo='$SOLO' no es una fuente conocida"; exit 1 ;;
           esac
@@ -91,6 +108,13 @@ jobs:
             '') ;;
             *[!0-9]*) echo "::error::minutos='$MINUTOS' no es un número"; exit 1 ;;
             *) ARGS="$ARGS --minutos=$MINUTOS" ;;
+          esac
+          if [ "$SALTAR" = "true" ]; then ARGS="$ARGS --saltar-guardados"; fi
+          # El tope va SIN guion: es el argumento posicional del script, no una bandera.
+          case "$LIMITE" in
+            '') ;;
+            *[!0-9]*) echo "::error::limite='$LIMITE' no es un número"; exit 1 ;;
+            *) ARGS="$ARGS $LIMITE" ;;
           esac
           echo "refreshCatalog $ARGS"
           npx ts-node scripts/refreshCatalog.ts $ARGS

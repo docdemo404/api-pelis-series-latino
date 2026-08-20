@@ -832,10 +832,40 @@ async function main() {
   await latir('recolectando los títulos de las webs');
   console.log('🔎 Recolectando catálogo desde las fuentes...');
   let items = await collectCatalog();
+  console.log(`   ${items.length} títulos recolectados`);
+
+  /**
+   * `--saltar-guardados`: no volver a trabajar lo que ya está en la base.
+   *
+   * Existe porque el runner se muere SIEMPRE por el mismo sitio. Dos pasadas
+   * `--solo=fuegocine` seguidas, medidas enteras: las dos recolectaron 3.219 títulos, las dos
+   * los enriquecieron al 100 %, y a las dos las cancelaron a los 16 min y medio —16m30s y
+   * 16m36s— cinco minutos después de empezar a extraer urls. No es un tope de GitHub (el crawl
+   * completo ha llegado a correr 3h44m); es que esta pasada aprieta la red mucho más.
+   *
+   * Sin esto, cada corrida vuelve a empezar por el mismo título y no se avanza nunca por muchas
+   * veces que se lance. Con esto, más un tope por corrida, cada lanzamiento coge un tramo nuevo
+   * y el archivo entero se recorre en varias vueltas — que es como ya funcionan las demás
+   * pasadas largas de este proyecto.
+   */
+  if (process.argv.includes('--saltar-guardados')) {
+    const yaEstan = new Set<string>();
+    let ultimo = '';
+    for (;;) {
+      const { data } = await db.from('media_items').select('id').gt('id', ultimo).order('id').limit(1000);
+      if (!data?.length) break;
+      for (const fila of data as any[]) yaEstan.add(fila.id);
+      ultimo = (data[data.length - 1] as any).id;
+    }
+    const antes = items.length;
+    items = items.filter(it => !yaEstan.has(it.id));
+    console.log(`   ${antes - items.length} ya estaban guardados; quedan ${items.length} por trabajar`);
+  }
+
   if (Number.isFinite(limitArg) && limitArg > 0) {
     items = items.slice(0, limitArg);
+    console.log(`   tope de esta corrida: ${items.length}`);
   }
-  console.log(`   ${items.length} títulos recolectados`);
   await latir('enriqueciendo con TMDB', 0, items.length);
 
   // Enriquecer con TMDB (géneros, rating, sinopsis, póster/backdrop, tráiler, cast con fotos)
