@@ -778,13 +778,17 @@ async function quedarseConLoQueReproduce(
       buenos.push(item);
     }));
     /**
-     * Guardar lo encontrado, cada 40 títulos con vídeo o cuando quedan pocos por mirar.
+     * Guardar lo encontrado cada 15 títulos con vídeo.
      *
-     * El umbral no es redondo por gusto: escribir de uno en uno multiplica las peticiones a
-     * Supabase por nada, y esperar a tener cientos vuelve a dejar mucho trabajo en el aire si el
-     * runner se cae. Cuarenta es menos de un minuto de extracción.
+     * Empezó en 40 y se bajó con una medición delante: las tandas en GitHub mueren a los pocos
+     * minutos de arrancar la extracción, y a ~29 % de rendimiento hacen falta unos 50 títulos
+     * mirados para juntar 15. Con el umbral en 40 se necesitaban 140, y una corrida cancelada
+     * pronto no llegaba a escribir NADA — que es el fallo que esto vino a arreglar.
+     *
+     * No se baja más: escribir de uno en uno multiplica las peticiones a Supabase sin ganar nada,
+     * porque lo que se guarda de menos al morir es como mucho la tanda en curso.
      */
-    if (alEncontrar && buenos.length - entregados >= 40) {
+    if (alEncontrar && buenos.length - entregados >= 15) {
       const lote = buenos.slice(entregados);
       entregados = buenos.length;
       await alEncontrar(lote);

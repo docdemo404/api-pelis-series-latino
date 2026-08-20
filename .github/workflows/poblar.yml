@@ -1,0 +1,81 @@
+name: Poblar el catálogo por tandas
+
+# RECORRER FUEGOCINE Y ARCHIVE.ORG ENTEROS, SOLOS, SIN QUE NADIE LANCE NADA A MANO.
+#
+# El crawl completo (`scraper.yml`) reparte sus horas entre cuatro webs y solo rasca por encima de
+# las dos que de verdad publican ficheros PERMANENTES. Esto se dedica a ellas.
+#
+# POR QUÉ VA POR TANDAS Y NO DE UNA VEZ. Tres corridas de la pasada de FuegoCine acabaron
+# `cancelled` —no `failure`— siempre poco después de arrancar la extracción de urls: a los
+# 16m30s, 16m36s y 4m40s. El repositorio es público, así que no son minutos agotados; es que esa
+# fase abre muchas conexiones a la vez y el runner deja de responder.
+#
+# Pelearse con eso no hacía falta. Lo que hacía falta es que una cancelación NO cueste el trabajo
+# ya hecho ni obligue a empezar de cero:
+#
+#   · `--saltar-guardados` descarta lo que ya está en la base. Sin esto, cada corrida volvía a
+#     empezar por el mismo título y lanzarla diez veces daba diez veces lo mismo.
+#   · El tope por corrida la recorta a lo que cabe en la ventana.
+#   · Y el refresh escribe POR TANDAS mientras avanza, así que lo comprobado antes de morir queda
+#     guardado.
+#
+# Con las tres cosas, cada corrida coge un tramo nuevo y el archivo entero se recorre en varias
+# vueltas. Cada media hora, sin intervención.
+#
+# CUÁNTO FALTA, con lo medido: FuegoCine publica 3.219 títulos y ~29 % tiene url permanente y
+# funcional. A ~72 títulos por tanda de 40 min, son unas 45 vueltas. Cuando ya no queda nada por
+# mirar, la corrida termina en segundos y no gasta nada.
+
+on:
+  schedule:
+    # Cada 30 min, alternando fuente por corrida (ver `matrix`). Si no queda trabajo, sale sola.
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+    inputs:
+      fuente:
+        description: 'fuegocine o archive. Vacío = las dos, una detrás de otra.'
+        required: false
+        default: ''
+
+# Una tanda cada vez. Dos a la vez multiplicarían las peticiones a los mismos hosts y es
+# justamente lo que tumba al runner.
+concurrency:
+  group: poblar
+  cancel-in-progress: false
+
+jobs:
+  tanda:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    strategy:
+      # Secuencial a propósito, por lo mismo que la guarda de concurrencia.
+      max-parallel: 1
+      # Y `fail-fast: false` para que una fuente que falle no cancele la otra: son independientes
+      # y perder las dos por culpa de una sería exactamente el problema que esto viene a resolver.
+      fail-fast: false
+      matrix:
+        fuente: [fuegocine, archive]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+      - run: npm ci
+
+      - name: Tanda de ${{ matrix.fuente }}
+        # Si se pidió una fuente concreta a mano, las demás se saltan.
+        if: ${{ inputs.fuente == '' || inputs.fuente == matrix.fuente }}
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          FUENTE: ${{ matrix.fuente }}
+        # El tope de 300 y los 18 minutos salen de la ventana en la que muere el runner: se busca
+        # que la tanda TERMINE, no que aproveche hasta el último segundo. Lo que no dé tiempo sale
+        # en la vuelta siguiente, que es dentro de media hora.
+        run: npx ts-node scripts/refreshCatalog.ts --solo=$FUENTE --saltar-guardados --minutos=18 300

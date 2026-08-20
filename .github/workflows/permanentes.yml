@@ -1,0 +1,64 @@
+name: Que nadie se encuentre un vídeo caído
+
+# EL ESPECTADOR NO PUEDE SER EL DETECTOR.
+#
+# Había dos formas de enterarse de que un vídeo se había caído, y las dos llegan tarde:
+#
+#   1. El aviso de la app (`/api/v1/report`). Para que se dispare, alguien ha tenido que abrir la
+#      ficha, esperar, y leer «se probaron todas las fuentes». Eso ya es un espectador que se
+#      llevó el error. Sirve como red de seguridad, no como detección.
+#   2. `verificar.yml`, que sí comprueba por su cuenta pero tarda ~24 s POR SERVIDOR: para mirar
+#      un embed hay que resolverlo, acuñar la url, bajar el manifiesto y descargar un segmento.
+#      A ese ritmo el catálogo entero no cabe en una vuelta.
+#
+# CON LAS URLS PERMANENTES ESE COSTE SE DESPLOMA, y es la consecuencia menos obvia del modelo
+# nuevo. Una url `public` ES el fichero: ni resolución, ni manifiesto, ni cadena de segmentos. Una
+# petición de rango de 64 KB. Medido: ~2 s contra archive.org, menos contra el CDN de Rumble.
+#
+#   verificar.yml   ~24 s por servidor    vuelta completa: horas
+#   esto            ~2 s, y 24 a la vez   vuelta completa: minutos
+#
+# Por eso esto puede correr CADA 20 MINUTOS sobre el catálogo entero. La primera pasada en seco,
+# con solo 27 fichas guardadas, ya encontró dos caídas (`remux.unlimplay.com` devolviendo 403 en
+# «23 000 vidas» y «Zona de riesgo»): justo lo que se estaba reportando como «hay vídeos que dan
+# error y siguen apareciendo».
+#
+# Al encontrar uno muerto le quita el SELLO, no la url. Sin sello no se publica, así que la ficha
+# sale de los listados en cuanto se purga el caché; y como la url sigue guardada, la vuelta
+# siguiente puede absolverla sola si era un corte de red. Retirar es barato y reversible.
+
+on:
+  schedule:
+    # Cada 20 minutos. La ventana del sello permanente es de 12 h, así que caben decenas de
+    # vueltas dentro: se puede perder muchas corridas seguidas sin que caduque nada.
+    - cron: '*/20 * * * *'
+  workflow_dispatch:
+
+# Si una vuelta se alarga, la siguiente ESPERA en vez de duplicar las peticiones a los hosts.
+concurrency:
+  group: permanentes
+  cancel-in-progress: false
+
+jobs:
+  verificar-permanentes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+      - run: npm ci
+
+      - name: Comprobar que cada url permanente sigue entregando vídeo
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # Sin esto el arreglo se escribe en la base y el caché sigue enseñando la ficha vieja
+          # hasta 12 h. Retirar sin purgar es dejarlo roto por fuera.
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+        run: npx ts-node scripts/verificarPermanentes.ts --apply --minutos=22

@@ -189,10 +189,22 @@ function costeDeEntrega(s: ServerOption): number {
  * horas. Aplicarles la misma ventana los sacaba del catálogo por no haber pasado el barrido, que
  * es justo el ir y venir de títulos del que veníamos.
  *
- * Una semana: lo bastante largo para que un barrido perdido no esconda nada, y lo bastante corto
- * para que un fichero retirado no se anuncie un mes.
+ * ERAN SIETE DÍAS, y eran demasiados. Ese número se eligió cuando comprobar una url costaba lo
+ * mismo que comprobar un embed —unos 24 s, con extracción, manifiesto y segmento— y no había
+ * forma de dar la vuelta al catálogo a menudo. Con esa ventana, un fichero retirado por una
+ * reclamación de copyright seguía anunciándose una semana entera, y el espectador se lo
+ * encontraba caído. Que es exactamente lo que se reportó.
+ *
+ * Ahora hay un barrido dedicado (`scripts/verificarPermanentes.ts`) que solo pide un rango de
+ * 64 KB —unos 2 s por url, sin extraer nada— y repasa el catálogo entero en minutos, varias veces
+ * al día. Con esa cadencia, doce horas son de sobra: caben decenas de vueltas dentro.
+ *
+ * Y no es solo afinar un número. La ventana es lo que pasa cuando el barrido DEJA de correr, y ahí
+ * está la diferencia real entre las dos cifras: con siete días, un workflow roto se nota una
+ * semana después; con doce horas, el catálogo se vacía solo en medio día en vez de seguir
+ * anunciando lo que ya nadie ha comprobado. Prefiere encogerse a mentir.
  */
-const VIGENCIA_PERMANENTE_MS = 7 * 24 * 60 * 60 * 1000;
+const VIGENCIA_PERMANENTE_MS = 12 * 60 * 60 * 1000;
 
 function verificadoVigente(s: ServerOption): boolean {
   if (!s?.verified_at) return false;
