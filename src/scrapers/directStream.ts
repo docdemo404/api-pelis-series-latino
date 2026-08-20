@@ -110,7 +110,28 @@ export function canonicalArchiveOrg(url: string): string {
 
 /** ¿Esta URL apunta al fichero de vídeo, por extensión o por ser un host de fichero directo? */
 export function esFicheroDirecto(url: string): boolean {
-  return /\.(m3u8|mp4|txt|mkv|webm)(\?|$)/i.test(url) || HOSTS_DE_FICHERO_DIRECTO.some(re => re.test(url));
+  if (HOSTS_DE_FICHERO_DIRECTO.some(re => re.test(url))) return true;
+
+  /**
+   * LA EXTENSIÓN SE MIRA EN LA RUTA, NO EN TODA LA URL.
+   *
+   * Miraba la url entera, y eso daba por fichero cosas que son páginas. El caso que lo destapó:
+   *
+   *   https://repfuegocinefree.blogspot.com/?player=fluidplayer&…&link=https://…/video.mp4
+   *
+   * Es el ENVOLTORIO de FuegoCine —una página con un reproductor dentro— y acaba en `.mp4`
+   * porque el fichero de verdad viaja en el parámetro `link=`. Con la comprobación vieja pasaba
+   * como fichero, así que se le entregaba esa página al reproductor: HTML donde tenía que haber
+   * vídeo. Es una de las formas de «no reproduce» que quedaban sin explicar.
+   *
+   * En la ruta no hay ambigüedad: `/algo.mp4` es un fichero y `/?link=algo.mp4` no lo es.
+   */
+  try {
+    return /\.(m3u8|mp4|txt|mkv|webm)$/i.test(new URL(url).pathname);
+  } catch {
+    // Sin url válida no se puede afirmar nada, y afirmar de más es lo que se acaba de arreglar.
+    return false;
+  }
 }
 
 /**

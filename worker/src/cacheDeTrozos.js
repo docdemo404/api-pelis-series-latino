@@ -184,7 +184,7 @@ export async function servirConCache(request, env, ctx, url) {
     return new Response('R2 no está configurado en este Worker', { status: 501, headers: CORS });
   }
 
-  const { desde } = rangoPedido(request.headers.get('Range'));
+  const { desde, hasta } = rangoPedido(request.headers.get('Range'));
   const indice = Math.floor(desde / TROZO);
 
   let datos;
@@ -211,10 +211,18 @@ export async function servirConCache(request, env, ctx, url) {
     );
   }
 
-  // Se recorta al rango que de verdad se pidió dentro del trozo.
+  /**
+   * Se recorta al rango que de verdad se pidió dentro del trozo.
+   *
+   * Si el cliente puso final (`bytes=A-B`) se respeta, y si no lo puso —que es lo que hace
+   * ExoPlayer casi siempre, `bytes=A-`— se le manda el trozo hasta el final. Devolverle 8 MB a
+   * quien pidió 64 KB no es un error de protocolo, pero sí son bytes que nadie usa, y sobre una
+   * conexión móvil eso se nota.
+   */
   const inicioTrozo = indice * TROZO;
   const offset = Math.max(0, desde - inicioTrozo);
-  const cuerpo = offset ? datos.bytes.slice(offset) : datos.bytes;
+  const finPedido = hasta !== null ? hasta - inicioTrozo + 1 : datos.bytes.length;
+  const cuerpo = datos.bytes.slice(offset, Math.min(finPedido, datos.bytes.length));
   const primerByte = inicioTrozo + offset;
   const ultimoByte = primerByte + cuerpo.length - 1;
 
