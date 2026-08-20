@@ -3,7 +3,7 @@ import { Transform, TransformCallback } from 'stream';
 import { ResolverService } from '../services/resolverService';
 import { BandwidthService } from '../services/bandwidthService';
 import { mintDirect, MintedStream } from '../services/directResolver';
-import { decodeEmbedParam, tokenExpirySeconds, hasVolatileToken, esUrlDeFicheroPermanente } from '../scrapers/directStream';
+import { decodeEmbedParam, tokenExpirySeconds, hasVolatileToken, esUrlDeFicheroPermanente, ficheroPermanenteDentroDelEmbed } from '../scrapers/directStream';
 import { bestMode, policyFor } from '../scrapers/hostPolicy';
 import { DirectMode } from '../types';
 import { sendErrorResponse } from '../utils/apiHelpers';
@@ -13,7 +13,7 @@ import { USER_AGENT, streamClient } from '../utils/httpClient';
 import { inicioDelTs } from '../utils/segmentBytes';
 import { destinoSirveCors } from '../services/manifestHealth';
 import { comprobarDestino, anotarVeredicto } from '../services/playbackHealth';
-import { externalProxyEnabled, proxyUrlFor, cacheUrlFor } from '../utils/externalProxy';
+import { externalProxyEnabled, proxyUrlFor, cacheUrlFor, ficheroDentroDeNuestraCache } from '../utils/externalProxy';
 import { getSupabaseAdmin } from '../services/supabaseService';
 
 /**
@@ -668,9 +668,56 @@ router.get([DIRECT_BASE, `${DIRECT_BASE}/v.mp4`, `${DIRECT_BASE}/v.m3u8`], async
 
   try {
     const embedParam = String(req.query.e || '');
-    const embedUrl = decodeEmbedParam(embedParam);
-    if (!embedUrl) {
+    const embedCrudo = decodeEmbedParam(embedParam);
+    if (!embedCrudo) {
       return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'El parámetro ?e= (embed en base64url) es requerido');
+    }
+
+    /**
+     * ÚLTIMO RECURSO PARA QUIEN TIENE UN DNS QUE BLOQUEA: los bytes salen por AQUÍ.
+     *
+     * `externo=0` significa «no me delegues, sírvelo tú». Lo manda el reproductor solo después de
+     * que la caché haya fallado, y existe porque hay un fallo que no se puede arreglar desde el
+     * servidor: un DNS privado con listas de bloqueo tumba `*.workers.dev` entero —es un dominio
+     * compartido, así que las listas lo bloquean de una vez— y también el host del CDN. Se
+     * comprobó en el aparato: con el DNS privado puesto no reproducía, y quitándolo sí.
+     *
+     * El dominio de esta API es el único que resuelve en ese caso, así que es el único camino que
+     * queda. Cuesta tránsito del plan, y por eso NO es el camino normal: solo se pisa cuando el
+     * barato ya se intentó y no llegó.
+     *
+     * Y si lo que viene es una url de nuestra propia caché, se deshace el envoltorio para volver
+     * al fichero: pedirle a la API que se descargue a sí misma sería un viaje de ida y vuelta por
+     * el mismo Worker que el aparato no puede resolver.
+     */
+    const sinDelegar = String(req.query.externo || '') === '0';
+    const desenvuelto = sinDelegar ? ficheroDentroDeNuestraCache(embedCrudo) : null;
+    const embedUrl = desenvuelto || embedCrudo;
+
+    /**
+     * ATAJO: SI EL EMBED YA LLEVA EL FICHERO ESCRITO, NO SE ACUÑA NADA.
+     *
+     * Acuñar tiene un tope de 6 s y el envoltorio de FuegoCine no cabe en él cuando está frío:
+     * medido, la PRIMERA petición tardaba 14 s y acababa en 502, y la segunda iba bien porque el
+     * acuñado había quedado en caché. Para quien mira la pantalla eso es «esta película no
+     * reproduce», y encima de forma intermitente.
+     *
+     * Y era gasto por nada, porque la dirección del vídeo viene ESCRITA en la url del embed:
+     *
+     *   repfuegocinefree.blogspot.com/?…&link=https%3A%2F%2Ffiles.eintim.me%2F…%2FqXiXzijvopoM.mp4
+     *
+     * Leerla cuesta cero peticiones. Se manda a la caché por trozos y el reproductor tiene bytes
+     * de vídeo en menos de un segundo, en vez de catorce segundos para acabar en un error.
+     *
+     * Va solo con `mode=proxy` PEDIDO A MANO, y esa restricción importa: es la señal de que el
+     * cliente ya intentó el camino directo y no le sirvió —un DNS que filtra el host, una url
+     * atada por IP—, así que no hay nada que ganar volviendo a resolver. Los demás modos siguen
+     * pasando por el acuñado completo, que es quien sabe de firmas, calidades y manifiestos.
+     */
+    if (!sinDelegar && String(req.query.mode || '').toLowerCase() === 'proxy' && externalProxyEnabled()) {
+      const dentro = ficheroPermanenteDentroDelEmbed(embedUrl);
+      const porLaCache = dentro ? cacheUrlFor(dentro) : null;
+      if (porLaCache) return sendRedirect(res, porLaCache);
     }
 
     // En paralelo: el presupuesto es un viaje a KV que no depende del acuñado, y encadenarlos
@@ -781,7 +828,7 @@ router.get([DIRECT_BASE, `${DIRECT_BASE}/v.mp4`, `${DIRECT_BASE}/v.m3u8`], async
      * Va antes del presupuesto a propósito: si el vídeo sale por fuera, no hay presupuesto que
      * gastar.
      */
-    if (mode === 'proxy' && externalProxyEnabled()) {
+    if (!sinDelegar && mode === 'proxy' && externalProxyEnabled()) {
       /**
        * SI YA SABEMOS CUÁL ES EL FICHERO, SE LE MANDA EL FICHERO — no el embed.
        *

@@ -314,6 +314,27 @@ function extractFromUrlParam(embedUrl: string): DirectStream | null {
 }
 
 /**
+ * EL FICHERO PERMANENTE QUE UN EMBED LLEVA DENTRO, sin gastar una sola petición.
+ *
+ * Es `extractFromUrlParam` mirado desde otro lado, y existe para una decisión que se toma ANTES
+ * de acuñar nada: si la dirección del vídeo viaja escrita en la propia URL del embed, no hay
+ * ninguna razón para salir a la red a averiguarla.
+ *
+ * De ahí salió: `mode=proxy` acuñaba primero y con un tope de 6 s, y acuñar el envoltorio de
+ * FuegoCine en frío tarda más — así que la PRIMERA vez que alguien abría «Misión Rescate» se
+ * llevaba un 502 tras catorce segundos, y a la segunda ya iba porque el acuñado había quedado en
+ * caché. Otro fallo que se cura solo, que es la peor clase.
+ *
+ * Se exige que sea PERMANENTE, no solo que sea un fichero: lo que se devuelve aquí acaba en la
+ * caché por trozos del Worker, y guardar una url firmada sería llenarla de trozos que caducan.
+ */
+export function ficheroPermanenteDentroDelEmbed(embedUrl: string): string | null {
+  const dentro = urlEnvueltaEnParametro(embedUrl);
+  if (!dentro) return null;
+  return esUrlDeFicheroPermanente(dentro.url) ? dentro.url : null;
+}
+
+/**
  * La URL que un reproductor-envoltorio lleva en un parámetro, sea el fichero o OTRO embed.
  *
  * Se separó de `extractFromUrlParam` porque son dos preguntas distintas y confundirlas costaba

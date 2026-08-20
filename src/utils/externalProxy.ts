@@ -77,3 +77,36 @@ export function cacheUrlFor(fileUrl: string): string | null {
   // `proxyUrlFor` apunta a la raíz; la caché por trozos vive en /v.
   return url.replace(/\/\?e=/, '/v?e=');
 }
+
+/**
+ * EL FICHERO QUE HAY DENTRO DE UNA URL NUESTRA DE CACHÉ, o `null` si no es una.
+ *
+ * Existe por un caso que no se puede arreglar desde el servidor: hay quien tiene un **DNS
+ * privado con listas de bloqueo**, y `*.workers.dev` está en casi todas —es un dominio
+ * compartido por cualquiera que despliegue un Worker, así que las listas lo bloquean entero—.
+ * Para esa persona, la url de la caché no resuelve y da igual lo bien que funcione el Worker.
+ *
+ * Comprobado en el aparato: con el DNS privado puesto fallaba, y quitándolo reprodujo. Los dos
+ * hosts que se caen son `files.eintim.me` y el del Worker; el de esta API resuelve siempre.
+ *
+ * Así que el último recurso es servir los bytes desde aquí, y para eso hace falta deshacer el
+ * envoltorio y recuperar el fichero de dentro. Se exige la FIRMA: sin ella esto sería una forma
+ * de pedirle a la API que descargue cualquier url que a alguien se le ocurra.
+ */
+export function ficheroDentroDeNuestraCache(url: string): string | null {
+  const base = baseUrl();
+  const key = signingKey();
+  if (!base || !key || !url || !url.startsWith(base + '/v?')) return null;
+
+  try {
+    const params = new URL(url).searchParams;
+    const e = params.get('e');
+    const s = params.get('s');
+    if (!e || !s) return null;
+    const esperada = crypto.createHmac('sha256', key).update(e).digest('hex');
+    if (s !== esperada) return null;
+    return Buffer.from(e, 'base64url').toString('utf8');
+  } catch {
+    return null;
+  }
+}

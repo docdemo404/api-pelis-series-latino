@@ -1,7 +1,7 @@
 import { ServerOption, DirectMode } from '../types';
 import { SourceManager, SourceConfig } from './sourceManager';
 import { bestMode } from '../scrapers/hostPolicy';
-import { directEndpointUrl, isPubliclyShareable, esFicheroDirecto } from '../scrapers/directStream';
+import { directEndpointUrl, isPubliclyShareable, esFicheroDirecto, ficheroPermanenteDentroDelEmbed } from '../scrapers/directStream';
 import { cacheUrlFor } from '../utils/externalProxy';
 
 /**
@@ -40,6 +40,31 @@ function seEntregaTalCual(url: string | undefined | null): boolean {
 function urlPublicaDe(server: ServerOption): string | undefined {
   if (seEntregaTalCual(server.direct_stream)) return server.direct_stream;
   if (esFicheroDirecto(server.embed_url || '') && seEntregaTalCual(server.embed_url)) return server.embed_url;
+
+  /**
+   * Y UN TERCER SITIO: DENTRO DEL ENVOLTORIO.
+   *
+   * Los embeds de FuegoCine son una página de Blogger que lleva el fichero escrito en su propio
+   * `link=`. Hasta aquí eso solo se aprovechaba al acuñar, así que estos servidores salían en
+   * modo `redirect` —un 302 nuestro hacia el CDN— y cada reproducción arrastraba la ruta entera
+   * de `/api/v1/stream/direct`: extraer, comprobar el destino, y un tope de 12 segundos que al
+   * agotarse contesta 502.
+   *
+   * Y se agotaba. «Misión Rescate» daba 502 en el aparato de forma reproducible mientras la MISMA
+   * url, pedida con curl desde ESE MISMO teléfono, contestaba 302 en 0,4 s y 206 siguiéndola. Un
+   * fallo que no se reproduce fuera del reproductor es un fallo del que no se puede sacar la
+   * causa a tiempo — así que en vez de seguir persiguiéndolo se quita el tramo que falla.
+   *
+   * No hace falta ninguna petición para saber cuál es el fichero: está escrito en la url. Con esto
+   * el servidor pasa a `public`, se entrega ya resuelto y por la caché de trozos, y el reproductor
+   * habla directamente con el Worker — medido desde el teléfono: 206 y 4 MB en 1,8 s.
+   *
+   * `ficheroPermanenteDentroDelEmbed` exige que lo de dentro sea PERMANENTE, no solo un fichero:
+   * lo que salga de aquí se anuncia como url estable y se guarda, y una url firmada caducaría.
+   */
+  const dentro = ficheroPermanenteDentroDelEmbed(server.embed_url || '');
+  if (dentro && seEntregaTalCual(dentro)) return dentro;
+
   return undefined;
 }
 
