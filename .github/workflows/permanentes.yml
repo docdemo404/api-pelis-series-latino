@@ -36,6 +36,8 @@ on:
 
 # Si una vuelta se alarga, la siguiente ESPERA en vez de duplicar las peticiones a los hosts.
 concurrency:
+  # Por vuelta, no por parte: las ocho partes de una misma corrida tienen que poder ir a la vez.
+  # Lo que se evita es que la vuelta siguiente se solape con esta y duplique las peticiones.
   group: permanentes
   cancel-in-progress: false
 
@@ -43,6 +45,21 @@ jobs:
   verificar-permanentes:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+
+    # OCHO RUNNERS EN PARALELO, CADA UNO CON POCA CONCURRENCIA.
+    #
+    # No es por ir más rápido porque sí: es que no hay otra forma. Con 48 comprobaciones a la vez
+    # dentro de un solo runner, GitHub lo cancela al minuto y medio (`cancelled`, sin error) — el
+    # mismo castigo que ya se llevaron tres pasadas del crawl. Abrir muchas conexiones salientes a
+    # la vez es lo que no tolera.
+    #
+    # Repartiendo, los 64 en vuelo son los mismos pero ninguno destaca. El reparto va por una
+    # huella del id (`--parte/--de`), así que los ocho no tienen que coordinarse: cada fila cae
+    # siempre en la misma parte y las ocho juntas son el catálogo exacto.
+    strategy:
+      fail-fast: false
+      matrix:
+        parte: [0, 1, 2, 3, 4, 5, 6, 7]
 
     steps:
       - uses: actions/checkout@v4
@@ -61,4 +78,5 @@ jobs:
           # hasta 12 h. Retirar sin purgar es dejarlo roto por fuera.
           UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
-        run: npx ts-node scripts/verificarPermanentes.ts --apply --minutos=22
+          PARTE: ${{ matrix.parte }}
+        run: npx ts-node scripts/verificarPermanentes.ts --apply --minutos=22 --conc=8 --parte=$PARTE --de=8

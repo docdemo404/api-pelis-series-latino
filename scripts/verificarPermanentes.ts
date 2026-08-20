@@ -40,7 +40,7 @@
  * cuanto se purga el caché; y como la url sigue guardada, la vuelta siguiente puede absolverla
  * sola si era un corte de red. Retirar es barato y reversible; anunciar algo roto no.
  *
- *   npx ts-node -T scripts/verificarPermanentes.ts [--apply] [--minutos=N] [--conc=N] [--limit=N]
+ *   npx ts-node -T scripts/verificarPermanentes.ts [--apply] [--minutos=N] [--conc=N] [--parte=N --de=M]
  *
  * Sin `--apply` no escribe: dice lo que haría.
  * ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -61,17 +61,41 @@ const minutosTope = numero('minutos', 45);
 const topeFilas = numero('limit', 0);
 
 /**
- * Cuántas urls a la vez.
+ * Cuántas urls a la vez DENTRO DE UN RUNNER. Ocho, y es un techo impuesto desde fuera.
  *
- * Alto a propósito: estas peticiones NO cargan a un solo host —los ficheros están repartidos entre
- * archive.org, el CDN de Rumble y los demás—, así que 48 a la vez son unas pocas por host. Y el
- * coste de cada una es casi todo latencia (TLS + ida y vuelta), no bytes, así que subir la
- * concurrencia es lo único que de verdad acorta la vuelta.
+ * El coste de cada comprobación es casi todo latencia (TLS + ida y vuelta), así que lo natural
+ * sería subir mucho la concurrencia: son peticiones repartidas entre archive.org, el CDN de Rumble
+ * y los demás, o sea unas pocas por host. Se probó con 48 y GitHub CANCELÓ el runner al minuto y
+ * medio — el mismo `cancelled` sin error que ya había matado tres pasadas del crawl. Abrir muchas
+ * conexiones salientes a la vez es justo lo que no tolera.
  *
- * Las cuentas para 20.000 títulos (~30.000 urls): a 48 a la vez y ~2 s cada una, unos 20 minutos.
- * Con 24 eran 40 y no cabía en la cadencia del barrido.
+ * Así que la concurrencia no se gana dentro de un runner: se gana repartiendo. Ver `parte`.
  */
-const CONC = numero('conc', 48);
+const CONC = numero('conc', 8);
+
+/**
+ * REPARTO ENTRE VARIOS RUNNERS. `--parte=0 --de=8` mira solo una octava parte del catálogo.
+ *
+ *   1 runner  x 48 a la vez  →  cancelado al minuto y medio
+ *   8 runners x 8 a la vez   →  los mismos 64 en vuelo, y ninguno llama la atención
+ *
+ * El reparto va por una huella del id, no por páginas: así los runners no tienen que ponerse de
+ * acuerdo en nada ni saber por dónde va el otro. Cada fila cae siempre en la misma parte, y las
+ * ocho juntas son el catálogo exacto, sin huecos ni solapes.
+ *
+ * Las cuentas para 20.000 títulos (~30.000 urls): 3.750 por parte, a 8 a la vez y ~2 s cada una,
+ * unos 15 minutos por runner corriendo los ocho a la vez.
+ */
+const parte = numero('parte', -1);
+const deCuantas = numero('de', 0);
+
+/** Huella estable de un id. No hace falta que sea criptográfica: solo que reparta parejo. */
+function meToca(id: string): boolean {
+  if (deCuantas <= 1 || parte < 0) return true;
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0;
+  return Math.abs(h) % deCuantas === parte;
+}
 
 /** Filas por página. Ni tan pocas que la lectura domine, ni tantas que la memoria importe. */
 const PAGINA = 500;
@@ -183,7 +207,9 @@ async function guardarFicha(fila: any): Promise<void> {
 (async () => {
   const fin = Date.now() + minutosTope * 60_000;
   const seAcaba = () => Date.now() > fin - MARGEN_PARA_ESCRIBIR_MS;
-  console.log(`🔍 Repasando urls permanentes${apply ? '' : ' (ENSAYO: no escribe)'} · ${CONC} a la vez\n`);
+  const reparto = deCuantas > 1 ? ` · parte ${parte + 1}/${deCuantas}` : '';
+  console.log(`🔍 Repasando urls permanentes${apply ? '' : ' (ENSAYO: no escribe)'} · ${CONC} a la vez${reparto}
+`);
 
   type Tarea = { fila: any; sv: any; donde: string };
   const cola: Tarea[] = [];
@@ -208,6 +234,7 @@ async function guardarFicha(fila: any): Promise<void> {
       if (!data?.length) break;
 
       for (const fila of data as any[]) {
+        if (!meToca(String(fila.id))) continue;
         const suyas = permanentesDe(fila);
         if (!suyas.length) continue;
         filasEncoladas++;
