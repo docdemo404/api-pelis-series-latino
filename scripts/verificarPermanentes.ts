@@ -104,76 +104,58 @@ const PAGINA = 500;
 const MARGEN_PARA_ESCRIBIR_MS = 30_000;
 
 /**
- * ¿Sigue estando el fichero?
+ * ¿SIGUE EL FICHERO, Y SE PUEDE ADELANTAR EN ÉL? Las dos cosas, en una sola petición.
  *
- * Se piden 64 KB, que es exactamente lo que exige el crawl antes de guardar una url por primera
- * vez (`urlsBuenasDe`). Usar la MISMA prueba importa: si la de entrada fuera más blanda que la de
- * mantenimiento, el catálogo estaría retirando cosas que él mismo acaba de aceptar, y los títulos
- * entrarían y saldrían solos para siempre.
+ * Se pide un trozo DE EN MEDIO (64 KB a partir del primer mega), y no los primeros 64 KB. La
+ * diferencia no es un detalle: es la única forma de que la respuesta signifique algo.
  *
- * El timeout sí es más corto que el del crawl (10 s contra 25), y no es incoherencia. Al entrar
- * hay que darle su oportunidad a un host lento, porque es la única vez que se le mide y además se
- * le mide para ORDENARLO por velocidad. Aquí solo se pregunta si el fichero sigue ahí, y el que
- * no conteste en diez segundos no se descarta: se queda SIN VEREDICTO y se vuelve a mirar en la
- * vuelta siguiente, que es dentro de veinte minutos.
+ * Un servidor PUEDE contestar `200` a `Range: bytes=0-65535` y estar comportándose bien —un
+ * rango que arranca en el byte cero se puede servir como el recurso entero, y el HTTP lo
+ * permite—. Medido sobre `files.eintim.me`:
  *
- * Un `text/html` cuenta como muerto aunque venga con 200: es la página de error del host, que es
- * como la mitad de estos CDN dicen que ya no tienen el fichero.
+ *   Range: bytes=0-              200, fichero entero        ← correcto, no dice nada
+ *   Range: bytes=500000000-      206 con Content-Range      ← esto sí dice que hay rangos
+ *
+ * Así que exigir 206 a una petición desde el cero rechaza ficheros perfectamente utilizables.
+ * Desde el medio no hay ambigüedad: o contesta 206 con su `Content-Range`, o no sabe hacer
+ * rangos — y sin rangos ExoPlayer no puede saltar, así que cada adelanto reempieza en el byte
+ * cero, se atasca y acaba en error.
+ *
+ * Y de paso se leen bytes de vídeo de verdad: el primer mega de un mp4 suele ser cabecera
+ * (`ftyp` + `moov`), no imagen.
+ *
+ * `416` significa que el fichero es más corto que el offset pedido. No es un fallo: es un
+ * fichero pequeño, y ahí se comprueba por el principio, porque en algo así de corto no hay nada
+ * que adelantar.
  */
 async function sigueVivo(url: string): Promise<{ ok: boolean; motivo: string; sinVeredicto?: boolean }> {
-  try {
-    const r = await streamClient.get(url, {
-      headers: { Range: 'bytes=0-65535' },
-      responseType: 'arraybuffer',
-      timeout: 10000,
-      validateStatus: () => true,
-      maxRedirects: 5,
-    } as any);
-    if (r.status >= 400) return { ok: false, motivo: `http ${r.status}` };
-    const tipo = String(r.headers['content-type'] || '');
-    if (/text\/html/i.test(tipo)) return { ok: false, motivo: 'html en vez de vídeo' };
+  const pedir = (rango: string) => streamClient.get(url, {
+    headers: { Range: rango },
+    responseType: 'arraybuffer',
+    timeout: 10000,
+    validateStatus: () => true,
+    maxRedirects: 5,
+  } as any);
 
-    /**
-     * Y que siga honrando el `Range`. Un host puede dejar de hacerlo sin borrar nada —cambia de
-     * proxy, mete un Cloudflare delante— y desde ese momento el título ya no se puede adelantar
-     * aunque el fichero esté. Sin esta línea, el barrido lo daría por bueno. Ver `entregaVideo`
-     * en refreshCatalog para el caso que lo destapó (`files.eintim.me`).
-     */
-    /**
-     * SI IGNORA EL `Range`, SE LE DA UNA SEGUNDA OPORTUNIDAD ANTES DE CONDENARLO.
-     *
-     * Medido sobre el mismo fichero de `files.eintim.me`, tres peticiones seguidas con el mismo
-     * User-Agent de navegador:
-     *
-     *   intento 1   200  y empieza a mandar el fichero entero (128 MB antes de cortar)
-     *   intento 2   206  con los 64 KB pedidos
-     *   intento 3   206
-     *
-     * O sea que no es un host que no sepa hacer rangos: es el origen despertando. La primera
-     * petición sobre un fichero frío la sirve de corrido y a partir de ahí ya responde bien.
-     *
-     * Condenar al primer intento habría sacado del catálogo ficheros perfectamente utilizables
-     * —y el host más numeroso que tiene—. Comprobarlo una sola vez y darlo por bueno tampoco
-     * vale: sin rangos no se puede adelantar. Así que se pregunta otra vez, y solo si insiste en
-     * el 200 se retira.
-     */
-    if (r.status !== 206) {
-      const segunda = await streamClient.get(url, {
-        headers: { Range: 'bytes=0-65535' },
-        responseType: 'arraybuffer',
-        timeout: 10000,
-        validateStatus: () => true,
-        maxRedirects: 5,
-      } as any);
-      if (segunda.status !== 206) {
-        return { ok: false, motivo: `ignora el Range (http ${segunda.status})` };
-      }
-      const kb2 = ((segunda.data as ArrayBuffer)?.byteLength ?? 0) / 1024;
-      if (kb2 <= 8) return { ok: false, motivo: `solo ${kb2.toFixed(1)} KB` };
+  const bastantesBytes = (r: any) => ((r.data as ArrayBuffer)?.byteLength ?? 0) / 1024 > 8;
+  const esHtml = (r: any) => /text\/html/i.test(String(r.headers['content-type'] || ''));
+
+  try {
+    const r = await pedir(`bytes=${DESDE_MEDIO}-${DESDE_MEDIO + 65535}`);
+
+    // Más corto que el offset: fichero pequeño. Se comprueba por el principio y ya está.
+    if (r.status === 416) {
+      const chico = await pedir('bytes=0-65535');
+      if (chico.status >= 400) return { ok: false, motivo: `http ${chico.status}` };
+      if (esHtml(chico)) return { ok: false, motivo: 'html en vez de vídeo' };
+      if (!bastantesBytes(chico)) return { ok: false, motivo: 'apenas manda bytes' };
       return { ok: true, motivo: '' };
     }
-    const kb = ((r.data as ArrayBuffer)?.byteLength ?? 0) / 1024;
-    if (kb <= 8) return { ok: false, motivo: `solo ${kb.toFixed(1)} KB` };
+
+    if (r.status >= 400) return { ok: false, motivo: `http ${r.status}` };
+    if (esHtml(r)) return { ok: false, motivo: 'html en vez de vídeo' };
+    if (r.status !== 206) return { ok: false, motivo: `no sabe hacer rangos (http ${r.status})` };
+    if (!bastantesBytes(r)) return { ok: false, motivo: 'apenas manda bytes' };
     return { ok: true, motivo: '' };
   } catch (e: any) {
     /**
@@ -185,6 +167,9 @@ async function sigueVivo(url: string): Promise<{ ok: boolean; motivo: string; si
     return { ok: true, motivo: `sin veredicto (${e?.code || 'error'})`, sinVeredicto: true };
   }
 }
+
+/** Desde dónde se pide el trozo de prueba. Ver la nota de `sigueVivo`. */
+const DESDE_MEDIO = 1000000;
 
 /** Los servidores `public` de una fila, estén en la ficha o colgando de un capítulo. */
 function permanentesDe(fila: any): Array<{ sv: any; donde: string }> {

@@ -593,56 +593,49 @@ function urlDentroDelEnvoltorio(embed: string): string | null {
  */
 async function entregaVideo(url: string): Promise<{ ok: boolean; kbs: number }> {
   const t0 = Date.now();
-  try {
-    const r = await streamClient.get(url, {
-      headers: { Range: 'bytes=0-65535' },
-      responseType: 'arraybuffer',
-      timeout: 25000,
-      validateStatus: () => true,
-      maxRedirects: 5,
-    });
-    if (r.status >= 400) return { ok: false, kbs: 0 };
-    if (/text\/html/i.test(String(r.headers['content-type'] || ''))) return { ok: false, kbs: 0 };
+  const pedir = (rango: string) => streamClient.get(url, {
+    headers: { Range: rango },
+    responseType: 'arraybuffer',
+    timeout: 25000,
+    validateStatus: () => true,
+    maxRedirects: 5,
+  });
 
+  const kbDe = (r: any) => ((r.data as ArrayBuffer)?.byteLength ?? 0) / 1024;
+  const esHtml = (r: any) => /text\/html/i.test(String(r.headers['content-type'] || ''));
+  const velocidad = (kb: number) => kb / Math.max((Date.now() - t0) / 1000, 0.001);
+
+  try {
     /**
-     * EL HOST TIENE QUE HONRAR EL `Range`, y esto es tan importante como que el fichero exista.
-     *
-     * Con una segunda oportunidad si el primer intento lo ignora: ver la nota de `sigueVivo` en
-     * verificarPermanentes — la primera peticion sobre un fichero frio la sirven de corrido.
-     *
-     * Se pidieron 64 KB. Un `206 Partial Content` dice que el host entendió y mandó ese trozo;
-     * un `200` dice que va a mandar el fichero ENTERO, y con eso no se puede reproducir bien:
-     * ExoPlayer necesita rangos para saltar, así que cada vez que alguien adelanta o retrocede
-     * la descarga reempieza desde el byte cero. Se atasca, acaba en error, y de paso se baja un
-     * gigabyte que nadie pidió.
-     *
-     * Se descubrió con `files.eintim.me`, el host más numeroso del catálogo: contesta 206 a un
-     * User-Agent de navegador y 200 —ignorando el Range— al de OkHttp, que es el que mandaba la
-     * app. El enlace parecía bueno aquí y no se podía adelantar allí.
-     *
-     * Comprobarlo al ENTRAR es lo que evita meter en el catálogo cosas que no se pueden manejar.
+     * SE PIDE UN TROZO DE EN MEDIO, no los primeros 64 KB. Ver la nota de `sigueVivo` en
+     * scripts/verificarPermanentes.ts: un `200` a un rango que empieza en cero es HTTP válido y
+     * no demuestra nada, así que exigirle 206 rechazaría ficheros buenos. Desde el medio, o
+     * contesta 206 o no sabe hacer rangos — y sin rangos no se puede adelantar.
      */
-    if (r.status !== 206) {
-      const segunda = await streamClient.get(url, {
-        headers: { Range: 'bytes=0-65535' },
-        responseType: 'arraybuffer',
-        timeout: 25000,
-        validateStatus: () => true,
-        maxRedirects: 5,
-      });
-      if (segunda.status !== 206) return { ok: false, kbs: 0 };
-      const kb2 = ((segunda.data as ArrayBuffer)?.byteLength ?? 0) / 1024;
-      if (kb2 <= 8) return { ok: false, kbs: 0 };
-      return { ok: true, kbs: kb2 / Math.max((Date.now() - t0) / 1000, 0.001) };
+    const r = await pedir(`bytes=${DESDE_MEDIO}-${DESDE_MEDIO + 65535}`);
+
+    // Más corto que el offset: es un fichero pequeño, no un fallo.
+    if (r.status === 416) {
+      const chico = await pedir('bytes=0-65535');
+      if (chico.status >= 400 || esHtml(chico)) return { ok: false, kbs: 0 };
+      const kb = kbDe(chico);
+      if (kb <= 8) return { ok: false, kbs: 0 };
+      return { ok: true, kbs: velocidad(kb) };
     }
 
-    const kb = ((r.data as ArrayBuffer)?.byteLength ?? 0) / 1024;
+    if (r.status >= 400) return { ok: false, kbs: 0 };
+    if (esHtml(r)) return { ok: false, kbs: 0 };
+    if (r.status !== 206) return { ok: false, kbs: 0 };
+    const kb = kbDe(r);
     if (kb <= 8) return { ok: false, kbs: 0 };
-    return { ok: true, kbs: kb / Math.max((Date.now() - t0) / 1000, 0.001) };
+    return { ok: true, kbs: velocidad(kb) };
   } catch {
     return { ok: false, kbs: 0 };
   }
 }
+
+/** Desde dónde se pide el trozo de prueba. Ver `entregaVideo`. */
+const DESDE_MEDIO = 1000000;
 
 /**
  * TODAS las urls permanentes y funcionales de una lista de servidores, ordenadas de mejor a peor.
