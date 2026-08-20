@@ -606,7 +606,25 @@ async function entregaVideo(url: string): Promise<{ ok: boolean; kbs: number }> 
  * es lo único que le permite recuperarse solo si uno se cae a mitad.
  */
 async function urlsBuenasDe(servidores: any[], fuente: string): Promise<any[]> {
-  const salida: Array<{ sv: any; kbs: number }> = [];
+  /**
+   * PRIMERO SE ARMA LA LISTA DE CANDIDATOS, que no cuesta red, y LUEGO SE MIDEN TODOS A LA VEZ.
+   *
+   * Antes se recorrían los servidores en serie y se esperaba a cada uno antes de mirar el
+   * siguiente. Cada candidato muerto cuesta el timeout entero —25 s—, así que una ficha con diez
+   * servidores y dos candidatos por servidor podía tardar ocho minutos en decidir que no servía
+   * ninguno. Medido en la primera pasada real de FuegoCine: 45 minutos de presupuesto dieron para
+   * SOLO 16 TÍTULOS de los 400 previstos, unos 2,8 min cada uno.
+   *
+   * (Y de esos 16, cuatro tenían url permanente y funcional: el 25 %. O sea que el rendimiento de
+   * la fuente era el esperado y lo que fallaba era el reloj.)
+   *
+   * En paralelo, el coste de una ficha deja de ser la SUMA de sus timeouts y pasa a ser el PEOR de
+   * ellos. No se descarta a nadie por lento —esa regla no se toca, `goodstream` tarda 26 s y
+   * reproduce—: se miden a la vez y se ordenan por velocidad, que es distinto de condenar.
+   */
+  const candidatos: Array<{ sv: any; url: string }> = [];
+  const vistos = new Set<string>();
+
   for (const sv of servidores || []) {
     const embed = String(sv?.embed_url || '');
     if (!embed) continue;
@@ -618,25 +636,30 @@ async function urlsBuenasDe(servidores: any[], fuente: string): Promise<any[]> {
       const cand = canonicalArchiveOrg(crudo);
       if (!FICHERO_PERMANENTE.some(re => re.test(cand))) continue;
       if (hasVolatileToken(cand)) continue;
-      if (salida.some(x => x.sv.direct_stream === cand)) continue;
-      const medida = await entregaVideo(cand);
-      if (!medida.ok) continue;
-      salida.push({
-        kbs: medida.kbs,
-        sv: {
-          ...sv,
-          direct_stream: cand,
-          direct_mode: 'public',
-          direct_kind: /\.m3u8(\?|$)/i.test(cand) ? 'hls' : 'mp4',
-          status: 'online',
-          verified_at: new Date().toISOString(),
-          source_id: fuente,
-        },
-      });
+      if (vistos.has(cand)) continue;
+      vistos.add(cand);
+      candidatos.push({ sv, url: cand });
     }
   }
+  if (!candidatos.length) return [];
+
+  const medidos = await Promise.all(
+    candidatos.map(async c => ({ ...c, medida: await entregaVideo(c.url) }))
+  );
+
   // El mejor primero; los demás quedan detrás como respaldo.
-  return salida.sort((a, b) => b.kbs - a.kbs).map(x => x.sv);
+  return medidos
+    .filter(m => m.medida.ok)
+    .sort((a, b) => b.medida.kbs - a.medida.kbs)
+    .map(m => ({
+      ...m.sv,
+      direct_stream: m.url,
+      direct_mode: 'public',
+      direct_kind: /\.m3u8(\?|$)/i.test(m.url) ? 'hls' : 'mp4',
+      status: 'online',
+      verified_at: new Date().toISOString(),
+      source_id: fuente,
+    }));
 }
 
 /**
