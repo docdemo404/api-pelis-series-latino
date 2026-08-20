@@ -639,6 +639,44 @@ async function urlsBuenasDe(servidores: any[], fuente: string): Promise<any[]> {
   return salida.sort((a, b) => b.kbs - a.kbs).map(x => x.sv);
 }
 
+/**
+ * Escribe estas fichas en la base. Es la MISMA escritura de siempre, sacada a una función para
+ * poder llamarla por tandas mientras el crawl avanza en vez de solo al terminar (ver
+ * `guardarTanda`). No cambia nada de lo que hacía: lote de 50, y si el lote falla se reintenta
+ * fila a fila para aislar el conflicto de `tmdb_id` que sí sabe resolverse fusionando.
+ */
+async function guardarFilas(
+  items: MediaItem[],
+  banderas: { withNormalized: boolean; withMetadataSource: boolean; withRichMetadata: boolean; withMultiSource: boolean }
+): Promise<{ ok: number; fail: number; merged: number }> {
+  const { withNormalized, withMetadataSource, withRichMetadata, withMultiSource } = banderas;
+  const rows = items.map(it => toRow(it, withNormalized, withMetadataSource, withRichMetadata, withMultiSource));
+  let ok = 0, fail = 0, merged = 0;
+  const BATCH = 50;
+
+  for (let i = 0; i < rows.length; i += BATCH) {
+    const chunk = rows.slice(i, i + BATCH);
+    const { error } = await db.from('media_items').upsert(chunk, { onConflict: 'id' });
+    if (!error) {
+      ok += chunk.length;
+      continue;
+    }
+    // Reintento fila a fila para aislar conflictos puntuales (p.ej. tmdb_id ya usado por otro id)
+    for (const row of chunk) {
+      const { error: rowError } = await db.from('media_items').upsert(row, { onConflict: 'id' });
+      if (!rowError) { ok++; continue; }
+
+      if (isTmdbIdConflict(rowError.message)) {
+        if (await mergeIntoExisting(row, { withNormalized, withMultiSource })) { merged++; continue; }
+      }
+
+      fail++;
+      console.warn(`   ⚠ ${row.id}: ${rowError.message}`);
+    }
+  }
+  return { ok, fail, merged };
+}
+
 /** De qué web viene la ficha. Se guarda para poder verlo en el panel. */
 function fuenteDeLaUrl(url: string): string {
   if (/cinecalidad/i.test(url)) return 'cinecalidad';
@@ -650,9 +688,20 @@ function fuenteDeLaUrl(url: string): string {
  * Baja a la página de cada título, saca las urls de fichero, comprueba que entregan vídeo y
  * devuelve SOLO los títulos que se pueden reproducir, ya con sus servidores puestos.
  */
-async function quedarseConLoQueReproduce(items: MediaItem[]): Promise<MediaItem[]> {
+async function quedarseConLoQueReproduce(
+  items: MediaItem[],
+  /**
+   * Se llama con cada tanda que ha DEMOSTRADO reproducir, en cuanto se sabe.
+   *
+   * Sin esto el trabajo entero se escribía al final y una cancelación del runner —que en este
+   * proyecto pasa a menudo— lo tiraba todo. Ver `guardarTanda`.
+   */
+  alEncontrar?: (lote: MediaItem[]) => Promise<void>
+): Promise<MediaItem[]> {
   console.log(`🎬 Extrayendo la url directa de ${items.length} títulos (solo entra lo que reproduzca)...`);
   const buenos: MediaItem[] = [];
+  /** Cuántos de `buenos` ya se han entregado a `alEncontrar`. */
+  let entregados = 0;
   const CONC = 8;
   /**
    * Presupuesto: el trabajo tiene 6 h y el crawl ya gastó las suyas. Lo que no dé tiempo a
@@ -705,10 +754,28 @@ async function quedarseConLoQueReproduce(items: MediaItem[]): Promise<MediaItem[
       item.has_streams = true;
       buenos.push(item);
     }));
+    /**
+     * Guardar lo encontrado, cada 40 títulos con vídeo o cuando quedan pocos por mirar.
+     *
+     * El umbral no es redondo por gusto: escribir de uno en uno multiplica las peticiones a
+     * Supabase por nada, y esperar a tener cientos vuelve a dejar mucho trabajo en el aire si el
+     * runner se cae. Cuarenta es menos de un minuto de extracción.
+     */
+    if (alEncontrar && buenos.length - entregados >= 40) {
+      const lote = buenos.slice(entregados);
+      entregados = buenos.length;
+      await alEncontrar(lote);
+    }
+
     if ((i + CONC) % 400 < CONC) {
       console.log(`   ${Math.min(i + CONC, items.length)}/${items.length} · ${buenos.length} con vídeo`);
       await latir('extrayendo y comprobando urls directas', Math.min(i + CONC, items.length), items.length);
     }
+  }
+
+  // Lo que quede sin entregar al salir del bucle —por presupuesto agotado o por terminar—.
+  if (alEncontrar && buenos.length > entregados) {
+    await alEncontrar(buenos.slice(entregados));
   }
   return buenos;
 }
@@ -941,49 +1008,42 @@ async function main() {
    * pero que funcione seguro.
    * ═════════════════════════════════════════════════════════════════════════════════════════
    */
-  const conDirecto = await quedarseConLoQueReproduce(all);
+  /**
+   * SE ESCRIBE POR EL CAMINO, no al final. Esto no es una optimización: es lo que decide si una
+   * corrida sirve de algo.
+   *
+   * Medido el 2026-08-20 en la primera pasada `--solo=fuegocine`: recolectó 3.219 títulos, los
+   * enrichó al 100 % con TMDB en 12 minutos, empezó a extraer urls… y a los 4 minutos GitHub
+   * canceló el runner. Se perdió TODO — las tres horas de trabajo previstas y también los doce
+   * minutos ya hechos—, porque la escritura estaba después del bucle entero.
+   *
+   * Los runners de este proyecto mueren solos con regularidad, así que la regla es la del resto
+   * de pasadas largas: escribir lo aprendido antes de morir. Ahora cada tanda que demuestra
+   * reproducir se guarda en cuanto se sabe, y una cancelación cuesta como mucho la tanda en
+   * curso.
+   */
+  const banderas = { withNormalized, withMetadataSource, withRichMetadata, withMultiSource };
+  const escritas = { ok: 0, fail: 0, merged: 0 };
+  let guardadas = 0;
+  const guardarTanda = async (lote: MediaItem[]) => {
+    if (!lote.length) return;
+    const r = await guardarFilas(lote, banderas);
+    escritas.ok += r.ok;
+    escritas.fail += r.fail;
+    escritas.merged += r.merged;
+    guardadas += lote.length;
+    console.log(`   💾 guardadas ${guardadas} (${escritas.ok} ok · ${escritas.merged} fusionadas · ${escritas.fail} fallidas)`);
+  };
+
+  const conDirecto = await quedarseConLoQueReproduce(all, guardarTanda);
   console.log(`   ${conDirecto.length}/${all.length} títulos tienen url directa permanente y funcional`);
   all.length = 0;
   all.push(...conDirecto);
 
-  await latir('guardando en la base', 0, all.length);
-  const rows = all.map(it => toRow(it, withNormalized, withMetadataSource, withRichMetadata, withMultiSource));
-  let ok = 0;
-  let fail = 0;
-  let mergedCount = 0;
-  const BATCH = 50;
-  for (let i = 0; i < rows.length; i += BATCH) {
-    const chunk = rows.slice(i, i + BATCH);
-    const { error } = await db.from('media_items').upsert(chunk, { onConflict: 'id' });
-    if (!error) {
-      ok += chunk.length;
-      continue;
-    }
-    // Reintento fila a fila para aislar conflictos puntuales (p.ej. tmdb_id ya usado por otro id)
-    for (const row of chunk) {
-      const { error: rowError } = await db.from('media_items').upsert(row, { onConflict: 'id' });
-      if (!rowError) {
-        ok++;
-        continue;
-      }
-
-      if (isTmdbIdConflict(rowError.message)) {
-        const merged = await mergeIntoExisting(row, { withNormalized, withMultiSource });
-        if (merged) {
-          mergedCount++;
-          continue;
-        }
-      }
-
-      fail++;
-      console.warn(`   ⚠ ${row.id}: ${rowError.message}`);
-    }
-  }
-
   console.log(
-    `✅ Refresh completado: ${ok} filas guardadas` +
-    (mergedCount > 0 ? `, ${mergedCount} fusionadas con la ficha existente` : '') +
-    `, ${fail} fallidas`
+    `✅ Refresh completado: ${escritas.ok} filas guardadas` +
+    (escritas.merged > 0 ? `, ${escritas.merged} fusionadas con la ficha existente` : '') +
+    `, ${escritas.fail} fallidas`
   );
 
   if (streamsLimit > 0) {
