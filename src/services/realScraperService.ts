@@ -557,6 +557,59 @@ export function tituloDeArchive(crudo: string): string {
   return t || String(crudo || '').trim();
 }
 
+/**
+ * ¿ESTE ITEM ES PARA ESTE CATÁLOGO? O sea: ¿está en español latino?
+ *
+ * Faltaba, y se notó enseguida: entraron «Brat 2» (rusa) y «Приключения Буратино» (rusa también).
+ * archive.org es un archivo del mundo entero — la etiqueta `Pelicula` la pone quien sube, y la
+ * pone gente que sube cine de cualquier idioma.
+ *
+ * Se mira lo que el item DECLARA, nunca lo que parezca el título. Medido sobre 100 items de
+ * `subject:"Pelicula"`: 47 traen `language: spa`, 44 no traen nada, y el resto son `eng`, `rus`
+ * y `ger`. O sea que el campo sirve para descartar en la mitad de los casos y hay que apoyarse en
+ * el texto para la otra mitad.
+ *
+ * Tres reglas, en este orden:
+ *
+ *   1. Si DECLARA idioma y no es español, fuera. Es la señal más fuerte y la que mata a Brat 2.
+ *   2. Si no declara, tiene que haber una marca de audio español en el título, las etiquetas o la
+ *      descripción. Sin ninguna prueba de idioma NO ENTRA: es la misma regla que el año — este
+ *      archivo no da garantías, así que lo que no se puede demostrar se queda fuera.
+ *   3. Y entre los españoles, se exige LATINO: un item que se rotula «castellano» o «España» y en
+ *      ningún sitio dice latino es un doblaje de España, que no es lo que este catálogo sirve.
+ *
+ * También caen aquí los subtitulados (`VOSE`, `sub español`, `legendado`): el audio no es español
+ * aunque el texto lo sea, y «Yojimbo - Japonés-sub.español» es exactamente el caso.
+ */
+export function esEnEspanolLatino(md: any): boolean {
+  const idiomaCrudo = Array.isArray(md?.language) ? md.language.join(' ') : String(md?.language || '');
+  const idioma = idiomaCrudo.toLowerCase().trim();
+  const ES_ESPANOL = /(^|[^a-z])(spa|spanish|español|espanol|castellano|es)([^a-z]|$)/i;
+
+  // 1. Declara idioma y no es español.
+  if (idioma && !ES_ESPANOL.test(idioma)) return false;
+
+  const texto = [
+    md?.title,
+    Array.isArray(md?.subject) ? md.subject.join(' ') : md?.subject,
+    md?.description,
+  ].map(x => String(x || '')).join(' ').toLowerCase();
+
+  // Subtitulado o doblado a otra cosa: el audio no es español.
+  if (/\bvose\b|v\.o\.s|subtitulad|sub\.?\s*espa[ñn]ol|legendado|dublado|\bsubs?\b/i.test(texto)) return false;
+
+  const diceLatino = /\blatino\b|latinoam|hispanoam|\bmx\b|m[ée]xico|argentin|colombia|venezuel|chile|per[úu]/i.test(texto);
+  const diceEspanol = ES_ESPANOL.test(idioma) || /\bespa[ñn]ol\b|\bcastellano\b|\bdoblaje\b|\bdoblad[ao]\b/i.test(texto);
+
+  // 2. Sin ninguna prueba de idioma, fuera.
+  if (!diceLatino && !diceEspanol) return false;
+
+  // 3. Castellano declarado y latino en ninguna parte: es el doblaje de España.
+  if (!diceLatino && /\bcastellano\b|\bespa[ñn]a\b|\bibérico\b/i.test(texto)) return false;
+
+  return true;
+}
+
 /** La url canónica y estable de un fichero. Ver `canonicalArchiveOrg` para por qué no la del nodo. */
 export function urlDeFicheroArchive(identifier: string, nombre: string): string {
   return `${ARCHIVE_BASE}/download/${identifier}/${nombre.split('/').map(encodeURIComponent).join('/')}`;
@@ -1919,6 +1972,7 @@ export class RealScraperService {
       const clase = claseDeArchive(it?.subject);
       if (!clase || clase !== tipoPedido) continue;
       if (esPackArchive(tituloCrudo)) continue;
+      if (!esEnEspanolLatino(it)) continue;
 
       const year = anioDeArchive(tituloCrudo, String(it?.description || ''));
       if (!year) continue;
@@ -1976,7 +2030,7 @@ export class RealScraperService {
       for (let tanda = 0; items.length < limit && tanda < 200; tanda++) {
         const params = new URLSearchParams({
           q: `mediatype:movies AND subject:"${etiqueta}"`,
-          fields: 'identifier,title,subject,description',
+          fields: 'identifier,title,subject,description,language',
           count: '100',
         });
         if (cursor) params.set('cursor', cursor);
@@ -2018,7 +2072,7 @@ export class RealScraperService {
       if (salida.length >= limit) break;
       const params = new URLSearchParams({
         q: `mediatype:movies AND subject:"${par[0]}" AND title:(${termino})`,
-        fields: 'identifier,title,subject,description',
+        fields: 'identifier,title,subject,description,language',
         count: '100',
       });
       try {
@@ -2075,6 +2129,9 @@ export class RealScraperService {
     const clase = claseDeArchive(md.subject);
     if (!clase) return null;
     if (esPackArchive(tituloCrudo)) return null;
+    // El detalle trae la metadata COMPLETA, así que aquí la comprobación de idioma es más fiable
+    // que en el listado: se vuelve a hacer y no se da por buena la del listado.
+    if (!esEnEspanolLatino(md)) return null;
 
     const year = anioDeArchive(tituloCrudo, String(md.description || ''));
     if (!year) return null;
