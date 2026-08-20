@@ -130,34 +130,95 @@ const MARGEN_PARA_ESCRIBIR_MS = 30_000;
  * que adelantar.
  */
 async function sigueVivo(url: string): Promise<{ ok: boolean; motivo: string; sinVeredicto?: boolean }> {
+  /**
+   * SE JUZGA POR LAS CABECERAS, NO DESCARGANDO.
+   *
+   * Antes se pedía con `responseType: 'arraybuffer'` y se esperaba a tener los 64 KB. El problema
+   * no es el tiempo, es lo que pasa cuando el host IGNORA el rango: contesta 200 y se pone a
+   * mandar el fichero entero, así que la "comprobación" se traga decenas de megas antes de que
+   * salte el tope. Medido contra `files.eintim.me`: 19 MB en 10 s, por una comprobación.
+   *
+   * Con un stream se mira el `status` y el `Content-Range` y se cierra en el acto. Un `206` con su
+   * `Content-Range` desde el byte 1.000.000 ya demuestra las dos cosas que hay que demostrar: que
+   * el fichero está, y que el host sabe posicionarse dentro — que es lo que permite adelantar.
+   */
   const pedir = (rango: string) => streamClient.get(url, {
     headers: { Range: rango },
-    responseType: 'arraybuffer',
-    timeout: 10000,
+    responseType: 'stream',
+    /**
+     * Treinta segundos, no diez.
+     *
+     * archive.org tarda entre 10 y 25 s SOLO en el primer byte, medido hoy y de forma constante.
+     * Con el tope en 10 s todos sus ficheros caían en «sin veredicto», su sello no se renovaba
+     * nunca y acababan caducando a las 12 h — o sea que el barrido los hacía desaparecer sin
+     * llegar a comprobarlos. Y como ya no se descargan megas, un tope alto no cuesta tiempo salvo
+     * cuando el host de verdad lo gasta.
+     */
+    timeout: 30000,
     validateStatus: () => true,
     maxRedirects: 5,
   } as any);
 
-  const bastantesBytes = (r: any) => ((r.data as ArrayBuffer)?.byteLength ?? 0) / 1024 > 8;
+  /** Se cierra el stream en cuanto se ha leído lo que hacía falta: el status y las cabeceras. */
+  const cerrar = (r: any) => { try { r?.data?.destroy?.(); } catch { /* ya estaba cerrado */ } };
   const esHtml = (r: any) => /text\/html/i.test(String(r.headers['content-type'] || ''));
 
   try {
-    const r = await pedir(`bytes=${DESDE_MEDIO}-${DESDE_MEDIO + 65535}`);
+    /**
+     * HASTA TRES INTENTOS ANTES DE CONDENAR, y esto no es prudencia genérica: es lo que hace
+     * falta con los hosts que hay.
+     *
+     * `files.eintim.me` —98 servidores, la mitad del catálogo— contesta al MISMO rango de en
+     * medio `206` una vez y `200` las cinco siguientes. Con un solo intento, un barrido le quita
+     * el sello a un fichero que está perfectamente ahí. Pasó: 54 de sus servidores se quedaron
+     * sin sello y sus títulos dejaron de aparecer en la app.
+     *
+     * Tres intentos no arreglan el host —para eso está el Worker— pero evitan que su capricho se
+     * lleve por delante medio catálogo mientras tanto.
+     */
+    let ultimoMotivo = '';
+    for (let intento = 1; intento <= INTENTOS; intento++) {
+      const r = await pedir(`bytes=${DESDE_MEDIO}-${DESDE_MEDIO + 65535}`);
 
-    // Más corto que el offset: fichero pequeño. Se comprueba por el principio y ya está.
-    if (r.status === 416) {
-      const chico = await pedir('bytes=0-65535');
-      if (chico.status >= 400) return { ok: false, motivo: `http ${chico.status}` };
-      if (esHtml(chico)) return { ok: false, motivo: 'html en vez de vídeo' };
-      if (!bastantesBytes(chico)) return { ok: false, motivo: 'apenas manda bytes' };
-      return { ok: true, motivo: '' };
+      // Más corto que el offset: fichero pequeño. Se comprueba por el principio y ya está.
+      if (r.status === 416) {
+        cerrar(r);
+        const chico = await pedir('bytes=0-65535');
+        const status = chico.status;
+        const html = esHtml(chico);
+        cerrar(chico);
+        if (status >= 500) return { ok: true, motivo: `sin veredicto (http ${status})`, sinVeredicto: true };
+        if (status >= 400) return { ok: false, motivo: `http ${status}` };
+        if (html) return { ok: false, motivo: 'html en vez de vídeo' };
+        return { ok: true, motivo: '' };
+      }
+
+      const status = r.status;
+      const html = esHtml(r);
+      const rango = String(r.headers['content-range'] || '');
+      cerrar(r);
+
+      /**
+       * UN 5xx NO ES UNA BAJA: ES EL SERVIDOR CAÍDO.
+       *
+       * La regla de la casa es retirar solo con prueba EN CONTRA (FUENTES.md §7.11), y un 500,
+       * un 502 o un 503 no dicen nada sobre el fichero — dicen que el host no está pudiendo
+       * ahora mismo. archive.org los devuelve a puñados cuando va cargado, y en la primera
+       * pasada de este barrido se llevó por delante ocho títulos por eso.
+       *
+       * Lo que sí es una declaración del host sobre el recurso es un 404, un 403 o un 410. Esos
+       * retiran; los 5xx se quedan sin veredicto y se vuelven a mirar en la vuelta siguiente.
+       */
+      if (status >= 500) return { ok: true, motivo: `sin veredicto (http ${status})`, sinVeredicto: true };
+      if (status >= 400) return { ok: false, motivo: `http ${status}` };
+      if (html) return { ok: false, motivo: 'html en vez de vídeo' };
+      if (status === 206 && rango) return { ok: true, motivo: '' };
+
+      ultimoMotivo = `no sabe hacer rangos (http ${status})`;
+      // Una espera corta entre intentos: es un capricho del origen, no una carrera.
+      if (intento < INTENTOS) await new Promise(r2 => setTimeout(r2, 400 * intento));
     }
-
-    if (r.status >= 400) return { ok: false, motivo: `http ${r.status}` };
-    if (esHtml(r)) return { ok: false, motivo: 'html en vez de vídeo' };
-    if (r.status !== 206) return { ok: false, motivo: `no sabe hacer rangos (http ${r.status})` };
-    if (!bastantesBytes(r)) return { ok: false, motivo: 'apenas manda bytes' };
-    return { ok: true, motivo: '' };
+    return { ok: false, motivo: ultimoMotivo };
   } catch (e: any) {
     /**
      * UN FALLO NUESTRO NO ES UNA BAJA SUYA (FUENTES.md §7.11).
@@ -168,6 +229,9 @@ async function sigueVivo(url: string): Promise<{ ok: boolean; motivo: string; si
     return { ok: true, motivo: `sin veredicto (${e?.code || 'error'})`, sinVeredicto: true };
   }
 }
+
+/** Cuántas veces se le pregunta a un host antes de darle por incapaz de hacer rangos. */
+const INTENTOS = 3;
 
 /** Desde dónde se pide el trozo de prueba. Ver la nota de `sigueVivo`. */
 const DESDE_MEDIO = 1000000;
