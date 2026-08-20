@@ -41,9 +41,18 @@
  * ═══════════════════════════════════════════════════════════════════════════════════════════
  */
 
-/** 8 MB. Grande para que una película entera quepa en pocos cientos de trozos, y pequeño para
- *  que el primero llegue pronto: a 1,1 MB/s son unos 7 s, y el reproductor arranca con mucho menos. */
-const TROZO = 8 * 1024 * 1024;
+/**
+ * 4 MB, y bajó de 8 por una razón medida.
+ *
+ * archive.org cobra entre 10 y 25 s solo hasta el primer byte, y luego da ~1,1 MB/s. Con trozos
+ * de 8 MB, traer uno frío llegaba a los 32 s y Cloudflare cortaba la petición con un 503: la
+ * PRIMERA reproducción de cada película fallaba, y solo funcionaba a partir de la segunda, cuando
+ * el trozo ya estaba en R2.
+ *
+ * Con 4 MB el traspaso baja a la mitad. Y sobre todo, ahora la respuesta va en streaming (ver
+ * `servirConCache`), así que el reloj de la petición ya no espera a tener el trozo entero.
+ */
+const TROZO = 4 * 1024 * 1024;
 
 /** Lo que se espera como mucho al origen. archive.org tarda hasta 25 s solo en el primer byte. */
 const TOPE_ORIGEN_MS = 45_000;
@@ -122,12 +131,29 @@ async function traerTrozo(env, url, indice, ctx) {
   }
 
   if (respuesta.status === 206) {
-    const bytes = new Uint8Array(await respuesta.arrayBuffer());
+    /**
+     * SE SIRVE MIENTRAS SE GUARDA, no después.
+     *
+     * Antes esto hacía `await respuesta.arrayBuffer()`: esperaba a tener el trozo ENTERO en
+     * memoria, lo guardaba, y solo entonces contestaba. Con un origen que tarda 25 s en soltar el
+     * primer byte eso se iba a los 32 s y Cloudflare cortaba la petición con un 503 — o sea que
+     * la primera vez que alguien abría una película, fallaba; a la segunda ya iba, porque el
+     * trozo había quedado en R2 de todas formas. Un fallo que se cura solo es peor que uno
+     * constante: parece cosa de la red.
+     *
+     * `tee()` parte el stream en dos: una mitad sale hacia el reproductor en cuanto llegan los
+     * primeros bytes, la otra se va a R2 por su cuenta con `waitUntil`. Nadie espera a nadie.
+     */
     const total = totalDe(respuesta);
-    ctx.waitUntil(env.CACHE.put(llaveDe(url, indice), bytes, {
-      customMetadata: { total: String(total), visto: String(Date.now()) },
-    }));
-    return { bytes, total };
+    const [paraElCliente, paraGuardar] = respuesta.body.tee();
+
+    ctx.waitUntil(
+      env.CACHE.put(llaveDe(url, indice), paraGuardar, {
+        customMetadata: { total: String(total), visto: String(Date.now()) },
+      }).catch(() => null)
+    );
+
+    return { stream: paraElCliente, total };
   }
 
   if (respuesta.status !== 200) {
@@ -181,12 +207,18 @@ async function traerTrozo(env, url, indice, ctx) {
   return { bytes: devolver, total };
 }
 
-/** El trozo, de R2 si está y del origen si no. */
+/**
+ * El trozo, de R2 si está y del origen si no.
+ *
+ * Devuelve un STREAM y no bytes: ni siquiera lo que sale de R2 se materializa en memoria. Con
+ * trozos de 4 MB y varias reproducciones a la vez, cargarlos enteros es la forma más rápida de
+ * que el Worker se quede sin memoria por nada.
+ */
 async function trozo(env, url, indice, ctx) {
   const guardado = await env.CACHE.get(llaveDe(url, indice));
   if (guardado) {
     const total = Number(guardado.customMetadata?.total) || 0;
-    return { bytes: new Uint8Array(await guardado.arrayBuffer()), total, deCache: true };
+    return { stream: guardado.body, tamano: guardado.size, total, deCache: true };
   }
   const traido = await traerTrozo(env, url, indice, ctx);
   return { ...traido, deCache: false };
@@ -222,37 +254,51 @@ export async function servirConCache(request, env, ctx, url) {
    */
   const total = datos.total;
   const hayMas = !total || (indice + 1) * TROZO < total;
+  /*
+   * DOS TROZOS POR DELANTE, no uno.
+   *
+   * Con uno solo la cuenta salía justa y por eso se seguía notando lento: un trozo son unos 30 s
+   * de película, y traerlo de archive.org cuesta hasta 32 s entre latencia y traspaso. O sea que
+   * el adelanto llegaba al mismo tiempo que se necesitaba, y cualquier tropiezo se veía como un
+   * parón.
+   *
+   * Con dos hay un trozo entero de colchón. Y como los dos se piden a la vez, la latencia se paga
+   * UNA sola vez para los dos — medido: cuatro peticiones en paralelo a archive.org traen 1 MB en
+   * 11,7 s contra 24,8 s de una sola.
+   */
   if (hayMas) {
-    ctx.waitUntil(
-      env.CACHE.head(llaveDe(url, indice + 1))
-        .then(existe => (existe ? null : traerTrozo(env, url, indice + 1, ctx)))
-        .catch(() => null)
-    );
+    for (const siguiente of [indice + 1, indice + 2]) {
+      if (total && siguiente * TROZO >= total) break;
+      ctx.waitUntil(
+        env.CACHE.head(llaveDe(url, siguiente))
+          .then(existe => (existe ? null : traerTrozo(env, url, siguiente, ctx)))
+          .catch(() => null)
+      );
+    }
   }
 
   /**
-   * Se recorta al rango que de verdad se pidió dentro del trozo.
+   * SE CONTESTA CON EL STREAM TAL CUAL, sin recortar.
    *
-   * Si el cliente puso final (`bytes=A-B`) se respeta, y si no lo puso —que es lo que hace
-   * ExoPlayer casi siempre, `bytes=A-`— se le manda el trozo hasta el final. Devolverle 8 MB a
-   * quien pidió 64 KB no es un error de protocolo, pero sí son bytes que nadie usa, y sobre una
-   * conexión móvil eso se nota.
+   * El trozo empieza donde el reproductor pidió o antes, y el `Content-Range` dice exactamente
+   * qué tramo va dentro. Un cliente HTTP sabe leer eso y quedarse con lo que necesita — es lo
+   * mismo que hace cualquier CDN cuando te sirve un bloque alineado.
+   *
+   * Recortar obligaría a tener el trozo entero en memoria para cortarlo, que es justo lo que
+   * causaba los 503 en la primera reproducción. Servir de más cuesta unos megas; servir tarde
+   * cuesta la película.
    */
   const inicioTrozo = indice * TROZO;
-  const offset = Math.max(0, desde - inicioTrozo);
-  const finPedido = hasta !== null ? hasta - inicioTrozo + 1 : datos.bytes.length;
-  const cuerpo = datos.bytes.slice(offset, Math.min(finPedido, datos.bytes.length));
-  const primerByte = inicioTrozo + offset;
-  const ultimoByte = primerByte + cuerpo.length - 1;
+  const tamano = datos.tamano ?? (total ? Math.min(TROZO, total - inicioTrozo) : TROZO);
+  const ultimoByte = inicioTrozo + tamano - 1;
 
   const cabeceras = {
     ...CORS,
     'Content-Type': 'video/mp4',
     'Accept-Ranges': 'bytes',
-    'Content-Length': String(cuerpo.length),
-    'Content-Range': `bytes ${primerByte}-${ultimoByte}/${total || '*'}`,
+    'Content-Range': `bytes ${inicioTrozo}-${ultimoByte}/${total || '*'}`,
     'X-Cache': datos.deCache ? 'HIT' : 'MISS',
   };
 
-  return new Response(cuerpo, { status: 206, headers: cabeceras });
+  return new Response(datos.stream, { status: 206, headers: cabeceras });
 }

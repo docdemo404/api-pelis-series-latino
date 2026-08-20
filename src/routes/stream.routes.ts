@@ -3,7 +3,7 @@ import { Transform, TransformCallback } from 'stream';
 import { ResolverService } from '../services/resolverService';
 import { BandwidthService } from '../services/bandwidthService';
 import { mintDirect, MintedStream } from '../services/directResolver';
-import { decodeEmbedParam, tokenExpirySeconds, hasVolatileToken } from '../scrapers/directStream';
+import { decodeEmbedParam, tokenExpirySeconds, hasVolatileToken, esUrlDeFicheroPermanente } from '../scrapers/directStream';
 import { bestMode, policyFor } from '../scrapers/hostPolicy';
 import { DirectMode } from '../types';
 import { sendErrorResponse } from '../utils/apiHelpers';
@@ -13,7 +13,7 @@ import { USER_AGENT, streamClient } from '../utils/httpClient';
 import { inicioDelTs } from '../utils/segmentBytes';
 import { destinoSirveCors } from '../services/manifestHealth';
 import { comprobarDestino, anotarVeredicto } from '../services/playbackHealth';
-import { externalProxyEnabled, proxyUrlFor } from '../utils/externalProxy';
+import { externalProxyEnabled, proxyUrlFor, cacheUrlFor } from '../utils/externalProxy';
 import { getSupabaseAdmin } from '../services/supabaseService';
 
 /**
@@ -782,6 +782,29 @@ router.get([DIRECT_BASE, `${DIRECT_BASE}/v.mp4`, `${DIRECT_BASE}/v.m3u8`], async
      * gastar.
      */
     if (mode === 'proxy' && externalProxyEnabled()) {
+      /**
+       * SI YA SABEMOS CUÁL ES EL FICHERO, SE LE MANDA EL FICHERO — no el embed.
+       *
+       * La delegación de abajo le pasa al Worker el EMBED para que lo acuñe él, y para los hosts
+       * atados por IP eso es lo único que funciona. Pero el Worker solo entiende los embeds que
+       * su propio extractor conoce, y hay uno que no: el envoltorio de FuegoCine
+       * (`blogspot.com/?…&link=…`). Contestaba «no se pudo extraer el vídeo de este embed» tras 42
+       * segundos, y el reproductor se quedaba sin salida.
+       *
+       * Y era absurdo, porque ESTA API sí sabe resolverlo — su modo `redirect` lo hace bien. Si el
+       * acuñado ya está hecho aquí, mandarle al Worker el resultado en vez del enigma es más
+       * rápido y además le da acceso a la caché por trozos, que es lo que arregla los rangos rotos
+       * de ese host.
+       *
+       * Se descubrió con «Misión Rescate»: url bloqueada por el DNS del aparato, respaldo por
+       * proxy, y 502 al final del camino.
+       */
+      const yaAcunado = minted?.url;
+      if (yaAcunado && esUrlDeFicheroPermanente(yaAcunado)) {
+        const porLaCache = cacheUrlFor(yaAcunado);
+        if (porLaCache) return sendRedirect(res, porLaCache);
+      }
+
       const externa = proxyUrlFor(embedUrl);
       if (externa) return sendRedirect(res, externa);
     }
