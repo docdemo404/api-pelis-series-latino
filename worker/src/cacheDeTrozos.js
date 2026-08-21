@@ -77,7 +77,13 @@ const CORS = {
  */
 function llaveDe(url, indice) {
   const id = btoa(url).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-  return `v1/${id}/${String(indice).padStart(6, '0')}`;
+  /*
+   * `v2` y no `v1`: hubo una tanda de trozos escritos con el tamaño de fichero equivocado (ver
+   * `relevarDelOrigen`). Un apunte malo en la caché no se cura solo ni se va con un despliegue, y
+   * salir a borrarlos uno a uno es más frágil que dejarlos morir olvidados. Cambiar el prefijo los
+   * jubila de golpe; lo único que cuesta es volver a calentar la caché.
+   */
+  return `v2/${id}/${String(indice).padStart(6, '0')}`;
 }
 
 /** El rango que pide el cliente, o el trozo cero si no pide ninguno. */
@@ -269,6 +275,19 @@ async function pedirAlOrigen(url, desde, hasta) {
  * todos los desplazamientos y el vídeo saldría corrupto.
  */
 async function relevarDelOrigen(env, ctx, url, respuesta, escritor, posInicial, saltar, totalFichero) {
+  /*
+   * `totalFichero` ES EL TAMAÑO DEL FICHERO, no el final del rango que se pidió. La diferencia
+   * parece de matiz y envenena la caché entera.
+   *
+   * Aquí se pasaba `hasta + 1`, que en un rango ABIERTO da el tamaño bueno — y por eso pasó
+   * desapercibido. Pero en un rango ACOTADO da el final de ESE rango: una sola petición de
+   * `bytes=0-65535` dejaba escrito en R2 que la película medía 65.536 bytes. A partir de ahí toda
+   * petición leía ese apunte, contestaba `Content-Range: bytes 0-65535/65536`, y el reproductor
+   * se encontraba con una película de 64 KB. Lo destapó «El diario íntimo de una cabaretera».
+   *
+   * Un dato equivocado en la caché es peor que no tener caché: sobrevive a los despliegues y no
+   * se cura solo.
+   */
   let porTirar = saltar;
   let indiceBuffer = Math.floor(posInicial / TROZO);
   const alineado = posInicial % TROZO === 0;
@@ -334,7 +353,7 @@ async function relevarDelOrigen(env, ctx, url, respuesta, escritor, posInicial, 
  * Una, no una por trozo: el plan gratuito cuenta subpeticiones y quinientas no caben en ningún
  * límite.
  */
-function cuerpoContinuo(env, url, desde, hasta, ctx, respuestaYaAbierta, saltarDeEsa) {
+function cuerpoContinuo(env, url, desde, hasta, ctx, respuestaYaAbierta, saltarDeEsa, totalFichero) {
   const { readable, writable } = new TransformStream();
 
   const bombear = async () => {
@@ -343,7 +362,7 @@ function cuerpoContinuo(env, url, desde, hasta, ctx, respuestaYaAbierta, saltarD
       if (respuestaYaAbierta) {
         // Ya se pidió al origen ahí arriba para saber el tamaño; se aprovecha esa misma
         // respuesta en vez de volver a llamar.
-        await relevarDelOrigen(env, ctx, url, respuestaYaAbierta, escritor, desde, saltarDeEsa, hasta + 1);
+        await relevarDelOrigen(env, ctx, url, respuestaYaAbierta, escritor, desde, saltarDeEsa, totalFichero);
       } else {
         let pos = desde;
 
@@ -366,7 +385,7 @@ function cuerpoContinuo(env, url, desde, hasta, ctx, respuestaYaAbierta, saltarD
             throw new Error('origen ' + (respuesta ? respuesta.status : 'sin respuesta'));
           }
           const saltar = respuesta.status === 200 ? pos : 0;
-          await relevarDelOrigen(env, ctx, url, respuesta, escritor, pos, saltar, hasta + 1);
+          await relevarDelOrigen(env, ctx, url, respuesta, escritor, pos, saltar, totalFichero);
         }
       }
     } catch (e) {
@@ -455,8 +474,43 @@ export async function servirConCache(request, env, ctx, url) {
    * segunda petición se encuentra la caché caliente y arranca al momento. Es exactamente el hueco
    * de tiempo que había que aprovechar, y estaba desaprovechado.
    */
-  for (const siguiente of [indiceActual + 1, indiceActual + 2]) {
-    if (siguiente * TROZO >= total) break;
+  const porDelante = [indiceActual + 1, indiceActual + 2];
+
+  /**
+   * Y LA COLA DEL FICHERO, cuando se está abriendo por el principio.
+   *
+   * Un mp4 puede llevar su índice `moov` al principio —«faststart»— o AL FINAL. Los de archive.org
+   * suelen llevarlo al final: se comprobó en «El diario íntimo de una cabaretera», cuyas primeras
+   * cajas son `ftyp`, `free` y un `mdat` de 863 MB. No hay índice por delante.
+   *
+   * Con eso, lo primero que hace el reproductor es SALTAR AL FINAL a buscarlo. Ese salto cae a 869
+   * MB de distancia, o sea en un trozo frío, o sea en una petición a archive.org que tarda entre
+   * 10 y 25 s en dar el primer byte. Y como el índice no cabe en un solo trozo, ese peaje se paga
+   * varias veces antes de que se vea un solo fotograma. La película se quedaba sin abrir.
+   *
+   * Traer los dos últimos trozos MIENTRAS el reproductor lee la cabecera cuesta dos peticiones y
+   * convierte ese salto en una lectura de caché. Solo se hace al abrir por el principio: en un
+   * salto a mitad de película no hay ninguna razón para pensar que alguien va a querer el final.
+   */
+  if (indiceActual === 0) {
+    /*
+     * CUATRO TROZOS DE COLA, y no dos. Con dos seguía sin arrancar, y la cuenta dice por qué: en
+     * «El diario íntimo de una cabaretera» el `mdat` acaba en el byte 863.099.777 de 869.670.784,
+     * o sea que el índice ocupa los últimos 6,5 MB — más de lo que caben en dos trozos de 4. El
+     * reproductor leía la parte precargada y se caía a un trozo frío justo en medio del índice.
+     *
+     * Cuatro son 16 MB, con margen para los índices de una película larga. Solo se traen al abrir
+     * por el principio, así que es una vez por película y no por reproducción.
+     */
+    const ultimoTrozo = Math.floor((total - 1) / TROZO);
+    for (let n = 0; n < 4; n++) {
+      const cola = ultimoTrozo - n;
+      if (cola > indiceActual + 2) porDelante.push(cola);
+    }
+  }
+
+  for (const siguiente of porDelante) {
+    if (siguiente < 0 || siguiente * TROZO >= total) continue;
     ctx.waitUntil(
       env.CACHE.head(llaveDe(url, siguiente))
         .then(existe => (existe ? null : traerTrozo(env, url, siguiente, ctx)))
@@ -464,7 +518,7 @@ export async function servirConCache(request, env, ctx, url) {
     );
   }
 
-  return new Response(cuerpoContinuo(env, url, desde, ultimo, ctx, respuestaYaAbierta, saltarDeEsa), {
+  return new Response(cuerpoContinuo(env, url, desde, ultimo, ctx, respuestaYaAbierta, saltarDeEsa, total), {
     status: 206,
     headers: {
       ...CORS,
