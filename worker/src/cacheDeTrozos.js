@@ -229,6 +229,159 @@ async function trozo(env, url, indice, ctx) {
  *
  * `url` ya viene validada y firmada por quien llama.
  */
+/**
+ * Cuántos trozos se dejan escritos en R2 mientras se sirve la cola desde el origen.
+ *
+ * Hay tope porque cada escritura cuenta como subpetición y el plan gratuito da pocas. Doce trozos
+ * son ~48 MB: bastante para que la próxima vez el arranque y los primeros minutos salgan de la
+ * caché, que es donde se nota la espera.
+ */
+const TROZOS_QUE_SE_GUARDAN = 12;
+
+/** Vuelca un stream en el escritor, respetando la contrapresión. */
+async function volcar(origen, escritor) {
+  const lector = origen.getReader();
+  for (;;) {
+    const { done, value } = await lector.read();
+    if (done) return;
+    await escritor.write(value);
+  }
+}
+
+/** Pide al origen desde `desde` hasta `hasta`, insistiendo si contesta 5xx. */
+async function pedirAlOrigen(url, desde, hasta) {
+  const rango = 'bytes=' + desde + '-' + (hasta === null ? '' : hasta);
+  let respuesta = null;
+  for (let intento = 1; intento <= INTENTOS_ORIGEN; intento++) {
+    respuesta = await fetch(url, { headers: { 'User-Agent': UA, Range: rango } });
+    if (respuesta.status < 500) break;
+    if (respuesta.body) respuesta.body.cancel();
+    if (intento < INTENTOS_ORIGEN) await new Promise(r => setTimeout(r, 500 * intento));
+  }
+  return respuesta;
+}
+
+/**
+ * Escribe en `escritor` los bytes de una respuesta del origen, y de paso llena trozos en R2.
+ *
+ * `saltar` es para cuando el origen ignora el `Range` y manda desde el principio: el
+ * `Content-Range` que ya se anunció dice dónde empieza esto, así que colar bytes de más correría
+ * todos los desplazamientos y el vídeo saldría corrupto.
+ */
+async function relevarDelOrigen(env, ctx, url, respuesta, escritor, posInicial, saltar, totalFichero) {
+  let porTirar = saltar;
+  let indiceBuffer = Math.floor(posInicial / TROZO);
+  const alineado = posInicial % TROZO === 0;
+  let acumulado = [];
+  let acumuladoBytes = 0;
+  let guardados = 0;
+
+  const lector = respuesta.body.getReader();
+  for (;;) {
+    const { done, value } = await lector.read();
+    if (done) break;
+    let util = value;
+    if (porTirar > 0) {
+      if (porTirar >= util.length) { porTirar -= util.length; continue; }
+      util = util.subarray(porTirar);
+      porTirar = 0;
+    }
+    await escritor.write(util);
+
+    // Solo se guarda si esto empieza justo en un borde de trozo. Si no, lo escrito no cuadraría
+    // con lo que `llaveDe` promete y la caché mentiría.
+    if (alineado && guardados < TROZOS_QUE_SE_GUARDAN) {
+      acumulado.push(util);
+      acumuladoBytes += util.length;
+      while (acumuladoBytes >= TROZO && guardados < TROZOS_QUE_SE_GUARDAN) {
+        const junto = new Uint8Array(acumuladoBytes);
+        let o = 0;
+        for (const t of acumulado) { junto.set(t, o); o += t.length; }
+        const entero = junto.slice(0, TROZO);
+        const resto = junto.slice(TROZO);
+        ctx.waitUntil(
+          env.CACHE.put(llaveDe(url, indiceBuffer), entero, {
+            customMetadata: { total: String(totalFichero), visto: String(Date.now()) },
+          }).catch(() => null)
+        );
+        indiceBuffer++;
+        guardados++;
+        acumulado = resto.length ? [resto] : [];
+        acumuladoBytes = resto.length;
+      }
+    }
+  }
+}
+
+/**
+ * SIRVE DESDE `desde` HASTA `hasta`, SIN CORTAR EN EL TROZO.
+ *
+ * Aquí estaba el fallo que rompía la reproducción entera, y era mío: se contestaba UN trozo y se
+ * cerraba. Parecía correcto porque el `Content-Range` decía la verdad —qué tramo iba dentro y
+ * cuánto medía el fichero entero— y cualquier cliente educado habría pedido el siguiente.
+ *
+ * media3 no lo hace. Cuando pide `bytes=N-` sin final, toma el `Content-Length` de la respuesta
+ * como el tamaño del RECURSO: lee esos 4 MB, se le acaban, y da la película por terminada. Ni
+ * error ni reintento — se acabó, y el reproductor salta al final.
+ *
+ * Y encaja con todo lo que se venía viendo sin explicación: 4 MB son unos diez segundos de
+ * película, y «Misión Rescate» moría exactamente a los 10,875 s. Lo que parecía un CDN lento o un
+ * host caído era esto. En «Destino final» ni siquiera arrancaba: su índice `moov` pesa 7,5 MB, o
+ * sea que con 4 MB el reproductor no llegaba nunca a saber cuánto duraba ni dónde estaba nada.
+ *
+ * Ahora la respuesta va HASTA EL FINAL, en dos tramos: primero los trozos que ya están en R2 —el
+ * arranque instantáneo— y cuando falta uno, UNA sola petición al origen desde ahí hasta el final.
+ * Una, no una por trozo: el plan gratuito cuenta subpeticiones y quinientas no caben en ningún
+ * límite.
+ */
+function cuerpoContinuo(env, url, desde, hasta, ctx, respuestaYaAbierta, saltarDeEsa) {
+  const { readable, writable } = new TransformStream();
+
+  const bombear = async () => {
+    const escritor = writable.getWriter();
+    try {
+      if (respuestaYaAbierta) {
+        // Ya se pidió al origen ahí arriba para saber el tamaño; se aprovecha esa misma
+        // respuesta en vez de volver a llamar.
+        await relevarDelOrigen(env, ctx, url, respuestaYaAbierta, escritor, desde, saltarDeEsa, hasta + 1);
+      } else {
+        let pos = desde;
+
+        // --- tramo 1: lo que ya está en casa ---
+        while (pos <= hasta) {
+          const indice = Math.floor(pos / TROZO);
+          const inicioTrozo = indice * TROZO;
+          const guardado = await env.CACHE.get(llaveDe(url, indice), {
+            range: { offset: pos - inicioTrozo },
+          }).catch(() => null);
+          if (!guardado || !guardado.body) break;
+          await volcar(guardado.body, escritor);
+          pos = inicioTrozo + TROZO;
+        }
+
+        // --- tramo 2: el resto, del origen, de una sola vez ---
+        if (pos <= hasta) {
+          const respuesta = await pedirAlOrigen(url, pos, hasta);
+          if (!respuesta || !respuesta.ok || !respuesta.body) {
+            throw new Error('origen ' + (respuesta ? respuesta.status : 'sin respuesta'));
+          }
+          const saltar = respuesta.status === 200 ? pos : 0;
+          await relevarDelOrigen(env, ctx, url, respuesta, escritor, pos, saltar, hasta + 1);
+        }
+      }
+    } catch (e) {
+      // Las cabeceras salieron hace rato, así que no se puede cambiar el status: se corta, y el
+      // reproductor lo trata como lo que es — una descarga interrumpida.
+      await escritor.abort(e).catch(() => {});
+      return;
+    }
+    await escritor.close().catch(() => {});
+  };
+
+  ctx.waitUntil(bombear());
+  return readable;
+}
+
 export async function servirConCache(request, env, ctx, url) {
   if (!env.CACHE) {
     // Sin bucket configurado esto no puede funcionar; se dice claro en vez de fallar raro.
@@ -236,69 +389,90 @@ export async function servirConCache(request, env, ctx, url) {
   }
 
   const { desde, hasta } = rangoPedido(request.headers.get('Range'));
-  const indice = Math.floor(desde / TROZO);
-
-  let datos;
-  try {
-    datos = await trozo(env, url, indice, ctx);
-  } catch (e) {
-    return new Response(`no se pudo traer el vídeo: ${e.message}`, { status: 502, headers: CORS });
-  }
+  const indiceActual = Math.floor(desde / TROZO);
 
   /**
-   * LECTURA POR DELANTE: el trozo siguiente se empieza a traer ahora.
+   * EL TAMAÑO SE AVERIGUA SIN GASTAR UN VIAJE DE MÁS.
    *
-   * Es lo que esconde la latencia del origen. Mientras el reproductor consume estos 8 MB —unos
-   * 30 s de película— el siguiente ya se está descargando, así que cuando lo pida ya estará en
-   * R2. Va con `waitUntil` para que el Worker no espere: la respuesta de ahora no se retrasa.
+   * Hay que saber cuánto mide el fichero ANTES de contestar, porque el `Content-Range` lo lleva.
+   * La primera versión lo preguntaba con una petición aparte (`bytes=0-0`) y eso costó la
+   * reproducción: archive.org tarda entre 10 y 25 s en contestar CUALQUIER cosa, así que la
+   * cabecera salía a los 25 s y el reproductor ya se había ido al siguiente servidor.
+   *
+   * Si el primer trozo está en caché, el tamaño está anotado ahí y no se toca la red. Si no está,
+   * se hace la petición que hacía falta de todas formas —la de los bytes— y se le saca el tamaño
+   * a su `Content-Range`. Un viaje, no dos.
    */
-  const total = datos.total;
-  const hayMas = !total || (indice + 1) * TROZO < total;
-  /*
-   * DOS TROZOS POR DELANTE, no uno.
-   *
-   * Con uno solo la cuenta salía justa y por eso se seguía notando lento: un trozo son unos 30 s
-   * de película, y traerlo de archive.org cuesta hasta 32 s entre latencia y traspaso. O sea que
-   * el adelanto llegaba al mismo tiempo que se necesitaba, y cualquier tropiezo se veía como un
-   * parón.
-   *
-   * Con dos hay un trozo entero de colchón. Y como los dos se piden a la vez, la latencia se paga
-   * UNA sola vez para los dos — medido: cuatro peticiones en paralelo a archive.org traen 1 MB en
-   * 11,7 s contra 24,8 s de una sola.
-   */
-  if (hayMas) {
-    for (const siguiente of [indice + 1, indice + 2]) {
-      if (total && siguiente * TROZO >= total) break;
-      ctx.waitUntil(
-        env.CACHE.head(llaveDe(url, siguiente))
-          .then(existe => (existe ? null : traerTrozo(env, url, siguiente, ctx)))
-          .catch(() => null)
-      );
+  const cabeza = await env.CACHE.head(llaveDe(url, indiceActual)).catch(() => null);
+  const anotado = Number(cabeza && cabeza.customMetadata && cabeza.customMetadata.total);
+
+  let total = Number.isFinite(anotado) && anotado > 0 ? anotado : 0;
+  let respuestaYaAbierta = null;
+  let saltarDeEsa = 0;
+
+  if (!total) {
+    const respuesta = await pedirAlOrigen(url, desde, hasta);
+    if (!respuesta || !respuesta.ok || !respuesta.body) {
+      return new Response('el origen no sirvió el vídeo: ' + (respuesta ? respuesta.status : 'sin respuesta'), {
+        status: 502,
+        headers: CORS,
+      });
     }
+    total = totalDe(respuesta);
+    // Con un 200 el `Content-Length` es el fichero entero contando desde cero, así que el total
+    // es ese; y hay que tirar todo lo anterior a `desde`.
+    if (respuesta.status === 200) saltarDeEsa = desde;
+    if (!total) {
+      if (respuesta.body) respuesta.body.cancel();
+      return new Response('el origen no dice cuánto mide el fichero', { status: 502, headers: CORS });
+    }
+    respuestaYaAbierta = respuesta;
   }
 
+  if (desde >= total) {
+    if (respuestaYaAbierta && respuestaYaAbierta.body) respuestaYaAbierta.body.cancel();
+    return new Response('rango fuera del fichero', {
+      status: 416,
+      headers: { ...CORS, 'Content-Range': 'bytes */' + total },
+    });
+  }
+
+  const ultimo = hasta === null ? total - 1 : Math.min(hasta, total - 1);
+
   /**
-   * SE CONTESTA CON EL STREAM TAL CUAL, sin recortar.
+   * LECTURA POR DELANTE, Y AHORA TAMBIÉN EN EL CAMINO FRÍO — que es donde hacía falta.
    *
-   * El trozo empieza donde el reproductor pidió o antes, y el `Content-Range` dice exactamente
-   * qué tramo va dentro. Un cliente HTTP sabe leer eso y quedarse con lo que necesita — es lo
-   * mismo que hace cualquier CDN cuando te sirve un bloque alineado.
+   * La había quitado del camino frío razonando que esta misma petición ya iba a llenar los trozos
+   * al pasar. Era falso, y el aparato lo dejó claro: en un mp4 grande el reproductor lee el ÍNDICE
+   * y se detiene ahí. Medido, entraron 7.346 KB —el tamaño exacto del `moov` de esa película— y ni
+   * un byte más: leído el índice, media3 cierra esa petición y abre otra en el punto donde empieza
+   * el vídeo de verdad.
    *
-   * Recortar obligaría a tener el trozo entero en memoria para cortarlo, que es justo lo que
-   * causaba los 503 en la primera reproducción. Servir de más cuesta unos megas; servir tarde
-   * cuesta la película.
+   * O sea que la petición que importa es la SEGUNDA, y llegaba a un archive.org frío que tarda
+   * entre 10 y 25 s en soltar el primer byte. La película se quedaba sin abrir por eso.
+   *
+   * Trayendo los dos trozos siguientes MIENTRAS el reproductor está ocupado leyendo el índice, esa
+   * segunda petición se encuentra la caché caliente y arranca al momento. Es exactamente el hueco
+   * de tiempo que había que aprovechar, y estaba desaprovechado.
    */
-  const inicioTrozo = indice * TROZO;
-  const tamano = datos.tamano ?? (total ? Math.min(TROZO, total - inicioTrozo) : TROZO);
-  const ultimoByte = inicioTrozo + tamano - 1;
+  for (const siguiente of [indiceActual + 1, indiceActual + 2]) {
+    if (siguiente * TROZO >= total) break;
+    ctx.waitUntil(
+      env.CACHE.head(llaveDe(url, siguiente))
+        .then(existe => (existe ? null : traerTrozo(env, url, siguiente, ctx)))
+        .catch(() => null)
+    );
+  }
 
-  const cabeceras = {
-    ...CORS,
-    'Content-Type': 'video/mp4',
-    'Accept-Ranges': 'bytes',
-    'Content-Range': `bytes ${inicioTrozo}-${ultimoByte}/${total || '*'}`,
-    'X-Cache': datos.deCache ? 'HIT' : 'MISS',
-  };
-
-  return new Response(datos.stream, { status: 206, headers: cabeceras });
+  return new Response(cuerpoContinuo(env, url, desde, ultimo, ctx, respuestaYaAbierta, saltarDeEsa), {
+    status: 206,
+    headers: {
+      ...CORS,
+      'Content-Type': 'video/mp4',
+      'Accept-Ranges': 'bytes',
+      'Content-Range': 'bytes ' + desde + '-' + ultimo + '/' + total,
+      'Content-Length': String(ultimo - desde + 1),
+      'X-Cache': respuestaYaAbierta ? 'MISS' : 'HIT',
+    },
+  });
 }
