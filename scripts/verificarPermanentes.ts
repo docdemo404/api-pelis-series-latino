@@ -47,6 +47,7 @@
  */
 import 'dotenv/config';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
+import { puedeAbrirse } from '../src/services/arranqueMp4';
 import { streamClient } from '../src/utils/httpClient';
 import { CacheStore } from '../src/cache/store';
 import { CatalogService } from '../src/services/catalogService';
@@ -316,7 +317,16 @@ function permanentesDe(fila: any): Array<{ sv: any; donde: string }> {
   return salida;
 }
 
-const cuenta = { miradas: 0, vivas: 0, retiradas: 0, sinVeredicto: 0, fichas: 0, dejanDeAnunciarse: 0, purgados: 0 };
+/**
+ * Cuántos veredictos CONCLUYENTES de «no arranca» hacen falta para retirar.
+ *
+ * Dos. Uno es demasiado poco: los orígenes tienen malos ratos y este catálogo ya se quedó una vez
+ * a la mitad por condenar a la primera. Tres sería seguir anunciando una hora larga algo que no se
+ * puede ver, que es justo lo que hay que evitar.
+ */
+const GOLPES_PARA_RETIRAR = 2;
+
+const cuenta = { miradas: 0, vivas: 0, retiradas: 0, sinVeredicto: 0, fichas: 0, dejanDeAnunciarse: 0, purgados: 0, arranques: 0, noArrancan: 0, primerAviso: 0, arranqueSinVeredicto: 0 };
 /** Los listados se purgan la PRIMERA vez que algo se retira, no una vez por ficha. */
 let listadosPurgados = false;
 
@@ -431,11 +441,55 @@ async function guardarFicha(fila: any): Promise<void> {
       if (r.sinVeredicto) {
         cuenta.sinVeredicto++;
       } else if (r.ok) {
-        cuenta.vivas++;
-        // Sello fresco: es lo que mantiene la ficha anunciada sin depender de una ventana larga.
-        sv.verified_at = new Date().toISOString();
-        sv.status = 'online';
-        cambiadas.add(fila.id);
+        /**
+         * EL FICHERO ESTÁ. ¿PERO SE PUEDE ABRIR?
+         *
+         * Son dos preguntas distintas y hasta ahora solo se hacía la primera. `sigueVivo` demuestra
+         * que el fichero existe y que el host sabe posicionarse dentro, y eso está bien — pero no
+         * demuestra que alguien pueda darle a Ver y ver algo. Un mp4 no se abre sin su índice, y
+         * ese índice puede pesar seis megas, puede estar AL FINAL del fichero, o puede no estar
+         * entero. En los tres casos el rango contesta 206 y la pantalla se queda en negro.
+         *
+         * Se midió: de 21 fichas de archive.org que el catálogo daba por buenas, un tercio no
+         * llegaba a abrir. Todas tenían su sello.
+         *
+         * DOS BARRIDOS ANTES DE RETIRAR, y esa es la parte importante. Un solo mal rato no puede
+         * retirar una película: ya pasó una vez —54 servidores desellados de golpe por un host que
+         * contestaba mal una de cada seis veces— y vaciar el catálogo por impaciencia es peor que
+         * dejar pasar un título dudoso. Y solo cuentan los veredictos CONCLUYENTES: si el origen no
+         * contestó a tiempo no se sabe nada, y no saber no es un golpe.
+         */
+        const arranque = await puedeAbrirse(String(sv.direct_stream));
+        cuenta.arranques++;
+
+        if (arranque.ok) {
+          cuenta.vivas++;
+          delete sv.fallos_arranque;
+          // Sello fresco: es lo que mantiene la ficha anunciada sin depender de una ventana larga.
+          sv.verified_at = new Date().toISOString();
+          sv.status = 'online';
+          cambiadas.add(fila.id);
+        } else if (arranque.sinVeredicto) {
+          // No se pudo concluir: se deja como estaba. Ni sello nuevo ni golpe.
+          cuenta.arranqueSinVeredicto++;
+        } else {
+          const golpes = Number(sv.fallos_arranque || 0) + 1;
+          sv.fallos_arranque = golpes;
+          cambiadas.add(fila.id);
+
+          if (golpes >= GOLPES_PARA_RETIRAR) {
+            cuenta.noArrancan++;
+            delete sv.verified_at;
+            sv.status = 'offline';
+            sv.last_checked = new Date().toISOString();
+            console.log(`   ⊘ ${String(fila.title).slice(0, 38).padEnd(38)} [${donde}] no arranca (${arranque.causa}: ${arranque.detalle})`);
+          } else {
+            cuenta.primerAviso++;
+            // Sigue anunciada: un golpe no retira. Pero tampoco se le renueva el sello, para que
+            // si el problema es de verdad acabe caducando aunque el barrido no vuelva a pasar.
+            console.log(`   … ${String(fila.title).slice(0, 38).padEnd(38)} [${donde}] primer aviso (${arranque.causa})`);
+          }
+        }
       } else {
         cuenta.retiradas++;
         // Se le quita el SELLO, no la url: la vuelta siguiente lo mira otra vez y puede absolver.
@@ -463,6 +517,13 @@ async function guardarFicha(fila: any): Promise<void> {
     `\n✅ ${cuenta.miradas} urls de ${cuenta.fichas} fichas · ${cuenta.vivas} siguen · ` +
     `${cuenta.retiradas} retiradas` + (cuenta.sinVeredicto ? ` · ${cuenta.sinVeredicto} sin veredicto (no se tocan)` : '')
   );
+  if (cuenta.arranques) {
+    console.log(
+      `   ${cuenta.arranques} arranques probados · ${cuenta.noArrancan} retirados por no abrir · ` +
+      `${cuenta.primerAviso} con un aviso` +
+      (cuenta.arranqueSinVeredicto ? ` · ${cuenta.arranqueSinVeredicto} sin veredicto` : '')
+    );
+  }
   if (cuenta.purgados) console.log(`   ${cuenta.purgados} servidor(es) borrados por venir de un host que ya no se acepta.`);
   if (cuenta.dejanDeAnunciarse) console.log(`   ${cuenta.dejanDeAnunciarse} título(s) dejan de anunciarse.`);
   if (!apply) console.log(`\n   (ensayo — con --apply se escribe)`);

@@ -1922,7 +1922,21 @@ export class CatalogService {
   static toPublicItem<T extends Record<string, any>>(item: T): T {
     const { _source_url, _source_urls, _tioplus_url, ...rest } = item as any;
     if (Array.isArray(rest.servers)) {
-      rest.servers = paraElCliente(rest.servers);
+      /**
+       * SE ORDENA AL SERVIR, NO SOLO AL GUARDAR.
+       *
+       * El orden estaba fosilizado: se calculaba al escribir la ficha y a partir de ahí se
+       * entregaba tal cual, así que cambiar una regla de orden no cambiaba nada hasta volver a
+       * rastrear el catálogo entero. Se vio con «Gladiformers»: se añadió la regla de preferir el
+       * `.mp4` al `.mkv` del mismo item, el comparador la aplicaba bien en aislado, y la API seguía
+       * entregando el mkv primero — porque venía de la caché con el orden viejo dentro.
+       *
+       * El orden es una decisión de ENTREGA, no un dato del catálogo: depende de qué está
+       * verificado hoy, de qué modo se puede usar hoy y de qué host va bien hoy. Guardarlo era
+       * confundir las dos cosas. Ordenar aquí cuesta un `sort` sobre una lista de dos o tres
+       * elementos y hace que cualquier regla nueva valga desde el primer despliegue.
+       */
+      rest.servers = paraElCliente(sortServersBySourcePriority(rest.servers));
       rest.primary_stream = getPrimaryStream(rest.servers) || null;
     } else if (rest.primary_stream) {
       rest.primary_stream = paraElCliente([rest.primary_stream])[0] || null;

@@ -2,7 +2,7 @@ import { ServerOption, DirectMode } from '../types';
 import { SourceManager, SourceConfig } from './sourceManager';
 import { bestMode } from '../scrapers/hostPolicy';
 import { directEndpointUrl, isPubliclyShareable, esFicheroDirecto, ficheroPermanenteDentroDelEmbed } from '../scrapers/directStream';
-import { cacheUrlFor } from '../utils/externalProxy';
+import { cacheUrlFor, ficheroDentroDeNuestraCache } from '../utils/externalProxy';
 
 /**
  * ¿Esta URL se puede entregar TAL CUAL, sin pasar por esta API?
@@ -318,17 +318,47 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
   // `direct_stream` a una ficha vieja cuando lo encuentra: en los dos casos el tipo real solo se
   // sabe con certeza aquí. No se muta el original —el caché en memoria entrega la misma
   // referencia en cada acierto—, se clona solo lo que cambia.
+  /**
+   * El contenedor se anota AQUÍ, antes de tocar nada, y luego se compara con la anotación.
+   *
+   * Mirarlo después no funciona y costó un rato entenderlo: `enlaceDirecto` sustituye la url por
+   * la de la caché (`/v?e=…`), cuya ruta es `/v` y no acaba en ninguna extensión. O sea que para
+   * cuando el comparador quiere saber si esto era un `.mkv`, la pista ya no está.
+   */
+  const esMkvOriginal = (s: ServerOption): boolean => {
+    /*
+     * Hay que mirar TRES sitios, y no por gusto: la url guardada puede venir ya convertida.
+     *
+     * Cuando un servidor se sirve por la caché, su `direct_stream` acaba siendo `…/v?e=<fichero>`,
+     * cuya ruta es `/v` y no acaba en ninguna extensión. Y el catálogo guarda lo que entrega, así
+     * que esa forma también llega a la base. Preguntándole solo a `direct_stream` la respuesta era
+     * siempre «no es mkv», para los dos, y el desempate no se aplicaba nunca.
+     */
+    for (const candidata of [s.direct_stream, s.embed_url]) {
+      const url = String(candidata || '');
+      if (!url) continue;
+      const dentro = ficheroDentroDeNuestraCache(url) || url;
+      try {
+        if (/\.mkv$/i.test(new URL(dentro).pathname)) return true;
+      } catch {
+        // Una url que no se puede leer no dice nada; se prueba la siguiente.
+      }
+    }
+    return false;
+  };
+
   const withEffectiveMode = activeServers.map(s => {
     const mode = effectiveDirectMode(s);
     const name = nombreConTipo(s.name, Boolean(s.direct_stream));
     const stream = enlaceDirecto(s);
-    if (name === s.name && stream === s.direct_stream && (!mode || mode === s.direct_mode)) return s;
+    const mkv = esMkvOriginal(s);
     return {
       ...s,
       name,
       ...(stream ? { direct_stream: stream } : {}),
       ...(mode ? { direct_mode: mode } : {}),
-    };
+      ...(mkv ? { __mkv: true } : {}),
+    } as ServerOption & { __mkv?: boolean };
   });
 
   /**
@@ -395,6 +425,25 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
     const verA = verificadoVigente(a);
     const verB = verificadoVigente(b);
     if (verA !== verB) return verA ? -1 : 1;
+
+    /**
+     * ENTRE DOS COPIAS DEL MISMO VÍDEO, EL MP4 ANTES QUE EL MKV.
+     *
+     * archive.org sube a menudo la misma película en los dos contenedores dentro del mismo item, y
+     * el catálogo se quedaba con los dos y ofrecía primero el que viniera antes en la lista. Se vio
+     * en «Gladiformers»: un `.mkv` delante y su `.mp4` gemelo detrás, los dos etiquetados `mp4`.
+     *
+     * Un mp4 progresivo lo abre ExoPlayer sin sorpresas. Un Matroska DEPENDE de lo que lleve
+     * dentro: si el audio o el vídeo van en un códec que el aparato no tiene, hay contenedor y no
+     * hay reproducción — y por el camino confunde a todo lo que mire el fichero por fuera dando
+     * por hecho que es mp4.
+     *
+     * No se retira ninguno: el mkv sigue estando de reserva por si el mp4 falla. Solo deja de ser
+     * el primero que se prueba.
+     */
+    const mkvA = Boolean((a as any).__mkv);
+    const mkvB = Boolean((b as any).__mkv);
+    if (mkvA !== mkvB) return mkvA ? 1 : -1;
 
     /**
      * LO QUE NO DA EL ANCHO DE BANDA, AL FONDO. No se retira: se deja de ofrecer primero.
@@ -540,7 +589,9 @@ export function paraElCliente<T extends ServerOption>(servers: T[] | undefined |
     .filter(s => verificadoVigente(s))
     .filter(s => s?.direct_stream && s.status !== 'offline')
     .map(s => {
-      const { embed_url, ...resto } = s as ServerOption;
+      // `__mkv` es una anotación interna para ordenar (ver `sortServersBySourcePriority`); fuera
+      // de aquí no significa nada y no tiene por qué viajar al reproductor.
+      const { embed_url, __mkv, ...resto } = s as ServerOption & { __mkv?: boolean };
       return resto as T;
     });
 }

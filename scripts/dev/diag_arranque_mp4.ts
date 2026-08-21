@@ -23,16 +23,7 @@
  */
 import 'dotenv/config';
 import { getSupabaseAdmin } from '../../src/services/supabaseService';
-
-/** Lo que media3 aguanta antes de dar una fuente por perdida. Ver `ARRANQUE_MS` en la app. */
-const PACIENCIA_MS = 25_000;
-
-/** Cajas mp4 de primer nivel que se leen para orientarse. */
-interface Caja {
-  tipo: string;
-  inicio: number;
-  tam: number;
-}
+import { puedeAbrirse } from '../../src/services/arranqueMp4';
 
 interface Veredicto {
   id: string;
@@ -45,152 +36,17 @@ interface Veredicto {
 // El mismo cliente que usa el verificador: la dirección y la clave viven ahí, no en este script.
 const db = getSupabaseAdmin;
 
-/** Pide un tramo y devuelve cabeceras y cuerpo. Sin `hasta`, pide abierto como media3. */
-async function pedir(url: string, desde: number, hasta?: number) {
-  const rango = hasta === undefined ? `bytes=${desde}-` : `bytes=${desde}-${hasta}`;
-  const t0 = Date.now();
-  const r = await fetch(url, {
-    headers: { Range: rango },
-    signal: AbortSignal.timeout(PACIENCIA_MS),
-  });
-  return { r, ms: Date.now() - t0 };
-}
-
-/** Lee como mucho `tope` bytes del cuerpo y corta; devuelve lo leído y si llegó al final. */
-async function leerHasta(r: Response, tope: number): Promise<{ datos: Uint8Array; fin: boolean }> {
-  const lector = r.body!.getReader();
-  const partes: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await lector.read();
-    if (done) {
-      const junto = new Uint8Array(total);
-      let o = 0;
-      for (const p of partes) { junto.set(p, o); o += p.length; }
-      return { datos: junto, fin: true };
-    }
-    partes.push(value);
-    total += value.length;
-    if (total >= tope) {
-      await lector.cancel().catch(() => {});
-      const junto = new Uint8Array(total);
-      let o = 0;
-      for (const p of partes) { junto.set(p, o); o += p.length; }
-      return { datos: junto, fin: false };
-    }
-  }
-}
-
-/** Las cajas de primer nivel que se ven en este trozo del principio. */
-function cajas(d: Uint8Array): Caja[] {
-  const vista = new DataView(d.buffer, d.byteOffset, d.byteLength);
-  const fuera: Caja[] = [];
-  let i = 0;
-  while (i + 8 <= d.length && fuera.length < 8) {
-    const tam = vista.getUint32(i);
-    const tipo = String.fromCharCode(d[i + 4], d[i + 5], d[i + 6], d[i + 7]);
-    if (tam < 8) break;
-    fuera.push({ tipo, inicio: i, tam });
-    i += tam;
-  }
-  return fuera;
-}
-
-/** El total que declara un `Content-Range`, o 0. */
-function totalDe(r: Response): number {
-  const cr = r.headers.get('content-range') || '';
-  const m = /\/(\d+)\s*$/.exec(cr);
-  if (m) return Number(m[1]);
-  const cl = Number(r.headers.get('content-length'));
-  return Number.isFinite(cl) && cl > 0 ? cl : 0;
-}
-
+/**
+ * La prueba vive en `src/services/arranqueMp4.ts` y NO se copia aquí.
+ *
+ * Estaba duplicada, y duplicada no sirve para lo que existe: si el verificador retira por una
+ * regla y el diagnóstico mide por otra, el número que sale aquí deja de decir nada sobre lo que
+ * va a pasar en la app. Este script es la MISMA pregunta, hecha a todo el catálogo de golpe y con
+ * un resumen por causa.
+ */
 async function probar(id: string, titulo: string, url: string): Promise<Veredicto> {
-  const no = (causa: string, detalle: string): Veredicto => ({ id, titulo, ok: false, causa, detalle });
-
-  // --- 1. abrir como media3: rango abierto ---
-  let abierto;
-  try {
-    abierto = await pedir(url, 0);
-  } catch (e: any) {
-    return no('no contesta', e.message || String(e));
-  }
-  if (!abierto.r.ok || !abierto.r.body) return no('estado ' + abierto.r.status, abierto.r.statusText);
-
-  const total = totalDe(abierto.r);
-  const declarado = Number(abierto.r.headers.get('content-length') || 0);
-  if (!total) return no('sin tamaño', 'ni Content-Range ni Content-Length');
-
-  /*
-   * ESTA ES LA COMPROBACIÓN QUE HABRÍA AHORRADO DÍAS. media3 toma el `Content-Length` como el
-   * tamaño del RECURSO: si se le entrega menos que el fichero entero, se cree que la película
-   * termina ahí. Sin error, sin reintento — de ahí venían los títulos que "reproducían diez
-   * segundos".
-   */
-  if (declarado > 0 && declarado < total) {
-    await abierto.r.body.cancel().catch(() => {});
-    return no('la respuesta se corta', `declara ${declarado} de ${total} bytes`);
-  }
-
-  // --- 2. la cabecera, para saber dónde está el índice ---
-  const cabecera = await leerHasta(abierto.r, 512 * 1024);
-  const vistas = cajas(cabecera.datos);
-  if (!vistas.length) return no('no parece mp4', 'no se leyó ninguna caja');
-
-  const moovDelante = vistas.find(c => c.tipo === 'moov');
-  let moovEn: number;
-  let moovTam: number;
-
-  if (moovDelante) {
-    moovEn = moovDelante.inicio;
-    moovTam = moovDelante.tam;
-  } else {
-    // Índice al final: empieza donde acaba la última caja que sí se vio.
-    const ultima = vistas[vistas.length - 1];
-    moovEn = ultima.inicio + ultima.tam;
-    moovTam = total - moovEn;
-    if (moovEn >= total) return no('índice ilocalizable', `la última caja acaba en ${moovEn} de ${total}`);
-  }
-
-  // --- 3. el índice ENTERO, cronometrado ---
-  const t0 = Date.now();
-  let indice;
-  try {
-    indice = await pedir(url, moovEn, Math.min(moovEn + moovTam - 1, total - 1));
-  } catch (e: any) {
-    return no('el índice no llega', `${moovDelante ? 'delante' : 'al final'}, ${(moovTam / 1048576).toFixed(1)} MB: ${e.message}`);
-  }
-  if (!indice.r.ok || !indice.r.body) return no('el índice da ' + indice.r.status, `en el byte ${moovEn}`);
-
-  let leido;
-  try {
-    leido = await leerHasta(indice.r, moovTam);
-  } catch (e: any) {
-    return no('el índice se corta', e.message || String(e));
-  }
-  const msIndice = Date.now() - t0;
-
-  if (leido.datos.length < moovTam) {
-    return no('índice incompleto', `${leido.datos.length} de ${moovTam} bytes`);
-  }
-  if (msIndice > PACIENCIA_MS) {
-    return no('índice demasiado lento', `${(msIndice / 1000).toFixed(1)} s para ${(moovTam / 1048576).toFixed(1)} MB`);
-  }
-
-  // --- 4. un salto al medio, que es adelantar ---
-  const medio = Math.floor(total / 2);
-  try {
-    const salto = await pedir(url, medio, medio + 262143);
-    if (!salto.r.ok) return no('no deja adelantar', 'estado ' + salto.r.status);
-    await salto.r.body?.cancel().catch(() => {});
-    return {
-      id, titulo, ok: true,
-      causa: 'arranca',
-      detalle: `índice ${moovDelante ? 'delante' : 'al final'} de ${(moovTam / 1048576).toFixed(1)} MB en ${(msIndice / 1000).toFixed(1)} s; salto ${(salto.ms / 1000).toFixed(1)} s`,
-    };
-  } catch (e: any) {
-    return no('no deja adelantar', e.message || String(e));
-  }
+  const r = await puedeAbrirse(url);
+  return { id, titulo, ok: r.ok, causa: r.sinVeredicto ? `${r.causa} (sin veredicto)` : r.causa, detalle: r.detalle };
 }
 
 async function main() {
