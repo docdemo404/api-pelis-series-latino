@@ -1380,6 +1380,13 @@ export class CatalogService {
     q?: string;
     /** Solo los títulos que traen algún enlace de esta fuente. Vacío = todas. */
     fuente?: string;
+    /**
+     * `si` deja solo lo que el espectador ve; `no`, solo lo que no llega a la app.
+     *
+     * El segundo es el que se pidió y el que de verdad hacía falta: la lista de lo que NO se ve es
+     * la lista de trabajo pendiente, y hasta ahora había que sacarla mirando ficha por ficha.
+     */
+    visible?: 'si' | 'no';
     pagina?: number;
     porPagina?: number;
   } = {}): Promise<{ total: number; pagina: number; filas: Array<Record<string, unknown>> }> {
@@ -1393,6 +1400,40 @@ export class CatalogService {
       .order('title');
     if (opts.tipo) q = q.eq('type', opts.tipo);
     if (opts.q) q = q.ilike('title', `%${opts.q}%`);
+
+    /**
+     * LA VISIBILIDAD SE FILTRA EN LA CONSULTA, NO DESPUÉS DE PAGINAR.
+     *
+     * La primera versión filtraba en memoria sobre las filas ya traídas, igual que hace el filtro
+     * de fuente. Y ahí eso no filtra el catálogo: filtra LA PÁGINA. Pedir «solo lo que no se ve» y
+     * tener que recorrer página por página buscando dónde cayó cada una es peor que no tener
+     * filtro, porque parece que funciona.
+     *
+     * Esto sí se puede preguntar en SQL —`has_streams`, `poster` y `streams_checked_at` son
+     * columnas—, así que se pregunta ahí: la paginación y el total salen correctos y «solo lo que
+     * NO se ve» pasa a ser la lista de trabajo pendiente, que era la gracia.
+     *
+     * Las condiciones son las de `soloPublicables`, que es el filtro que aplican los listados de
+     * verdad. Su negación tiene que incluir los NULL a mano: en SQL un `NULL` no es «falso», no es
+     * nada, y una ficha sin comprobar nunca es una ficha que se vea.
+     */
+    if (opts.visible) {
+      const hayColumna = await this.hasAvailabilityColumn();
+      if (hayColumna) {
+        const desdeCuando = new Date(Date.now() - VERIFICADO_VIGENTE_MS).toISOString();
+        q = opts.visible === 'si'
+          ? this.soloPublicables(q, true)
+          : (q as any).or(
+              [
+                'has_streams.is.false',
+                'has_streams.is.null',
+                'poster.is.null',
+                'streams_checked_at.is.null',
+                `streams_checked_at.lte.${desdeCuando}`,
+              ].join(',')
+            );
+      }
+    }
 
     const { data, count, error } = await q.range(desde, desde + porPagina - 1);
     if (error) return { total: 0, pagina, filas: [] };
@@ -1459,6 +1500,8 @@ export class CatalogService {
     const visibles = filtroFuente
       ? filas.filter((f: any) => (f.fuentes as string[]).includes(filtroFuente))
       : filas;
+
+
 
     return { total: count ?? filas.length, pagina, filas: visibles };
   }

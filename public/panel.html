@@ -135,6 +135,84 @@
       border: 1px solid rgba(255, 255, 255, 0.08);
       border-radius: 16px;
     }
+
+    /* ─────────────────────────────────────────────────────────────────────────────
+     * EL PANEL EN UN TELÉFONO.
+     *
+     * No había una sola regla `@media` en todo el fichero, y la sección que peor lo llevaba era
+     * «Contenido y sus URLs directas»: una tabla de cinco columnas cuya última celda son urls de
+     * ciento y pico caracteres. En una pantalla de 360 px eso no se lee, se adivina — o se
+     * arrastra a lo ancho buscando la columna que interesa.
+     *
+     * Debajo de 768 px la tabla deja de ser una tabla y cada fila pasa a ser una FICHA: el título
+     * arriba y grande, los datos sueltos en una línea con su etiqueta, y las urls apiladas a lo
+     * ancho completo. La cabecera se esconde porque en una ficha no hay columnas que rotular; lo
+     * que hacía cada `th` lo hace ahora el `data-t` de cada celda.
+     *
+     * Se resuelve con CSS y no rehaciendo el HTML en JavaScript a propósito: el mismo marcado
+     * sirve para las dos formas, así que no hay dos plantillas que mantener en sincronía — que es
+     * como empiezan las diferencias tontas entre lo que se ve en el escritorio y en el móvil.
+     * ───────────────────────────────────────────────────────────────────────────── */
+    @media (max-width: 767.98px) {
+      /* El contenedor con scroll horizontal ya no hace falta: nada se sale a lo ancho. */
+      .tabla-a-fichas { max-height: none !important; overflow: visible !important; }
+      .tabla-a-fichas thead { display: none; }
+      .tabla-a-fichas table,
+      .tabla-a-fichas tbody,
+      .tabla-a-fichas tr,
+      .tabla-a-fichas td { display: block; width: 100%; }
+
+      .tabla-a-fichas tbody tr {
+        border: 1px solid var(--border-color);
+        border-radius: .75rem;
+        padding: .85rem .9rem;
+        margin-bottom: .75rem;
+        background: rgba(255, 255, 255, .02);
+      }
+      .tabla-a-fichas tbody td {
+        border: 0 !important;
+        padding: .15rem 0 !important;
+      }
+
+      /* El título manda: es lo que se busca al recorrer la lista con el pulgar. */
+      .tabla-a-fichas td[data-t="Titulo"] {
+        font-size: 1.02rem;
+        line-height: 1.3;
+        margin-bottom: .35rem;
+      }
+
+      /*
+       * Tipo, año y fuente van EN LÍNEA, no uno debajo de otro. Son tres datos de una palabra
+       * cada uno; apilarlos gastaría tres renglones para decir «Película · 2015 · fuegocine».
+       */
+      .tabla-a-fichas td[data-t="Tipo"],
+      .tabla-a-fichas td[data-t="Anio"],
+      .tabla-a-fichas td[data-t="Fuente"] {
+        display: inline-block;
+        width: auto;
+        margin-right: .8rem;
+      }
+      .tabla-a-fichas td[data-t="Tipo"]::before,
+      .tabla-a-fichas td[data-t="Anio"]::before,
+      .tabla-a-fichas td[data-t="Fuente"]::before {
+        content: attr(data-t) ": ";
+        color: #64748b;
+      }
+
+      .tabla-a-fichas td[data-t="URLs"] { margin-top: .5rem; }
+      .tabla-a-fichas td[data-t="URLs"] a { font-size: .78rem; }
+      /* La etiqueta «principal/respaldo» encima de su url: al lado, deja la url sin sitio. */
+      .tabla-a-fichas td[data-t="URLs"] .fila-url { flex-direction: column; gap: 0 !important; }
+      .tabla-a-fichas td[data-t="URLs"] .fila-url > span { min-width: 0 !important; }
+
+      /* Los filtros, a todo el ancho: en un móvil un desplegable de 190 px es un blanco difícil. */
+      #contenidoFuente, #contenidoBuscar { max-width: none !important; width: 100%; }
+      #contenidoTotal { margin-left: 0 !important; }
+
+      /* Y el resto del panel, que compartía el mismo problema en menor grado. */
+      .main-card { padding: 1rem !important; }
+      .table-responsive table { font-size: .85rem; }
+    }
   </style>
 </head>
 <body class="py-5">
@@ -231,10 +309,15 @@
               <option value="cinecalidad">Cinecalidad</option>
               <option value="tioplus">TioPlus</option>
             </select>
+            <select id="contenidoVisible" class="form-select form-select-sm bg-dark text-white border-secondary" style="max-width:190px">
+              <option value="">Aparezca o no en la app</option>
+              <option value="si">Solo lo que se ve</option>
+              <option value="no">Solo lo que NO se ve</option>
+            </select>
             <input id="contenidoBuscar" type="search" class="form-control form-control-sm bg-dark text-white border-secondary" style="max-width:260px" placeholder="Buscar por título…">
             <span id="contenidoTotal" class="text-secondary small ms-auto"></span>
           </div>
-          <div class="table-responsive" style="max-height:70vh; overflow:auto">
+          <div class="table-responsive tabla-a-fichas" style="max-height:70vh; overflow:auto">
             <table class="table table-sm align-middle mb-0">
               <thead class="position-sticky top-0" style="background:#0f172a">
                 <tr class="text-secondary small">
@@ -501,7 +584,22 @@
       manual: 'text-danger',
     }[f] || 'text-secondary');
 
+    /**
+     * SI ESTE TÍTULO SE VE EN LA APP O NO, dicho donde se mira.
+     *
+     * El panel enseñaba el catálogo entero sin distinguir lo que llega al espectador de lo que no,
+     * y esa diferencia solo se descubría abriendo la app y encontrándose un título que no
+     * reproduce. La API ya la calcula con las MISMAS condiciones que aplican los listados de
+     * verdad; aquí solo se pinta, con el motivo en el `title` para no gastar una columna entera en
+     * explicarlo.
+     */
+    const insignia = (f) => f.en_la_app
+      ? '<span class="badge bg-success-subtle text-success-emphasis border border-success-subtle" style="font-size:.65rem">en la app</span>'
+      : '<span class="badge bg-danger-subtle text-danger-emphasis border border-danger-subtle" style="font-size:.65rem" title="' +
+        String(f.motivo || '').replace(/"/g, '&quot;') + '">no aparece</span>';
+
     let contFuente = '';
+    let contVisible = '';
 
     async function cargarContenido() {
       contTabla.innerHTML = '<tr><td colspan="5" class="text-secondary small py-3">⏳ Cargando…</td></tr>';
@@ -509,15 +607,19 @@
         const url = '/api/v1/panel/contenido?page=' + contPagina +
           (contTipo ? '&tipo=' + contTipo : '') +
           (contFuente ? '&fuente=' + encodeURIComponent(contFuente) : '') +
+          (contVisible ? '&visible=' + contVisible : '') +
           (contQ ? '&q=' + encodeURIComponent(contQ) : '');
         const j = await (await fetch(url)).json();
         const filas = j.filas || [];
         // Con filtro de fuente el total sigue siendo el de tipo+título: la fuente se decide
         // mirando dentro de cada fila y no se puede contar en la consulta. Se dice, en vez de
         // enseñar un número que no cuadra con lo que hay debajo.
+        // El de visibilidad SÍ se pregunta en la consulta, así que su total es de verdad. El de
+        // fuente se resuelve mirando dentro de cada fila y no se puede contar en SQL: cuando está
+        // puesto se dice cuántas hay en esta página en vez de un número que no cuadra.
         document.getElementById('contenidoTotal').textContent = contFuente
           ? filas.length + ' de esta fuente en esta página'
-          : (j.total || 0).toLocaleString('es-ES') + ' títulos';
+          : (j.total || 0).toLocaleString('es-ES') + ' títulos' + (contVisible ? ' con este filtro' : '');
         document.getElementById('contenidoPagina').textContent = 'Página ' + (j.pagina || 1);
         if (!filas.length) {
           contTabla.innerHTML = contFuente
@@ -527,13 +629,13 @@
         }
         contTabla.innerHTML = filas.map(f =>
           '<tr>' +
-            '<td class="fw-semibold">' + f.titulo + '</td>' +
-            '<td class="text-secondary small">' + f.tipo + '</td>' +
-            '<td class="text-secondary small">' + (f.anio || '—') + '</td>' +
-            '<td class="small">' + (f.fuentes || []).map(x => '<span class="' + colorFuente(x) + '">' + x + '</span>').join(', ') + '</td>' +
-            '<td class="small">' +
+            '<td class="fw-semibold" data-t="Titulo">' + f.titulo + ' ' + insignia(f) + '</td>' +
+            '<td class="text-secondary small" data-t="Tipo">' + f.tipo + '</td>' +
+            '<td class="text-secondary small" data-t="Anio">' + (f.anio || '—') + '</td>' +
+            '<td class="small" data-t="Fuente">' + (f.fuentes || []).map(x => '<span class="' + colorFuente(x) + '">' + x + '</span>').join(', ') + '</td>' +
+            '<td class="small" data-t="URLs">' +
               (f.urls || []).map((u, i) =>
-                '<div class="d-flex gap-2 align-items-baseline">' +
+                '<div class="fila-url d-flex gap-2 align-items-baseline">' +
                   '<span class="text-secondary" style="min-width:64px">' + (i === 0 ? 'principal' : 'respaldo') + '</span>' +
                   '<a href="' + u + '" target="_blank" rel="noopener" class="text-break" style="color:#93c5fd">' + u + '</a>' +
                 '</div>'
@@ -554,6 +656,9 @@
     }));
     document.getElementById('contenidoFuente').addEventListener('change', (e) => {
       contFuente = e.target.value; contPagina = 1; cargarContenido();
+    });
+    document.getElementById('contenidoVisible').addEventListener('change', (e) => {
+      contVisible = e.target.value; contPagina = 1; cargarContenido();
     });
     let temporizador;
     document.getElementById('contenidoBuscar').addEventListener('input', (e) => {
