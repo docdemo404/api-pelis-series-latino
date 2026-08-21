@@ -1356,27 +1356,7 @@ export class CatalogService {
        * vive aquí, no en `servers`, y confundirlo es lo que hacía que una serie se anunciara
        * entera por lo que traía su portada (FUENTES.md §4).
        */
-      seasons: Object.values(
-        capitulosBuenos.reduce((acc: Record<number, any>, cap) => {
-          acc[cap.season] ??= { season_number: cap.season, episodes: [] };
-          acc[cap.season].episodes.push({
-            episode_number: cap.episode,
-            season_number: cap.season,
-            servers: cap.urls.map((url, i) => ({
-              id: `${id}_s${cap.season}e${cap.episode}_manual_${i}`,
-              name: `Manual ${i + 1}`,
-              embed_url: url,
-              direct_stream: url,
-              direct_mode: 'public' as const,
-              direct_kind: /\.m3u8(\?|$)/i.test(url) ? ('hls' as const) : ('mp4' as const),
-              status: 'online' as const,
-              source_id: 'manual',
-              verified_at: new Date().toISOString(),
-            })),
-          });
-          return acc;
-        }, {})
-      ),
+      seasons: await this.temporadasConCapitulosManuales(opts.tmdbId, detalle, id, capitulosBuenos),
       has_streams: true,
       source_url: null,
       source_urls: [],
@@ -1406,7 +1386,7 @@ export class CatalogService {
     const db = getSupabaseAdmin();
     const { data: yaEstaba } = await db
       .from('media_items')
-      .select('id,servers')
+      .select('id,servers,seasons')
       .eq('tmdb_id', opts.tmdbId)
       .eq('type', opts.tipo === 'tvseries' ? 'tvseries' : 'movie')
       .maybeSingle();
@@ -1416,10 +1396,26 @@ export class CatalogService {
       const urlsPrevias = new Set(previos.map((x: any) => String(x?.direct_stream || '')));
       const nuevos = servers.filter((x: any) => !urlsPrevias.has(String(x?.direct_stream || '')));
 
+      /**
+       * Y LAS TEMPORADAS TAMBIÉN SE FUSIONAN, que si no los capítulos se perdían.
+       *
+       * Esta rama solo tocaba `servers`, o sea el vídeo a nivel de ficha. Para una película vale;
+       * para una serie es justo lo contrario de lo que hace falta, porque ahí el vídeo vive en los
+       * capítulos. Al pegar la url de un episodio de una serie que ya estaba en el catálogo, la
+       * url se aceptaba, la respuesta decía «success», y el capítulo se quedaba sin ella.
+       *
+       * Se injertan los capítulos nuevos sobre las temporadas que ya hubiera, respetando el resto.
+       */
+      const seasonsFusionadas = fusionarTemporadas(
+        ((yaEstaba as any).seasons as any[]) || [],
+        (fila.seasons as any[]) || []
+      );
+
       const { error: errorFusion } = await db
         .from('media_items')
         .update({
           servers: [...nuevos, ...previos],
+          ...(seasonsFusionadas.length ? { seasons: seasonsFusionadas } : {}),
           // Se deja sin fecha de comprobación para que el barrido la mire pronto: la url es nueva
           // y quien decide si se anuncia es el verificador, no este formulario.
           streams_checked_at: null,
@@ -1947,6 +1943,98 @@ export class CatalogService {
    * único que autoriza a anotar un veredicto de disponibilidad: que un camino barato no
    * encuentre enlaces no significa que la ficha sea un fantasma.
    */
+  /**
+   * LAS TEMPORADAS COMPLETAS, CON LOS CAPÍTULOS MANUALES INJERTADOS EN SU SITIO.
+   *
+   * Antes esto construía las temporadas SOLO con los capítulos a los que se les pegó una url, y
+   * cada uno con dos datos: su número de episodio y sus servidores. Nada más. Ni nombre, ni
+   * sinopsis, ni imagen, ni fecha — que es exactamente lo que se reportó: «en la app no carga los
+   * metadatos de los capítulos». No es que no cargaran: es que no se habían guardado nunca.
+   *
+   * Y había un segundo efecto peor. Una serie con veinte capítulos a la que se le pega la url del
+   * primero quedaba con UNA temporada de UN capítulo: los diecinueve restantes desaparecían de la
+   * ficha, porque este objeto reemplaza el anterior entero.
+   *
+   * Ahora la lista de temporadas la trae TMDB —que ya sabe cuántos capítulos hay y cómo se llama
+   * cada uno; `getTmdbSeasons` lleva ahí desde siempre y esta parte no lo usaba— y las urls
+   * manuales se injertan en el capítulo que les toca. Los demás siguen ahí, con su metadata y sin
+   * servidores, que es lo que son: capítulos que existen y todavía no se pueden ver.
+   */
+  private static async temporadasConCapitulosManuales(
+    tmdbId: number,
+    detalle: any,
+    id: string,
+    capitulos: Array<{ season: number; episode: number; urls: string[] }>
+  ): Promise<any[]> {
+    const servidoresDe = (season: number, episode: number, urls: string[]) =>
+      urls.map((url, i) => ({
+        id: `${id}_s${season}e${episode}_manual_${i}`,
+        name: `Manual ${i + 1}`,
+        embed_url: url,
+        direct_stream: url,
+        direct_mode: 'public' as const,
+        direct_kind: /\.m3u8(\?|$)/i.test(url) ? ('hls' as const) : ('mp4' as const),
+        status: 'online' as const,
+        source_id: 'manual',
+        verified_at: new Date().toISOString(),
+      }));
+
+    const poster = detalle?.poster_path ? `https://image.tmdb.org/t/p/w500${detalle.poster_path}` : null;
+    const cuantas = Number(detalle?.number_of_seasons) || Math.max(...capitulos.map(c => c.season), 1);
+
+    let deTmdb: any[] = [];
+    try {
+      deTmdb = await TmdbService.getTmdbSeasons(tmdbId, cuantas, poster, []);
+    } catch {
+      // Si TMDB no contesta se sigue sin su metadata: perder la url que acaban de pegar sería
+      // mucho peor que enseñar un capítulo sin nombre.
+      deTmdb = [];
+    }
+
+    if (!deTmdb.length) {
+      const porTemporada = capitulos.reduce((acc: Record<number, any>, cap) => {
+        acc[cap.season] ??= { season_number: cap.season, name: `Temporada ${cap.season}`, episodes: [] };
+        acc[cap.season].episodes.push({
+          episode_number: cap.episode,
+          season_number: cap.season,
+          name: `Episodio ${cap.episode}`,
+          servers: servidoresDe(cap.season, cap.episode, cap.urls),
+        });
+        return acc;
+      }, {});
+      return Object.values(porTemporada);
+    }
+
+    for (const cap of capitulos) {
+      let temporada = deTmdb.find(t => Number(t.season_number) === cap.season);
+      if (!temporada) {
+        // Una temporada que TMDB no conoce: se añade a mano antes que descartar la url.
+        temporada = { season_number: cap.season, name: `Temporada ${cap.season}`, episodes: [] };
+        deTmdb.push(temporada);
+      }
+
+      let episodio = (temporada.episodes || []).find((e: any) => Number(e.episode_number) === cap.episode);
+      if (!episodio) {
+        episodio = {
+          episode_number: cap.episode,
+          season_number: cap.season,
+          name: `Episodio ${cap.episode}`,
+          servers: [],
+        };
+        temporada.episodes = [...(temporada.episodes || []), episodio];
+      }
+
+      // DELANTE de lo que hubiera: quien pega la url a mano sabe algo que el scraper no sabía.
+      const previos = (episodio.servers || []).filter(
+        (x: any) => !cap.urls.includes(String(x?.direct_stream || ''))
+      );
+      episodio.servers = [...servidoresDe(cap.season, cap.episode, cap.urls), ...previos];
+      episodio.season_number = cap.season;
+    }
+
+    return deTmdb;
+  }
+
   /**
    * Los servidores puestos a mano que ya hay guardados para esta ficha.
    *
@@ -3676,4 +3764,45 @@ export async function hostsDelCatalogo(): Promise<Array<{ host: string; servidor
   return [...porHost.entries()]
     .map(([host, v]) => ({ host, servidores: v.servidores, titulos: v.titulos.size }))
     .sort((a, b) => b.servidores - a.servidores);
+}
+
+/**
+ * Mezcla dos listas de temporadas quedándose con lo mejor de cada una.
+ *
+ * De las que ya estaban se conserva TODO —metadata y servidores— y de las nuevas se toman los
+ * servidores de los capítulos que traigan, puestos delante. Un capítulo que solo existe en la
+ * lista nueva se añade; uno que solo existe en la vieja se queda como estaba.
+ *
+ * Reemplazar en vez de mezclar es lo que hacía desaparecer capítulos: pegar la url del 1x01 dejaba
+ * la serie con un solo episodio.
+ */
+function fusionarTemporadas(previas: any[], nuevas: any[]): any[] {
+  if (!nuevas.length) return previas;
+  if (!previas.length) return nuevas;
+
+  const salida = previas.map(t => ({ ...t, episodes: [...(t.episodes || [])] }));
+
+  for (const tNueva of nuevas) {
+    let tPrevia = salida.find(t => Number(t.season_number) === Number(tNueva.season_number));
+    if (!tPrevia) { salida.push({ ...tNueva, episodes: [...(tNueva.episodes || [])] }); continue; }
+
+    for (const eNuevo of tNueva.episodes || []) {
+      const ePrevio = tPrevia.episodes.find(
+        (e: any) => Number(e.episode_number) === Number(eNuevo.episode_number)
+      );
+      if (!ePrevio) { tPrevia.episodes.push(eNuevo); continue; }
+
+      const urlsNuevas = new Set((eNuevo.servers || []).map((x: any) => String(x?.direct_stream || '')));
+      ePrevio.servers = [
+        ...(eNuevo.servers || []),
+        ...((ePrevio.servers || []).filter((x: any) => !urlsNuevas.has(String(x?.direct_stream || '')))),
+      ];
+      // La metadata que falte se completa con la nueva; la que ya había no se pisa.
+      for (const campo of ['name', 'overview', 'still_path', 'air_date']) {
+        if (!ePrevio[campo] && eNuevo[campo]) ePrevio[campo] = eNuevo[campo];
+      }
+    }
+  }
+
+  return salida;
 }
