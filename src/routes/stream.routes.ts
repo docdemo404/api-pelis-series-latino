@@ -691,8 +691,8 @@ router.get([DIRECT_BASE, `${DIRECT_BASE}/v.mp4`, `${DIRECT_BASE}/v.m3u8`], async
      * el mismo Worker que el aparato no puede resolver.
      */
     const sinDelegar = String(req.query.externo || '') === '0';
-    const desenvuelto = sinDelegar ? ficheroDentroDeNuestraCache(embedCrudo) : null;
-    const embedUrl = desenvuelto || embedCrudo;
+    const laNuestra = sinDelegar ? ficheroDentroDeNuestraCache(embedCrudo) : null;
+    const embedUrl = embedCrudo;
 
     /**
      * ATAJO: SI EL EMBED YA LLEVA EL FICHERO ESCRITO, NO SE ACUÑA NADA.
@@ -729,8 +729,33 @@ router.get([DIRECT_BASE, `${DIRECT_BASE}/v.mp4`, `${DIRECT_BASE}/v.m3u8`], async
     // no. Lo que le sirve al reproductor es enterarse RÁPIDO de que este servidor no va, para
     // pasar al siguiente: por eso el fallo tiene su propio tope, mucho más corto que la suma de
     // los timeouts de dentro.
+    /**
+     * Y SI LO QUE PIDEN ES NUESTRA PROPIA CACHÉ, NO SE ACUÑA NI SE DESENVUELVE: SE RELEVA.
+     *
+     * La primera versión de `externo=0` deshacía el envoltorio y salía a por el fichero original.
+     * Es lo que parecía obvio y estaba mal, y lo destapó una película de archive.org: 502 tras 30
+     * segundos. archive.org cobra entre 10 y 25 s solo hasta el primer byte, y el presupuesto de
+     * primer byte de esta ruta son 6 — no cabe, y no debe caber: subirlo dejaría a los hosts de
+     * verdad muertos tardando medio minuto en dar el «no».
+     *
+     * Lo correcto es lo contrario: tirar de NUESTRA caché, que es rápida —1,4 s con el trozo
+     * dentro— y que además ya sabe de rangos. Vercel sí puede resolver ese dominio; el que no
+     * puede es el aparato con el DNS filtrado. O sea que esta ruta hace justo lo que le falta a
+     * quien la pide: prestarle su DNS y relevar los bytes.
+     *
+     * No se acuña porque no hay nada que averiguar: la firma ya demostró que la url es nuestra y
+     * que apunta a un fichero. Acuñarla sería pedirle al extractor que interprete `/v?e=…` como
+     * si fuera la página de un reproductor ajeno.
+     */
     const [minted, overBudget] = await Promise.all([
-      conPlazo(mintDirect(embedUrl), ACUNADO_MAX_MS, null),
+      laNuestra
+        ? Promise.resolve<MintedStream | null>({
+            url: embedCrudo,
+            kind: /\.(m3u8|txt)(\?|$)/i.test(laNuestra) ? 'hls' : 'mp4',
+            referer: '',
+            origin: '',
+          })
+        : conPlazo(mintDirect(embedUrl), ACUNADO_MAX_MS, null),
       BandwidthService.isOverBudget(),
     ]);
     if (!minted) {
