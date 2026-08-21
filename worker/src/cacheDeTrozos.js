@@ -244,13 +244,20 @@ async function trozo(env, url, indice, ctx) {
  */
 const TROZOS_QUE_SE_GUARDAN = 12;
 
-/** Vuelca un stream en el escritor, respetando la contrapresión. */
+/**
+ * Vuelca un stream en el escritor y devuelve CUÁNTOS BYTES escribió.
+ *
+ * Lo de devolver la cuenta no es un detalle: quien lee de la caché tiene que avanzar por lo que
+ * de verdad salió, no por lo que se suponía que había. Ver `cuerpoContinuo`.
+ */
 async function volcar(origen, escritor) {
   const lector = origen.getReader();
+  let escritos = 0;
   for (;;) {
     const { done, value } = await lector.read();
-    if (done) return;
+    if (done) return escritos;
     await escritor.write(value);
+    escritos += value.length;
   }
 }
 
@@ -259,7 +266,15 @@ async function pedirAlOrigen(url, desde, hasta) {
   const rango = 'bytes=' + desde + '-' + (hasta === null ? '' : hasta);
   let respuesta = null;
   for (let intento = 1; intento <= INTENTOS_ORIGEN; intento++) {
-    respuesta = await fetch(url, { headers: { 'User-Agent': UA, Range: rango } });
+    /*
+     * CON TOPE. Sin él, una conexión que el origen acepta y luego no alimenta deja el Worker
+     * esperando hasta que Cloudflare lo corta por su cuenta — y eso sale como un 500, que es la
+     * peor forma de fallar: no dice nada y el reproductor no aprende nada.
+     */
+    respuesta = await fetch(url, {
+      headers: { 'User-Agent': UA, Range: rango },
+      signal: AbortSignal.timeout(TOPE_ORIGEN_MS),
+    });
     if (respuesta.status < 500) break;
     if (respuesta.body) respuesta.body.cancel();
     if (intento < INTENTOS_ORIGEN) await new Promise(r => setTimeout(r, 500 * intento));
@@ -374,18 +389,74 @@ function cuerpoContinuo(env, url, desde, hasta, ctx, respuestaYaAbierta, saltarD
             range: { offset: pos - inicioTrozo },
           }).catch(() => null);
           if (!guardado || !guardado.body) break;
-          await volcar(guardado.body, escritor);
-          pos = inicioTrozo + TROZO;
+
+          /*
+           * SE AVANZA POR LO QUE SALIÓ, NO POR LO QUE DEBERÍA HABER SALIDO.
+           *
+           * Antes esto hacía `pos = inicioTrozo + TROZO`, dando por hecho que todo trozo guardado
+           * mide un trozo entero. No siempre es verdad: si el origen corta una descarga a medias,
+           * en R2 queda un trozo corto bajo una llave que promete uno completo. Al leerlo se
+           * escribían menos bytes de los que se contaban, el hueco no lo rellenaba nadie, y el
+           * `Content-Length` anunciado dejaba de cuadrar con lo entregado.
+           *
+           * Se vio midiendo el catálogo entero: «Volver al Futuro» entregaba 1.306.588 bytes de
+           * índice de los 5.202.291 que había pedido. Un mp4 con el índice a medias no se puede
+           * abrir.
+           *
+           * Contando lo escrito, el fallo se cura solo: la vuelta siguiente empieza justo donde se
+           * quedó y, si en la caché no hay más, cae al origen y lo completa.
+           */
+          const escritos = await volcar(guardado.body, escritor);
+          if (escritos <= 0) break;
+          pos += escritos;
         }
 
-        // --- tramo 2: el resto, del origen, de una sola vez ---
-        if (pos <= hasta) {
-          const respuesta = await pedirAlOrigen(url, pos, hasta);
+        /*
+         * --- tramo 2a: UNA RÁFAGA EN PARALELO PARA LOS PRIMEROS MEGAS ---
+         *
+         * Esta es la causa raíz de que las películas de archive.org no arrancaran, y hasta ahora
+         * la estaba atacando de una en una. Se midió sobre las 21 fichas del catálogo que salen de
+         * ahí: arrancaban 12, y de las 9 que no, SEIS fallaban por lo mismo — traer el índice
+         * tardaba más de los 25 s que el reproductor espera.
+         *
+         * El problema no es el ancho de banda de archive.org, que da de sobra: es su LATENCIA. Cada
+         * petición cuesta entre 10 y 25 s hasta el primer byte, y el índice de una película larga
+         * son varios trozos. En fila, esos segundos se suman; en paralelo se pagan UNA vez.
+         * Medido: cuatro peticiones a la vez traen 1 MB en 11,7 s contra 24,8 s de una sola.
+         *
+         * La ráfaga está acotada a seis trozos —24 MB— por dos razones. Cubre de sobra cualquier
+         * índice, que es lo que hay que resolver antes del primer fotograma; y el plan gratuito
+         * cuenta subpeticiones, así que abrir una por trozo en una película de 2 GB serían
+         * quinientas y no cabe. Pasados esos 24 MB manda la reproducción secuencial, y ahí una sola
+         * petición continua es lo correcto: la latencia se paga una vez y los bytes fluyen.
+         */
+        const RAFAGA = 6;
+        const enVuelo = [];
+        let cursor = pos;
+        for (let n = 0; n < RAFAGA && cursor <= hasta; n++) {
+          const indice = Math.floor(cursor / TROZO);
+          const finTrozo = Math.min((indice + 1) * TROZO - 1, hasta);
+          enVuelo.push({ desde: cursor, hasta: finTrozo, promesa: pedirAlOrigen(url, cursor, finTrozo) });
+          cursor = finTrozo + 1;
+        }
+
+        for (const tramo of enVuelo) {
+          const respuesta = await tramo.promesa;
           if (!respuesta || !respuesta.ok || !respuesta.body) {
             throw new Error('origen ' + (respuesta ? respuesta.status : 'sin respuesta'));
           }
-          const saltar = respuesta.status === 200 ? pos : 0;
-          await relevarDelOrigen(env, ctx, url, respuesta, escritor, pos, saltar, totalFichero);
+          const saltar = respuesta.status === 200 ? tramo.desde : 0;
+          await relevarDelOrigen(env, ctx, url, respuesta, escritor, tramo.desde, saltar, totalFichero);
+        }
+
+        // --- tramo 2b: y el resto, ya en secuencia, de una sola petición ---
+        if (cursor <= hasta) {
+          const respuesta = await pedirAlOrigen(url, cursor, hasta);
+          if (!respuesta || !respuesta.ok || !respuesta.body) {
+            throw new Error('origen ' + (respuesta ? respuesta.status : 'sin respuesta'));
+          }
+          const saltar = respuesta.status === 200 ? cursor : 0;
+          await relevarDelOrigen(env, ctx, url, respuesta, escritor, cursor, saltar, totalFichero);
         }
       }
     } catch (e) {
@@ -430,7 +501,22 @@ export async function servirConCache(request, env, ctx, url) {
   let saltarDeEsa = 0;
 
   if (!total) {
-    const respuesta = await pedirAlOrigen(url, desde, hasta);
+    /*
+     * ESTO IBA SIN RED Y SE NOTABA. `pedirAlOrigen` puede LANZAR —se agota el tope, el origen
+     * corta la conexión, el DNS falla— y aquí no lo recogía nadie: el Worker contestaba 500.
+     *
+     * Un 500 es una respuesta que no dice nada. Se midió sobre las 21 películas de archive.org del
+     * catálogo y salían a puñados, mezclados con fallos de otra naturaleza, así que ni siquiera se
+     * podía separar «el origen no está» de «hay un fallo en este código». Un 502 con su motivo sí
+     * se puede leer, y además el reproductor lo trata como lo que es: este servidor no sirve,
+     * prueba otro.
+     */
+    let respuesta = null;
+    try {
+      respuesta = await pedirAlOrigen(url, desde, hasta);
+    } catch (e) {
+      return new Response('el origen no contestó a tiempo: ' + e.message, { status: 502, headers: CORS });
+    }
     if (!respuesta || !respuesta.ok || !respuesta.body) {
       return new Response('el origen no sirvió el vídeo: ' + (respuesta ? respuesta.status : 'sin respuesta'), {
         status: 502,
@@ -511,9 +597,19 @@ export async function servirConCache(request, env, ctx, url) {
 
   for (const siguiente of porDelante) {
     if (siguiente < 0 || siguiente * TROZO >= total) continue;
+    /*
+     * Y SE CONSUME LO QUE VUELVE, aunque aquí no interese.
+     *
+     * `traerTrozo` parte el stream con `tee()`: una mitad para quien lo pidió y otra para R2. En
+     * la lectura por delante nadie pide nada —solo se quiere llenar la caché—, así que esa mitad
+     * quedaba sin leer. Una rama de un `tee()` que nadie lee NO se descarta: frena a la otra y la
+     * memoria crece hasta que Cloudflare tumba el Worker con un 500. Salían a puñados al medir el
+     * catálogo entero, y parecían cosa de archive.org.
+     */
     ctx.waitUntil(
       env.CACHE.head(llaveDe(url, siguiente))
         .then(existe => (existe ? null : traerTrozo(env, url, siguiente, ctx)))
+        .then(traido => (traido && traido.stream ? traido.stream.cancel() : null))
         .catch(() => null)
     );
   }
@@ -529,4 +625,80 @@ export async function servirConCache(request, env, ctx, url) {
       'X-Cache': respuestaYaAbierta ? 'MISS' : 'HIT',
     },
   });
+}
+
+/**
+ * DEJA EL ÍNDICE DE UNA PELÍCULA EN R2 ANTES DE QUE NADIE LA ABRA.
+ *
+ * Esto es lo que faltaba, y es la diferencia entre arreglar películas y arreglar el problema.
+ *
+ * Todo lo demás de este fichero hace la reproducción más rápida, pero alguien sigue pagando el
+ * arranque frío: el PRIMERO que abre cada película. Y con archive.org ese primero muchas veces no
+ * llega — se midió sobre las 21 fichas del catálogo que salen de ahí y seis fallaban por lo mismo,
+ * que traer el índice tardaba más de los 25 s que el reproductor aguanta.
+ *
+ * Ese trabajo no tiene por qué hacerlo un espectador. El barrido que comprueba los enlaces ya
+ * pasa por todas las películas cada veinte minutos, no tiene prisa, y puede tardar lo que haga
+ * falta. Llamando aquí desde ahí, cuando alguien abre una película el índice ya está en casa.
+ *
+ * Se calientan los tres primeros trozos y los CUATRO últimos: un mp4 puede llevar el índice
+ * delante o detrás, y desde fuera no se sabe cuál sin mirar el fichero. Cuatro por detrás porque
+ * un índice de película larga pasa de los 6 MB y con dos se queda a medias.
+ */
+export async function calentarIndice(env, ctx, url) {
+  if (!env.CACHE) return { ok: false, motivo: 'sin R2' };
+
+  let total = 0;
+  try {
+    const sonda = await pedirAlOrigen(url, 0, 0);
+    if (!sonda || !sonda.ok) return { ok: false, motivo: 'origen ' + (sonda ? sonda.status : 'mudo') };
+    total = totalDe(sonda);
+    if (sonda.body) sonda.body.cancel();
+  } catch (e) {
+    return { ok: false, motivo: e.message };
+  }
+  if (!total) return { ok: false, motivo: 'el origen no dice el tamaño' };
+
+  const ultimo = Math.floor((total - 1) / TROZO);
+  const quiero = [0, 1, 2, ultimo, ultimo - 1, ultimo - 2, ultimo - 3]
+    .filter(i => i >= 0 && i <= ultimo)
+    .filter((i, n, lista) => lista.indexOf(i) === n);
+
+  /*
+   * EN PARALELO PERO DE TRES EN TRES, y consumiendo lo que se trae.
+   *
+   * Las dos cosas se aprendieron fallando. Con los siete a la vez el Worker contestaba 503 —el
+   * límite de recursos de Cloudflare— y no por el número de peticiones: `traerTrozo` parte el
+   * stream en dos con `tee()`, una mitad para quien pidió y otra para R2, y aquí solo interesaba
+   * la de R2. Una rama de un `tee()` que nadie lee no se descarta: frena a la otra y la memoria
+   * crece hasta que el Worker cae. Hay que beberse la mitad que no se usa.
+   *
+   * Y de tres en tres porque con archive.org lo que cuesta es la latencia, no el ancho de banda:
+   * tres a la vez la pagan una sola vez sin acercarse a ningún límite.
+   */
+  const hechos = [];
+  for (let i = 0; i < quiero.length; i += 3) {
+    const tanda = quiero.slice(i, i + 3);
+    const resultados = await Promise.all(tanda.map(async indice => {
+      const ya = await env.CACHE.head(llaveDe(url, indice)).catch(() => null);
+      if (ya) return 'ya';
+      try {
+        const traido = await traerTrozo(env, url, indice, ctx);
+        if (traido && traido.stream) await traido.stream.cancel().catch(() => {});
+        return 'traído';
+      } catch {
+        return 'falló';
+      }
+    }));
+    hechos.push(...resultados);
+  }
+
+  return {
+    ok: hechos.filter(h => h === 'falló').length === 0,
+    total,
+    trozos: quiero.length,
+    traidos: hechos.filter(h => h === 'traído').length,
+    yaEstaban: hechos.filter(h => h === 'ya').length,
+    fallaron: hechos.filter(h => h === 'falló').length,
+  };
 }

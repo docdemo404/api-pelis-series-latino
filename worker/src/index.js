@@ -1,4 +1,4 @@
-import { servirConCache } from './cacheDeTrozos.js';
+import { servirConCache, calentarIndice } from './cacheDeTrozos.js';
 /**
  * ───────────────────────────────────────────────────────────────────────────────────────────
  * PROXY DE VÍDEO EN CLOUDFLARE — el que quita el techo de ancho de banda.
@@ -227,6 +227,21 @@ export default {
      */
     if (url.pathname === '/v') {
       return servirConCache(request, env, ctx, embedUrl);
+    }
+
+    /**
+     * ── Calentar el índice, para que el espectador no lo pague ───────────────────────────
+     *
+     * No la llama ningún reproductor: la llama el barrido que comprueba los enlaces. Lleva la
+     * misma firma que todo lo demás, así que no es una puerta abierta para que un tercero nos
+     * haga descargar lo que quiera.
+     */
+    if (url.pathname === '/calienta') {
+      const resultado = await calentarIndice(env, ctx, embedUrl);
+      return new Response(JSON.stringify(resultado), {
+        status: resultado.ok ? 200 : 502,
+        headers: { ...CORS, 'Content-Type': 'application/json' },
+      });
     }
 
     // ── Segmento o variante: la URL real viaja en ?u= ────────────────────────────────────
