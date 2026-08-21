@@ -1389,7 +1389,7 @@ export class CatalogService {
 
     let q = supabase
       .from('media_items')
-      .select('id,title,type,release_date,servers,seasons', { count: 'exact' })
+      .select('id,title,type,release_date,servers,seasons,poster,has_streams,streams_checked_at', { count: 'exact' })
       .order('title');
     if (opts.tipo) q = q.eq('type', opts.tipo);
     if (opts.q) q = q.ilike('title', `%${opts.q}%`);
@@ -1441,6 +1441,7 @@ export class CatalogService {
         urls: publicables.map(sv => sv.direct_stream),
         // Cuántas de esas urls son de capítulos: en una serie el vídeo vive ahí.
         de_capitulos: deCapitulos.filter(sv => sv?.direct_stream).length,
+        ...razonDeVisibilidad(r),
       };
     });
 
@@ -3371,3 +3372,45 @@ export class CatalogService {
     };
   }
 }
+
+/**
+ * ¿SE VE ESTE TÍTULO EN LA APP? Y SI NO, ¿POR QUÉ NO?
+ *
+ * El panel enseñaba el catálogo entero sin distinguir lo que llega al espectador de lo que no, y
+ * esa diferencia es justo la que importa: se reportó una película que aparecía en la app y no
+ * reproducía, y desde el panel no había forma de verlo venir. Un catálogo que no dice qué parte de
+ * sí mismo es visible obliga a descubrirlo abriendo títulos a mano.
+ *
+ * Las condiciones son EXACTAMENTE las de `soloPublicables`, que es el filtro que aplican los
+ * listados de verdad. Copiarlas con otro criterio sería peor que no tener esto: un panel que dice
+ * «sí aparece» sobre algo que no aparece engaña con más autoridad que el silencio.
+ *
+ * El motivo es lo que convierte el dato en accionable. «No aparece» no dice qué hacer; «no tiene
+ * ningún servidor que reproduzca» manda a rastrear, «no se comprueba desde hace X» manda a mirar
+ * el barrido, y «sin carátula» manda a la metadata.
+ */
+function razonDeVisibilidad(r: any): { en_la_app: boolean; motivo: string | null } {
+  if (!r?.has_streams) {
+    const tieneUrls = [
+      ...(Array.isArray(r?.servers) ? r.servers : []),
+      ...((Array.isArray(r?.seasons) ? r.seasons : []) as any[])
+        .flatMap((t: any) => Array.isArray(t?.episodes) ? t.episodes : [])
+        .flatMap((e: any) => Array.isArray(e?.servers) ? e.servers : []),
+    ].some((sv: any) => sv?.direct_stream);
+    return {
+      en_la_app: false,
+      motivo: tieneUrls ? 'sus enlaces no han demostrado que reproduzcan' : 'no tiene ningún enlace',
+    };
+  }
+  if (!r?.poster) return { en_la_app: false, motivo: 'sin carátula: en una parrilla se vería como una tarjeta rota' };
+
+  const cuando = r?.streams_checked_at ? Date.parse(r.streams_checked_at) : 0;
+  const edadMs = cuando ? Date.now() - cuando : Infinity;
+  if (!(edadMs < VERIFICADO_VIGENTE_MS)) {
+    const horas = Number.isFinite(edadMs) ? (edadMs / 3600000).toFixed(1) : '?';
+    return { en_la_app: false, motivo: `la comprobación caducó (hace ${horas} h; el sello dura ${(VERIFICADO_VIGENTE_MS / 3600000).toFixed(0)} h)` };
+  }
+
+  return { en_la_app: true, motivo: null };
+}
+
