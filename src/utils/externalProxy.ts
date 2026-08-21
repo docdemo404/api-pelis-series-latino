@@ -1,4 +1,5 @@
 import * as crypto from 'crypto';
+import { pasaPorLaCache } from '../services/hostsConCache';
 
 /**
  * ───────────────────────────────────────────────────────────────────────────────────────────
@@ -72,6 +73,21 @@ export function proxyUrlFor(embedUrl: string): string | null {
  * siempre. Eso es lo que permite apagar todo esto cambiando una variable de entorno.
  */
 export function cacheUrlFor(fileUrl: string): string | null {
+  /**
+   * SOLO LOS HOSTS QUE ALGUIEN HAYA ENCENDIDO, Y POR DEFECTO NINGUNO.
+   *
+   * Antes esto envolvía cualquier fichero permanente: si la url parecía un fichero, pasaba por el
+   * Worker. Era una decisión tomada en el código sobre algo que no se puede juzgar desde aquí — un
+   * host que ya va rápido y sabe de rangos no gana nada y se come un salto de más, lo que pasa por
+   * el Worker gasta cuota y sitio en R2, y un mal día del Worker se llevaría por delante hosts que
+   * funcionaban solos.
+   *
+   * Ahora se enciende host por host desde el panel. Apagado por defecto es la postura correcta:
+   * un ajuste que empieza encendido para todos no es un ajuste, es un comportamiento con un
+   * interruptor decorativo.
+   */
+  if (!pasaPorLaCache(fileUrl)) return null;
+
   const url = proxyUrlFor(fileUrl);
   if (!url) return null;
   // `proxyUrlFor` apunta a la raíz; la caché por trozos vive en /v.

@@ -209,7 +209,9 @@ export default {
     let embedUrl;
     try {
       embedUrl = b64urlDecode(embedParam);
-      if (!/^https?:\/\//i.test(embedUrl)) throw new Error('embed no válido');
+      // `/ajustes` no lleva una url dentro del `e`, lleva el nombre del ajuste. Todo lo demás sí,
+      // y ahí la comprobación se mantiene: servir una url que no es una url no lleva a nada bueno.
+      if (url.pathname !== '/ajustes' && !/^https?:\/\//i.test(embedUrl)) throw new Error('embed no válido');
     } catch {
       return new Response('parámetro ?e= no válido', { status: 400, headers: CORS });
     }
@@ -236,6 +238,34 @@ export default {
      * misma firma que todo lo demás, así que no es una puerta abierta para que un tercero nos
      * haga descargar lo que quiera.
      */
+    /**
+     * ── Ajustes del panel, guardados en R2 ───────────────────────────────────────────────
+     *
+     * Existe porque el sitio donde se guardaban antes NO GUARDABA. La configuración del panel
+     * vivía en variables de entorno de Vercel escritas por su API, y se comprobó que la escritura
+     * falla en silencio: se encendió un dominio, la respuesta dijo «success», y al leer la
+     * variable seguía valiendo `[]`. Un ajuste que contesta que sí y no persiste es peor que uno
+     * que no existe, porque nadie vuelve a comprobarlo.
+     *
+     * R2 sí escribe —lleva toda la caché de vídeo funcionando sobre él— y además es donde tiene
+     * sentido que viva un ajuste que decide qué pasa por este Worker. Se firma igual que todo lo
+     * demás: sin firma, cualquiera podría reescribir la configuración.
+     */
+    if (url.pathname === '/ajustes') {
+      if (!env.CACHE) return new Response('R2 no está configurado', { status: 501, headers: CORS });
+      const clave = 'ajustes/' + embedUrl.replace(/[^a-z0-9_.-]/gi, '_');
+
+      if (request.method === 'PUT' || request.method === 'POST') {
+        const cuerpo = await request.text();
+        await env.CACHE.put(clave, cuerpo, { httpMetadata: { contentType: 'application/json' } });
+        return new Response(cuerpo, { headers: { ...CORS, 'Content-Type': 'application/json' } });
+      }
+
+      const guardado = await env.CACHE.get(clave);
+      if (!guardado) return new Response('null', { headers: { ...CORS, 'Content-Type': 'application/json' } });
+      return new Response(guardado.body, { headers: { ...CORS, 'Content-Type': 'application/json' } });
+    }
+
     if (url.pathname === '/calienta') {
       const resultado = await calentarIndice(env, ctx, embedUrl);
       return new Response(JSON.stringify(resultado), {

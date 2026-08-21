@@ -38,6 +38,22 @@ function seEntregaTalCual(url: string | undefined | null): boolean {
  * daría al reproductor un HTML y un error que no dice por qué.
  */
 function urlPublicaDe(server: ServerOption): string | undefined {
+  /**
+   * SI LO GUARDADO YA VIENE ENVUELTO EN LA CACHÉ, SE DESENVUELVE.
+   *
+   * Lo que se persiste se fosiliza, y aquí se cobró otra vez. La lista de servidores no solo se
+   * entrega: también se guarda, y al entregarla la url del fichero se sustituye por la de la
+   * caché. Esa url acaba en la base, y a partir de ahí `seEntregaTalCual` la daba por buena y la
+   * devolvía tal cual — con lo cual el dominio salía SIEMPRE por la caché, estuviera encendido o
+   * apagado. El interruptor del panel dejaba de significar nada.
+   *
+   * Devolviendo el fichero de dentro, la decisión vuelve a tomarse en cada entrega: si el host
+   * está encendido se envuelve otra vez, y si no, sale directo. La firma garantiza que lo de
+   * dentro es una url que pusimos nosotros.
+   */
+  const desenvuelto = ficheroDentroDeNuestraCache(String(server.direct_stream || ''));
+  if (desenvuelto && seEntregaTalCual(desenvuelto)) return desenvuelto;
+
   if (seEntregaTalCual(server.direct_stream)) return server.direct_stream;
   if (esFicheroDirecto(server.embed_url || '') && seEntregaTalCual(server.embed_url)) return server.embed_url;
 
@@ -137,7 +153,7 @@ export function effectiveDirectMode(server: ServerOption): DirectMode | undefine
  */
 export function enlaceDirecto(server: ServerOption): string | undefined {
   const actual = server.direct_stream;
-  if (!actual || !server.embed_url) return actual;
+  if (!actual) return actual;
   /**
    * Lo permanente se entrega tal cual, PERO POR LA CACHÉ SI LA HAY.
    *
@@ -152,6 +168,21 @@ export function enlaceDirecto(server: ServerOption): string | undefined {
    */
   const publica = urlPublicaDe(server);
   if (publica) return cacheUrlFor(publica) || publica;
+
+  /**
+   * A PARTIR DE AQUÍ SÍ HACE FALTA EL EMBED, y por eso la comprobación bajó hasta este punto.
+   *
+   * Estaba arriba del todo —`if (!actual || !server.embed_url) return actual`— y eso descartaba de
+   * un plumazo a los servidores que no tienen página de origen, aunque su url fuera permanente y
+   * perfectamente entregable. Se notó al restaurar fichas de archive.org: se guardaron con su
+   * `direct_stream` y sin `embed_url` —que para un fichero suelto no significa nada—, y salían
+   * siempre directas al host, ignorando por completo el ajuste de caché.
+   *
+   * El embed solo se necesita para lo de abajo, que es construir la url de resolución de la API.
+   * Exigirlo antes era pedir un dato para un camino que no se iba a tomar.
+   */
+  if (!server.embed_url) return actual;
+
   // Lo que ya apunta a la API (relativo o absoluto) se queda como está.
   if (!/^https?:\/\//i.test(actual) || actual.includes('/api/v1/stream/direct')) return actual;
   return directEndpointUrl(server.embed_url, server.direct_kind === 'mp4' ? 'mp4' : 'hls');

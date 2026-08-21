@@ -7,6 +7,9 @@ import { sendErrorResponse } from '../utils/apiHelpers';
 import { BandwidthService } from '../services/bandwidthService';
 import { externalProxyEnabled } from '../utils/externalProxy';
 import { CatalogService } from '../services/catalogService';
+import { refrescarHostsConCache, ponerHostConCache, hostsConCache } from '../services/hostsConCache';
+import { leerAjuste } from '../utils/ajustesRemotos';
+import { hostsDelCatalogo } from '../services/catalogService';
 
 /**
  * Panel de administración: página estática + API de fuentes y overrides.
@@ -252,3 +255,67 @@ router.get('/api/v1/panel/overrides', (_req: Request, res: Response) => {
 });
 
 export default router;
+
+/**
+ * LOS DOMINIOS QUE SIRVEN VÍDEO, Y SI PASAN POR LA CACHÉ.
+ *
+ * La lista sale del catálogo, no de una constante: los hosts aparecen y desaparecen solos según lo
+ * que devuelvan los scrapers, y una lista escrita a mano nace desfasada.
+ */
+router.get('/api/v1/panel/hosts', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const [hosts, encendidos] = await Promise.all([
+      hostsDelCatalogo(),
+      refrescarHostsConCache(),
+    ]);
+    res.json({
+      status: 'success',
+      hosts: hosts.map((h: { host: string; servidores: number; titulos: number }) => ({ ...h, worker: encendidos.includes(h.host) })),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** Enciende o apaga la caché para UN dominio. */
+router.post('/api/v1/panel/hosts', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const host = String(b.host || '').trim();
+    if (!host) return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'Se requiere el host');
+
+    const encendido = b.worker === true || String(b.worker) === 'true';
+    const r = await ponerHostConCache(host, encendido);
+    if (!r.guardado) {
+      // 502 y no 200: el panel tiene que poder devolver el interruptor a su sitio.
+      return sendErrorResponse(res, 502, 'SETTING_NOT_SAVED', 'No se pudo guardar el ajuste.');
+    }
+    res.json({ status: 'success', host, worker: encendido, encendidos: r.encendidos });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * QUÉ VE EXACTAMENTE ESTE PROCESO, para poder distinguir «no se guardó» de «no se leyó».
+ *
+ * Sin esto los dos fallos se parecen demasiado: el panel enseña un dominio encendido y el vídeo
+ * sale sin caché, y desde fuera no hay forma de saber si el ajuste no llegó a guardarse, si no se
+ * está leyendo, o si se lee y no se aplica. Se perdió un buen rato por no poder mirar.
+ */
+router.get('/api/v1/panel/hosts/estado', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const enMemoriaAntes = hostsConCache();
+    const leidoAhora = await leerAjuste<string[]>('hosts-cache');
+    await refrescarHostsConCache();
+    res.json({
+      status: 'success',
+      proxy_configurado: Boolean(process.env.VIDEO_PROXY_URL && process.env.VIDEO_PROXY_KEY),
+      en_memoria_antes: enMemoriaAntes,
+      lo_que_hay_guardado: leidoAhora,
+      en_memoria_ahora: hostsConCache(),
+    });
+  } catch (err) {
+    next(err);
+  }
+});

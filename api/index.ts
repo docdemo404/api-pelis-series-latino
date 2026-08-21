@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { asegurarHostsConCache } from '../src/services/hostsConCache';
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import path from 'path';
@@ -134,6 +135,30 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 });
 
 // Portal de documentación estático
+/**
+ * QUÉ DOMINIOS PASAN POR LA CACHÉ, LEÍDO ANTES DE ATENDER NADA.
+ *
+ * Va aquí y no dentro de una ruta porque el ajuste decide la URL que sale por VARIOS caminos —el
+ * listado de servidores, el detalle y `/stream/direct`—, y ponerlo en uno solo produce justo el
+ * fallo que costó encontrar: el panel enseñaba el dominio encendido, `/streams` seguía entregando
+ * la url directa, y `/stream/direct` delegaba en el Worker por el camino de siempre. Tres
+ * comportamientos distintos para un mismo interruptor.
+ *
+ * Cuesta UNA petición en el primer uso de cada proceso y cero en los siguientes: `asegurar…` sale
+ * por la puerta en cuanto la lista ya está leída. Hace falta porque con poco tráfico Vercel arranca
+ * un proceso nuevo casi por petición, y una lectura en segundo plano al cargar el módulo no llega
+ * nunca a tiempo — medido.
+ */
+app.use(async (_req: Request, _res: Response, next: NextFunction) => {
+  try {
+    await asegurarHostsConCache();
+  } catch {
+    // Si no se puede leer, se sigue sin caché: es la opción que no cambia el comportamiento de
+    // nadie. Un ajuste ilegible no puede encender algo que estaba apagado.
+  }
+  next();
+});
+
 app.use('/docs', express.static(path.join(__dirname, '../public')));
 
 // Especificación OpenAPI 3.0 para Agentes de IA y Clientes Automatizados

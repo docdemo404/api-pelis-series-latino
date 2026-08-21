@@ -340,6 +340,33 @@
           </div>
         </div>
 
+
+        <!-- Qué dominios pasan por la caché del Worker -->
+        <div class="card main-card p-4 p-md-5 mb-4">
+          <h3 class="brand-title fw-bold mb-2">⚡ Caché por dominio</h3>
+          <p class="text-secondary mb-3">
+            Qué dominios se sirven a través de la caché del Worker. <strong>Por defecto está
+            apagada en todos.</strong> Encenderla ayuda a los hosts lentos o que no saben
+            posicionarse dentro del fichero; a uno que ya va bien solo le añade un salto de más, y
+            todo lo que pasa por ahí gasta cuota y sitio en R2.
+          </p>
+          <div class="table-responsive tabla-a-fichas">
+            <table class="table table-sm align-middle mb-0">
+              <thead>
+                <tr class="text-secondary small">
+                  <th style="min-width:220px">Dominio</th>
+                  <th style="width:110px">Servidores</th>
+                  <th style="width:100px">Títulos</th>
+                  <th style="width:120px">Caché</th>
+                </tr>
+              </thead>
+              <tbody id="hostsTabla">
+                <tr><td colspan="4" class="text-secondary small py-3">⏳ Cargando…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
         <!-- Tarjeta Principal de Fuentes -->
         <div class="card main-card p-4 p-md-5 mb-4">
           <h3 class="brand-title fw-bold mb-2">Proveedores & Orden de Prioridad</h3>
@@ -648,6 +675,67 @@
         contTabla.innerHTML = '<tr><td colspan="5" class="alert alert-danger mb-0">❌ No se pudo leer /api/v1/panel/contenido</td></tr>';
       }
     }
+
+
+    // ─── Caché por dominio ──────────────────────────────────────────────────────
+    /**
+     * La lista de dominios sale del CATÁLOGO, no de una constante en el panel.
+     *
+     * Los hosts aparecen y desaparecen solos según lo que devuelvan los scrapers, así que una
+     * lista escrita a mano nace desfasada — y el día que un host nuevo empiece a servir vídeo,
+     * nadie tendría dónde encenderlo.
+     */
+    const hostsTabla = document.getElementById('hostsTabla');
+
+    async function cargarHosts() {
+      if (!hostsTabla) return;
+      hostsTabla.innerHTML = '<tr><td colspan="4" class="text-secondary small py-3">⏳ Cargando…</td></tr>';
+      try {
+        const j = await (await fetch('/api/v1/panel/hosts')).json();
+        const hosts = j.hosts || [];
+        if (!hosts.length) {
+          hostsTabla.innerHTML = '<tr><td colspan="4" class="text-secondary small py-3">Ningún dominio con vídeo todavía.</td></tr>';
+          return;
+        }
+        hostsTabla.innerHTML = hosts.map(h =>
+          '<tr>' +
+            '<td class="fw-semibold text-break" data-t="Dominio">' + h.host + '</td>' +
+            '<td class="text-secondary small" data-t="Servidores">' + h.servidores + '</td>' +
+            '<td class="text-secondary small" data-t="Titulos">' + h.titulos + '</td>' +
+            '<td data-t="Cache">' +
+              '<div class="form-check form-switch mb-0">' +
+                '<input class="form-check-input host-worker" type="checkbox" role="switch" ' +
+                  'data-host="' + h.host + '"' + (h.worker ? ' checked' : '') + '>' +
+              '</div>' +
+            '</td>' +
+          '</tr>'
+        ).join('');
+
+        document.querySelectorAll('.host-worker').forEach(sw => sw.addEventListener('change', async (e) => {
+          const caja = e.target;
+          const antes = !caja.checked;
+          caja.disabled = true;
+          try {
+            const r = await fetch('/api/v1/panel/hosts', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ host: caja.dataset.host, worker: caja.checked }),
+            });
+            if (!r.ok) throw new Error('no se guardó');
+          } catch (err) {
+            // Se devuelve el interruptor a donde estaba: dejarlo en la posición nueva haría creer
+            // que se guardó algo que no se guardó, que es peor que el propio fallo.
+            caja.checked = antes;
+            alert('No se pudo guardar el ajuste de ' + caja.dataset.host);
+          } finally {
+            caja.disabled = false;
+          }
+        }));
+      } catch (e) {
+        hostsTabla.innerHTML = '<tr><td colspan="4" class="alert alert-danger mb-0">❌ No se pudo leer /api/v1/panel/hosts</td></tr>';
+      }
+    }
+    cargarHosts();
 
     document.querySelectorAll('.filtro-tipo').forEach(b => b.addEventListener('click', () => {
       document.querySelectorAll('.filtro-tipo').forEach(x => x.classList.remove('active'));

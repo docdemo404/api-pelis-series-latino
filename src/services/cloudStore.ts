@@ -112,6 +112,32 @@ export class CloudStore {
   }
 
   /**
+   * Un ajuste suelto del panel, leído de donde ya se leen las fuentes.
+   *
+   * `getSources` y `getOverrides` hacían cada uno su propia cadena «memoria → env del proceso →
+   * API de Vercel», idéntica salvo por la clave. Esto es esa misma cadena con la clave como
+   * parámetro, para que el ajuste siguiente no traiga una tercera copia.
+   */
+  static async getAjuste(clave: string): Promise<string | null> {
+    const delProceso = process.env[clave];
+    if (delProceso) return delProceso;
+    try {
+      return await getVercelEnv(clave);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Guarda ese ajuste. Persiste entre despliegues, como el resto de la configuración. */
+  static async guardarAjuste(clave: string, valor: string): Promise<void> {
+    // También en el proceso: si no, quien lo acaba de guardar seguiría leyendo lo viejo hasta que
+    // la API de Vercel propague, y el panel parecería no haber hecho nada.
+    process.env[clave] = valor;
+    await setVercelEnv(clave, valor);
+  }
+
+
+  /**
    * Guarda fuentes en Vercel env var (persistente entre deploys)
    */
   static async saveSources(sources: SourceConfig[]): Promise<void> {

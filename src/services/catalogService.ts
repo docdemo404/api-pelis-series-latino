@@ -3,6 +3,8 @@ import { supabase, getSupabaseAdmin } from './supabaseService';
 import { RealScraperService } from './realScraperService';
 import { TmdbService } from './tmdbService';
 import { sortServersBySourcePriority, getPrimaryStream, paraElCliente, fichaReproducible, veredictoDisponibilidad, VERIFICADO_VIGENTE_MS } from './streamSorter';
+import { hostNormalizado } from './hostsConCache';
+import { ficheroDentroDeNuestraCache } from '../utils/externalProxy';
 import { normalizeTitle, slugify, yearFromSlug, searchIndexKey } from '../utils/text';
 import { httpClient } from '../utils/httpClient';
 import { CacheStore } from '../cache/store';
@@ -1945,11 +1947,56 @@ export class CatalogService {
    * único que autoriza a anotar un veredicto de disponibilidad: que un camino barato no
    * encuentre enlaces no significa que la ficha sea un fantasma.
    */
+  /**
+   * Los servidores puestos a mano que ya hay guardados para esta ficha.
+   *
+   * Se leen de la base y no del objeto en memoria a propósito: el objeto viene del rastreo, que no
+   * sabe nada de lo que alguien añadió por el panel — es justo lo que se estaba perdiendo.
+   */
+  private static async manualesGuardadosDe(id: string): Promise<ServerOption[]> {
+    try {
+      const { data } = await getSupabaseAdmin()
+        .from('media_items')
+        .select('servers')
+        .eq('id', id)
+        .maybeSingle();
+      return (((data?.servers as any[]) || []) as ServerOption[])
+        .filter(s => String((s as any)?.source_id || '').toLowerCase() === 'manual');
+    } catch {
+      // Sin lectura no se puede saber qué había; se sigue sin tocar nada más.
+      return [];
+    }
+  }
+
   private static async persistStreams(item: MediaItem, verified: boolean = false, seMiroAlgo: boolean = true): Promise<void> {
     if (!item.id) return;
 
+    /**
+     * LO QUE SE AÑADIÓ A MANO NO SE PISA NUNCA.
+     *
+     * Este método reemplaza el array de servidores entero por el que acaba de resolver el
+     * rastreo. Para lo que viene de un scraper es correcto —esa lista se vuelve a calcular cada
+     * vez—, pero arrasa con lo que alguien metió por la fuente propia: se reportó tal cual, «los
+     * datos de la fuente propia no persisten». Aparecían al guardar y desaparecían en la siguiente
+     * pasada del rastreo.
+     *
+     * Y es un dato de otra naturaleza. Una url puesta a mano es una DECISIÓN de una persona que
+     * sabe algo que el scraper no sabe; el scraper no puede desmentirla, solo puede no haberla
+     * encontrado. Perderla obliga a volver a pegarla, y a nadie se le ocurre revisar si sigue ahí.
+     *
+     * Se rescatan del estado guardado y se ponen DELANTE, que es donde estaban. Si el rastreo trae
+     * esa misma url, se queda la manual: llevan el mismo vídeo y la etiqueta de origen importa
+     * para lo que venga después.
+     */
+    const manualesPrevios = await this.manualesGuardadosDe(item.id);
+    const resueltos = (item.servers || []) as ServerOption[];
+    const urlsManuales = new Set(manualesPrevios.map(m => String(m?.direct_stream || '')));
+    const servidores = manualesPrevios.length
+      ? [...manualesPrevios, ...resueltos.filter(s => !urlsManuales.has(String(s?.direct_stream || '')))]
+      : resueltos;
+
     const update: Record<string, unknown> = {
-      servers: item.servers || [],
+      servers: servidores,
       seasons: item.seasons || [],
       source_url: item._source_url || null,
       streams_updated_at: new Date().toISOString()
@@ -3583,4 +3630,50 @@ async function manifiestoTraeVideo(texto: string, urlBase: string): Promise<bool
   } catch {
     return true;
   }
+}
+
+/**
+ * LOS DOMINIOS QUE SIRVEN VÍDEO EN ESTE CATÁLOGO, con cuántos servidores tiene cada uno.
+ *
+ * Es la lista que el panel necesita para poder encender la caché host por host. Se saca del
+ * catálogo y no de una lista escrita a mano a propósito: los hosts van y vienen —un scraper
+ * empieza a devolver uno nuevo y nadie se entera— y una lista fija estaría desfasada el día que se
+ * escribe. Aquí, si aparece un host, aparece en el panel.
+ *
+ * La url puede venir ya envuelta en la de la caché, así que se deshace el envoltorio antes de
+ * mirar el dominio: si no, todo saldría bajo el host del Worker y la lista no serviría para nada.
+ */
+export async function hostsDelCatalogo(): Promise<Array<{ host: string; servidores: number; titulos: number }>> {
+  const { data } = await getSupabaseAdmin()
+    .from('media_items')
+    .select('id,servers,seasons')
+    .limit(5000);
+
+  const porHost = new Map<string, { servidores: number; titulos: Set<string> }>();
+
+  for (const fila of (data || []) as any[]) {
+    const todos = [
+      ...((fila.servers as any[]) || []),
+      ...(((fila.seasons as any[]) || [])
+        .flatMap((t: any) => t?.episodes || [])
+        .flatMap((e: any) => e?.servers || [])),
+    ];
+
+    for (const sv of todos) {
+      const cruda = String(sv?.direct_stream || '');
+      if (!cruda.startsWith('http')) continue;
+      const real = ficheroDentroDeNuestraCache(cruda) || cruda;
+      const host = hostNormalizado(real);
+      if (!host) continue;
+
+      const antes = porHost.get(host) || { servidores: 0, titulos: new Set<string>() };
+      antes.servidores++;
+      antes.titulos.add(String(fila.id));
+      porHost.set(host, antes);
+    }
+  }
+
+  return [...porHost.entries()]
+    .map(([host, v]) => ({ host, servidores: v.servidores, titulos: v.titulos.size }))
+    .sort((a, b) => b.servidores - a.servidores);
 }
