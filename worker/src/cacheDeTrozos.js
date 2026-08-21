@@ -283,33 +283,29 @@ async function pedirAlOrigen(url, desde, hasta) {
 }
 
 /**
- * Escribe en `escritor` los bytes de una respuesta del origen, y de paso llena trozos en R2.
+ * Escribe en `escritor` los bytes de una respuesta del origen. NO GUARDA NADA, y eso es el arreglo.
  *
- * `saltar` es para cuando el origen ignora el `Range` y manda desde el principio: el
- * `Content-Range` que ya se anunció dice dónde empieza esto, así que colar bytes de más correría
- * todos los desplazamientos y el vídeo saldría corrupto.
+ * Guardaba: iba juntando lo que pasaba hasta completar un trozo y lo escribía en R2. Parecía
+ * gratis —los bytes ya estaban de camino— y no lo era, porque juntar 4 MB significa tenerlos en
+ * memoria, y completar el trozo significa copiarlos otra vez para partirlos. Tres copias de 4 MB
+ * por trozo. Con la ráfaga de seis en paralelo eso son más de setenta megas de golpe, y el Worker
+ * tiene ciento veintiocho: se quedaba sin memoria A MITAD DEL ENVÍO.
+ *
+ * Y morirse a mitad del envío es la peor forma de fallar aquí, porque las cabeceras ya salieron
+ * diciendo cuánto iba a medir la respuesta. El cliente recibe menos de lo prometido. Un navegador
+ * lo perdona —vuelve a pedir lo que falta y sigue tan tranquilo—, pero media3 no: da el fichero
+ * por terminado. De ahí venía exactamente lo que se reportó, que el navegador reproduce una
+ * película y la app no.
+ *
+ * Medido por el camino de entrega: cuatro de doce entregaban el índice a medias —una, 1.066.553
+ * bytes de los 5.267.222 que había prometido—. Sin guardar nada, la memoria deja de ser un
+ * problema y los bytes salen tal como vienen.
+ *
+ * La caché se sigue llenando, solo que donde toca: en la lectura por delante y en el calentador,
+ * que usan `traerTrozo` y escriben en R2 con un `tee()` — sin juntar nada en memoria.
  */
-async function relevarDelOrigen(env, ctx, url, respuesta, escritor, posInicial, saltar, totalFichero) {
-  /*
-   * `totalFichero` ES EL TAMAÑO DEL FICHERO, no el final del rango que se pidió. La diferencia
-   * parece de matiz y envenena la caché entera.
-   *
-   * Aquí se pasaba `hasta + 1`, que en un rango ABIERTO da el tamaño bueno — y por eso pasó
-   * desapercibido. Pero en un rango ACOTADO da el final de ESE rango: una sola petición de
-   * `bytes=0-65535` dejaba escrito en R2 que la película medía 65.536 bytes. A partir de ahí toda
-   * petición leía ese apunte, contestaba `Content-Range: bytes 0-65535/65536`, y el reproductor
-   * se encontraba con una película de 64 KB. Lo destapó «El diario íntimo de una cabaretera».
-   *
-   * Un dato equivocado en la caché es peor que no tener caché: sobrevive a los despliegues y no
-   * se cura solo.
-   */
+async function relevarDelOrigen(escritor, respuesta, saltar) {
   let porTirar = saltar;
-  let indiceBuffer = Math.floor(posInicial / TROZO);
-  const alineado = posInicial % TROZO === 0;
-  let acumulado = [];
-  let acumuladoBytes = 0;
-  let guardados = 0;
-
   const lector = respuesta.body.getReader();
   for (;;) {
     const { done, value } = await lector.read();
@@ -321,29 +317,6 @@ async function relevarDelOrigen(env, ctx, url, respuesta, escritor, posInicial, 
       porTirar = 0;
     }
     await escritor.write(util);
-
-    // Solo se guarda si esto empieza justo en un borde de trozo. Si no, lo escrito no cuadraría
-    // con lo que `llaveDe` promete y la caché mentiría.
-    if (alineado && guardados < TROZOS_QUE_SE_GUARDAN) {
-      acumulado.push(util);
-      acumuladoBytes += util.length;
-      while (acumuladoBytes >= TROZO && guardados < TROZOS_QUE_SE_GUARDAN) {
-        const junto = new Uint8Array(acumuladoBytes);
-        let o = 0;
-        for (const t of acumulado) { junto.set(t, o); o += t.length; }
-        const entero = junto.slice(0, TROZO);
-        const resto = junto.slice(TROZO);
-        ctx.waitUntil(
-          env.CACHE.put(llaveDe(url, indiceBuffer), entero, {
-            customMetadata: { total: String(totalFichero), visto: String(Date.now()) },
-          }).catch(() => null)
-        );
-        indiceBuffer++;
-        guardados++;
-        acumulado = resto.length ? [resto] : [];
-        acumuladoBytes = resto.length;
-      }
-    }
   }
 }
 
@@ -377,7 +350,7 @@ function cuerpoContinuo(env, url, desde, hasta, ctx, respuestaYaAbierta, saltarD
       if (respuestaYaAbierta) {
         // Ya se pidió al origen ahí arriba para saber el tamaño; se aprovecha esa misma
         // respuesta en vez de volver a llamar.
-        await relevarDelOrigen(env, ctx, url, respuestaYaAbierta, escritor, desde, saltarDeEsa, totalFichero);
+        await relevarDelOrigen(escritor, respuestaYaAbierta, saltarDeEsa);
       } else {
         let pos = desde;
 
@@ -446,7 +419,7 @@ function cuerpoContinuo(env, url, desde, hasta, ctx, respuestaYaAbierta, saltarD
             throw new Error('origen ' + (respuesta ? respuesta.status : 'sin respuesta'));
           }
           const saltar = respuesta.status === 200 ? tramo.desde : 0;
-          await relevarDelOrigen(env, ctx, url, respuesta, escritor, tramo.desde, saltar, totalFichero);
+          await relevarDelOrigen(escritor, respuesta, saltar);
         }
 
         // --- tramo 2b: y el resto, ya en secuencia, de una sola petición ---
@@ -456,7 +429,7 @@ function cuerpoContinuo(env, url, desde, hasta, ctx, respuestaYaAbierta, saltarD
             throw new Error('origen ' + (respuesta ? respuesta.status : 'sin respuesta'));
           }
           const saltar = respuesta.status === 200 ? cursor : 0;
-          await relevarDelOrigen(env, ctx, url, respuesta, escritor, cursor, saltar, totalFichero);
+          await relevarDelOrigen(escritor, respuesta, saltar);
         }
       }
     } catch (e) {

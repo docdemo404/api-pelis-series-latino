@@ -25,6 +25,31 @@ import 'dotenv/config';
 import { getSupabaseAdmin } from '../../src/services/supabaseService';
 import { puedeAbrirse } from '../../src/services/arranqueMp4';
 
+/**
+ * La dirección pública de la API. La url firmada se le PIDE a ella en vez de calcularla aquí.
+ *
+ * Calcularla exige la clave de firma, y esa clave no está —ni tiene por qué estar— en la máquina
+ * de quien diagnostica: Vercel la devuelve censurada a propósito. Firmando con una clave
+ * equivocada, el Worker contesta 403 y el diagnóstico entero sale «0 de 15» por un motivo que no
+ * tiene nada que ver con las películas. Pedirla es una petición más y quita la clave de en medio.
+ */
+const API = process.env.CATALOG_URL || 'https://api-pelis-series-latino-gilt.vercel.app';
+
+/** La url tal y como la recibiría la app, firmada por quien sabe firmar. */
+async function comoLaVeLaApp(urlGuardada: string): Promise<string> {
+  try {
+    const e = Buffer.from(urlGuardada, 'utf8').toString('base64url');
+    const r = await fetch(`${API}/api/v1/stream/direct?e=${e}&mode=proxy`, {
+      redirect: 'manual',
+      signal: AbortSignal.timeout(30_000),
+    });
+    const destino = r.headers.get('location') || '';
+    return destino.startsWith('http') ? destino : urlGuardada;
+  } catch {
+    return urlGuardada;
+  }
+}
+
 interface Veredicto {
   id: string;
   titulo: string;
@@ -77,7 +102,8 @@ async function main() {
     }
     // Envuelto: un tope agotado en cualquier punto es un dato más, no una razón para tirar la
     // medición entera y quedarse sin el resumen — que es lo único que sirve para decidir.
-    const v = await probar(fila.id, fila.title, conVideo.direct_stream)
+    // La MISMA url que recibiría la app, no la guardada. Ver la nota en `verificarPermanentes`.
+    const v = await probar(fila.id, fila.title, await comoLaVeLaApp(conVideo.direct_stream))
       .catch((e: any) => ({ id: fila.id, titulo: fila.title, ok: false, causa: 'se cortó la prueba', detalle: e.message || String(e) }));
     veredictos.push(v);
     console.log(`${v.ok ? 'OK  ' : 'NO  '} ${v.titulo.slice(0, 40).padEnd(40)} ${v.causa} — ${v.detalle}`);

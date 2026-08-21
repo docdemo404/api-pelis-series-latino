@@ -47,7 +47,9 @@
  */
 import 'dotenv/config';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
+import { ficheroDentroDeNuestraCache } from '../src/utils/externalProxy';
 import { puedeAbrirse } from '../src/services/arranqueMp4';
+import { enlaceDirecto } from '../src/services/streamSorter';
 import { streamClient } from '../src/utils/httpClient';
 import { CacheStore } from '../src/cache/store';
 import { CatalogService } from '../src/services/catalogService';
@@ -282,6 +284,22 @@ const DESDE_MEDIO = 1000000;
  * Pasó con `remux.unlimplay.com`: se quitó de la lista, el barrido le quitaba el sello, y cinco
  * títulos seguían entregándolo igual. Lo que hoy no entraría, no se queda.
  */
+/**
+ * PRIMERO SE INTENTA REPARAR, Y SOLO SI NO HAY NADA QUE REPARAR SE BORRA.
+ *
+ * Esto borraba, y borró de más: siete servidores buenos de cinco películas, entre ellas una que yo
+ * mismo acababa de comprobar a mano y contestaba 206.
+ *
+ * El motivo es viejo y conocido en este proyecto: LO QUE SE PERSISTE SE FOSILIZA. La lista de
+ * servidores no solo se entrega, también se guarda, y al entregarla `enlaceDirecto` sustituye la
+ * url del fichero por la de la caché (`…/v?e=<fichero>`). Esa url acaba en la base, y su ruta es
+ * `/v` — no acaba en `.mp4` ni en nada. Para esta función eso era «un host que ya no se acepta», y
+ * se llevaba por delante el único sitio donde estaba la dirección del vídeo.
+ *
+ * La dirección no se había perdido: viaja DENTRO de esa url, firmada por nosotros. Así que lo
+ * correcto no es borrar, es deshacer el envoltorio y devolver el `direct_stream` a su forma buena.
+ * Borrar es irreversible y obliga a rastrear la ficha otra vez; reparar cuesta una línea.
+ */
 function purgarLoQueYaNoVale(fila: any): number {
   let quitados = 0;
   const limpiar = (servidores: any[] | null | undefined): any[] =>
@@ -289,6 +307,13 @@ function purgarLoQueYaNoVale(fila: any): number {
       const url = String(s?.direct_stream || s?.embed_url || '');
       if (s?.direct_mode !== 'public' || !url) return true;
       if (esUrlDeFicheroPermanente(url)) return true;
+
+      const dentro = ficheroDentroDeNuestraCache(String(s?.direct_stream || ''));
+      if (dentro && esUrlDeFicheroPermanente(dentro)) {
+        s.direct_stream = dentro;
+        return true;
+      }
+
       quitados++;
       return false;
     });
@@ -459,7 +484,20 @@ async function guardarFicha(fila: any): Promise<void> {
          * dejar pasar un título dudoso. Y solo cuentan los veredictos CONCLUYENTES: si el origen no
          * contestó a tiempo no se sabe nada, y no saber no es un golpe.
          */
-        const arranque = await puedeAbrirse(String(sv.direct_stream));
+        /*
+         * SE COMPRUEBA LA URL QUE VA A RECIBIR LA APP, no la que hay guardada.
+         *
+         * No son la misma, y por ahí se colaba todo. En la base está la url del origen; lo que el
+         * reproductor recibe es lo que devuelve `enlaceDirecto`, que para un fichero permanente es
+         * la de la caché por trozos. Comprobar una y servir la otra deja un hueco por el que cabe
+         * exactamente el fallo que costó la tarde: el origen contestaba de maravilla y la caché
+         * entregaba cuatro megas y cerraba, así que el catálogo sellaba como buena una película
+         * que en la app se moría a los diez segundos.
+         *
+         * Una comprobación que no comprueba el camino de entrega no comprueba nada.
+         */
+        const comoLaVeLaApp = enlaceDirecto(sv) || String(sv.direct_stream);
+        const arranque = await puedeAbrirse(comoLaVeLaApp);
         cuenta.arranques++;
 
         if (arranque.ok) {
