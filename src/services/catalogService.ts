@@ -1268,9 +1268,36 @@ export class CatalogService {
             validateStatus: () => true,
             maxRedirects: 5,
           } as any);
-          const bytes = (r.data as ArrayBuffer)?.byteLength ?? 0;
-          const esHtml = /text\/html/i.test(String(r.headers['content-type'] || ''));
-          if (r.status < 400 && !esHtml && bytes > 8192) { buenas.push(url); aceptadas.push(url); }
+          if (r.status >= 400) { rechazadas.push(url); return; }
+
+          const tipo = String(r.headers['content-type'] || '');
+          if (/text\/html/i.test(tipo)) { rechazadas.push(url); return; }
+
+          const cuerpo = Buffer.from(new Uint8Array(r.data as ArrayBuffer));
+          const bytes = cuerpo.byteLength;
+
+          /**
+           * UN MANIFIESTO HLS NO PESA 8 KB, Y ESO NO LO HACE MALO.
+           *
+           * La regla era «más de 8.192 bytes en los primeros 64 KB», que para un mp4 es una
+           * comprobación razonable: un fichero de vídeo que solo suelta unos cientos de bytes es
+           * una página de error disfrazada.
+           *
+           * Pero un `.m3u8` es un fichero de TEXTO con la lista de trozos: unos cientos de bytes
+           * en un manifiesto normal. Así que la fuente propia rechazaba TODO enlace HLS diciendo
+           * «ninguna url entregó vídeo», sobre manifiestos perfectamente buenos. Se reportó con
+           * uno de gumlet.
+           *
+           * Para un manifiesto la pregunta correcta no es cuánto pesa, es qué DICE. Si declara
+           * trozos (`#EXTINF`) hay vídeo detrás; si declara calidades (`#EXT-X-STREAM-INF`) hay
+           * que seguir una para saberlo, que es exactamente lo que hará el reproductor. Un
+           * `#EXTM3U` sin ninguna de las dos cosas es un manifiesto vacío, y ese sí se rechaza.
+           */
+          const texto = cuerpo.toString('utf8', 0, Math.min(bytes, 65536));
+          const esHls = /mpegurl/i.test(tipo) || texto.trimStart().startsWith('#EXTM3U');
+
+          const vale = esHls ? await manifiestoTraeVideo(texto, url) : bytes > 8192;
+          if (vale) { buenas.push(url); aceptadas.push(url); }
           else rechazadas.push(url);
         } catch {
           rechazadas.push(url);
@@ -1357,7 +1384,65 @@ export class CatalogService {
       title_normalized: searchIndexKey(titulo, detalle.original_title || detalle.original_name || titulo, []),
     };
 
-    const { error } = await getSupabaseAdmin().from('media_items').upsert(fila, { onConflict: 'id' });
+    /**
+     * SI LA PELÍCULA YA ESTÁ EN EL CATÁLOGO, SE LE AÑADE LA URL. No se crea otra ficha.
+     *
+     * El `upsert` iba por `id`, y el id de una ficha manual se construye a partir del título
+     * (`manual-fight-club-1999`). Pero la misma película pudo entrar antes por un scraper, con otro
+     * id, y la tabla tiene además una clave única por `(tmdb_id, type)`. Resultado: al pegar una
+     * url para algo que ya existía, Postgres rechazaba la fila y el panel enseñaba el error en
+     * crudo — «duplicate key value violates unique constraint». Reportado tal cual.
+     *
+     * Y crear la segunda ficha tampoco habría sido la solución: dos filas para la misma obra es
+     * exactamente lo que este proyecto se pasa el día evitando. Un `tmdb_id` es una identidad, no
+     * un detalle.
+     *
+     * Así que se busca por identidad y, si está, se le AÑADEN los servidores a la que ya hay,
+     * dejando los suyos delante — el que pega una url a mano sabe algo que el scraper no sabía, y
+     * lo normal es que quiera verla probar primero. Las repetidas no se duplican.
+     */
+    const db = getSupabaseAdmin();
+    const { data: yaEstaba } = await db
+      .from('media_items')
+      .select('id,servers')
+      .eq('tmdb_id', opts.tmdbId)
+      .eq('type', opts.tipo === 'tvseries' ? 'tvseries' : 'movie')
+      .maybeSingle();
+
+    if (yaEstaba && yaEstaba.id !== id) {
+      const previos = (yaEstaba.servers as any[]) || [];
+      const urlsPrevias = new Set(previos.map((x: any) => String(x?.direct_stream || '')));
+      const nuevos = servers.filter((x: any) => !urlsPrevias.has(String(x?.direct_stream || '')));
+
+      const { error: errorFusion } = await db
+        .from('media_items')
+        .update({
+          servers: [...nuevos, ...previos],
+          // Se deja sin fecha de comprobación para que el barrido la mire pronto: la url es nueva
+          // y quien decide si se anuncia es el verificador, no este formulario.
+          streams_checked_at: null,
+          streams_updated_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', yaEstaba.id);
+
+      if (errorFusion) return { ok: false, aceptadas, rechazadas, error: errorFusion.message };
+
+      await this.invalidateItem({ id: yaEstaba.id });
+      await this.invalidateListings();
+      return {
+        ok: true,
+        id: yaEstaba.id,
+        titulo,
+        aceptadas,
+        rechazadas,
+        capitulos_ok: capitulosBuenos.length,
+        fusionada_con_existente: true,
+        urls_nuevas: nuevos.length,
+      } as any;
+    }
+
+    const { error } = await db.from('media_items').upsert(fila, { onConflict: 'id' });
     if (error) return { ok: false, aceptadas, rechazadas, error: error.message };
 
     await this.invalidateItem({ id });
@@ -3457,3 +3542,45 @@ function razonDeVisibilidad(r: any): { en_la_app: boolean; motivo: string | null
   return { en_la_app: true, motivo: null };
 }
 
+/**
+ * ¿HAY VÍDEO DETRÁS DE ESTE MANIFIESTO HLS?
+ *
+ * Se sigue UN nivel de calidades y no más. Un manifiesto maestro apunta a manifiestos de calidad, y
+ * esos ya listan los trozos: con un salto se llega al final de la cadena en todo lo que se ha visto.
+ * Seguir sin límite sería exponerse a una redirección circular por una comprobación que solo tiene
+ * que decir sí o no.
+ *
+ * Fallar aquí NO se toma como «no hay vídeo» cuando la culpa es de la red: si el manifiesto de
+ * calidad no contesta, se acepta el maestro igual. Rechazar un enlace bueno porque el segundo salto
+ * tuvo un mal momento es el mismo error de siempre —condenar por lentitud—, y aquí además lo pagaría
+ * alguien que está pegando una url a mano y no entiende por qué se le rechaza.
+ */
+async function manifiestoTraeVideo(texto: string, urlBase: string): Promise<boolean> {
+  if (!/#EXTM3U/i.test(texto)) return false;
+
+  // Lista de trozos: es el final de la cadena y ya dice que hay vídeo.
+  if (/#EXTINF/i.test(texto)) return true;
+
+  // Lista de calidades: la línea siguiente a cada `#EXT-X-STREAM-INF` es otro manifiesto.
+  const lineas = texto.split(/\r?\n/);
+  const indice = lineas.findIndex(l => /#EXT-X-STREAM-INF/i.test(l));
+  if (indice < 0) return false;
+
+  const siguiente = lineas.slice(indice + 1).find(l => l.trim() && !l.trim().startsWith('#'));
+  if (!siguiente) return false;
+
+  let hijo: string;
+  try {
+    hijo = new URL(siguiente.trim(), urlBase).toString();
+  } catch {
+    return false;
+  }
+
+  try {
+    const r = await httpClient.get(hijo, { timeout: 20000, validateStatus: () => true, maxRedirects: 5 } as any);
+    if (r.status >= 400) return true;
+    return /#EXTINF/i.test(String(r.data || ''));
+  } catch {
+    return true;
+  }
+}
