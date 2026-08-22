@@ -4223,7 +4223,7 @@ function urlDe(sv: any): string {
  * Reemplazar en vez de mezclar es lo que hacía desaparecer capítulos: pegar la url del 1x01 dejaba
  * la serie con un solo episodio.
  */
-function fusionarTemporadas(previas: any[], nuevas: any[]): any[] {
+export function fusionarTemporadas(previas: any[], nuevas: any[]): any[] {
   if (!nuevas.length) return previas;
   if (!previas.length) return nuevas;
 

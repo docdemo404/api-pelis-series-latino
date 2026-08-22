@@ -17,7 +17,7 @@
  */
 import 'dotenv/config';
 import { RealScraperService } from '../src/services/realScraperService';
-import { CatalogService } from '../src/services/catalogService';
+import { CatalogService, fusionarTemporadas } from '../src/services/catalogService';
 import { TmdbService } from '../src/services/tmdbService';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
 import { canonicalTitle, searchIndexKey, yearFromSlug } from '../src/utils/text';
@@ -821,7 +821,7 @@ async function urlsQueReproducenAhora(servidores: any[], fuente: string): Promis
  * fila a fila para aislar el conflicto de `tmdb_id` que sí sabe resolverse fusionando.
  */
 /**
- * LO PUESTO A MANO SOBREVIVE AL CRAWL. Antes no.
+ * LO QUE YA ESTABA SOBREVIVE AL CRAWL. Antes no.
  *
  * `upsert` reemplaza la fila entera, y `servers` es una columna: lo que el crawl acaba de scrapear
  * PISA lo que hubiera guardado. Para las cuatro webs eso es correcto —lo que vale es lo último que
@@ -838,7 +838,7 @@ async function urlsQueReproducenAhora(servidores: any[], fuente: string): Promis
  * puso una persona es lo que más probabilidades tiene de seguir bueno mañana, y desde luego no es
  * algo que un scraper deba poder borrar sin decir nada.
  */
-async function conservarLoPuestoAMano(rows: Array<Record<string, any>>): Promise<void> {
+async function conservarLoQueYaEstaba(rows: Array<Record<string, any>>): Promise<void> {
   const ids = rows.map(r => String(r.id)).filter(Boolean);
   if (!ids.length) return;
 
@@ -874,30 +874,27 @@ async function conservarLoPuestoAMano(rows: Array<Record<string, any>>): Promise
     }
 
     /**
-     * Y a nivel de CAPÍTULO, que es donde vive el vídeo de una serie: una url pegada a mano en el
-     * 2x07 se perdía igual, y encima sin que se notara hasta que alguien pulsaba ese capítulo.
+     * Y EL ÁRBOL DE CAPÍTULOS SE FUSIONA ENTERO, no solo lo manual.
+     *
+     * Aquí había un agujero mucho más grande que el de las urls a mano, y se midió: una pasada
+     * `--solo=moviedays` sobre 50 títulos se llevó por delante 42 servidores de capítulos en 8
+     * series. Ninguno era manual — eran capítulos que resolvieron pasadas ANTERIORES.
+     *
+     * La razón es que una pasada no resuelve la serie entera: mira unos pocos capítulos y arma un
+     * árbol con esos. Al escribir `seasons` —que es una columna, y se reemplaza entera— lo que
+     * traía la pasada de hoy borraba lo que aprendieron las de ayer. Así una serie nunca podía
+     * acumular capítulos: cada crawl la devolvía a los cuatro o cinco de esa corrida.
+     *
+     * Es la misma asimetría que hay entre `servers` y `seasons`, y por eso solo se toca el
+     * segundo: a nivel de ficha el crawl SÍ vuelve a mirar todo lo que había, así que quedarse
+     * con lo último comprobado es correcto. A nivel de capítulo no mira ni la décima parte, así
+     * que reemplazar es tirar información sin haberla contradicho.
+     *
+     * Se reutiliza `fusionarTemporadas`, que es la que ya sabe hacer esto en el otro lado del
+     * proyecto — lo que se copia se desincroniza; lo que se llama, no.
      */
-    const manualesPorCapitulo = new Map<string, any[]>();
-    for (const t of previa.seasons) {
-      for (const e of (t?.episodes || [])) {
-        const suyos = (e?.servers || []).filter(esManual);
-        if (suyos.length) manualesPorCapitulo.set(`${t?.season_number}x${e?.episode_number}`, suyos);
-      }
-    }
-    if (!manualesPorCapitulo.size) continue;
-
-    const seasons: any[] = Array.isArray(row.seasons) ? row.seasons : [];
-    for (const t of seasons) {
-      for (const e of (t?.episodes || [])) {
-        const suyos = manualesPorCapitulo.get(`${t?.season_number}x${e?.episode_number}`);
-        if (!suyos?.length) continue;
-        const nuevos: any[] = Array.isArray(e.servers) ? e.servers : [];
-        const yaEstan = new Set(nuevos.map((x: any) => String(x?.direct_stream || x?.embed_url || '')));
-        const rescatados = suyos.filter(m => !yaEstan.has(String(m?.direct_stream || m?.embed_url || '')));
-        if (rescatados.length) e.servers = [...rescatados, ...nuevos];
-      }
-    }
-    row.seasons = seasons;
+    const previasConManuales = previa.seasons.map((t: any) => ({ ...t, episodes: [...(t?.episodes || [])] }));
+    row.seasons = fusionarTemporadas(previasConManuales, Array.isArray(row.seasons) ? row.seasons : []);
   }
 }
 
@@ -907,7 +904,7 @@ async function guardarFilas(
 ): Promise<{ ok: number; fail: number; merged: number }> {
   const { withNormalized, withMetadataSource, withRichMetadata, withMultiSource } = banderas;
   const rows = items.map(it => toRow(it, withNormalized, withMetadataSource, withRichMetadata, withMultiSource));
-  await conservarLoPuestoAMano(rows);
+  await conservarLoQueYaEstaba(rows);
   let ok = 0, fail = 0, merged = 0;
   const BATCH = 50;
 
