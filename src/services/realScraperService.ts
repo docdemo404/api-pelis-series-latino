@@ -520,17 +520,54 @@ export function claseDeArchive(subject: unknown): ContentType | null {
  * El mínimo absoluto va bajo a propósito (40 MB): un capítulo de serie de 20 minutos pesa poco y
  * es legítimo.
  */
+/**
+ * ¿Este fichero declara en su nombre un AÑO DISTINTO al de la ficha? Entonces es OTRA película.
+ *
+ * `esPackArchive` caza los items que se anuncian como recopilación («37 PELICULAS»), pero no los
+ * que no lo dicen. `asterix-el-galo-1967-cine.flipax.es` se llama como una sola obra y dentro
+ * lleva tres, cada una en dos contenedores:
+ *
+ *     Asterix El Galo (1967) - (cine.flipax.es).avi / .mp4     ← la de la ficha
+ *     Asterix En America (1994) - (cine.flipax.es).avi / .mp4  ← otra película
+ *     Asterix En Bretaña (1986) - (cine.flipax.es).avi / .mp4  ← otra película
+ *
+ * Los seis colgaban de la ficha «Astérix El Galo», así que el reproductor empezaba por una
+ * película que nadie había pedido y, cuando esa no abría, iba probando las demás. Reportado como
+ * que ese título tarda muchísimo — y el riesgo peor no era la tardanza: era entregar otra obra
+ * sin dar ningún error, que es el fallo que FUENTES.md §4 llama el peor de todos.
+ *
+ * El año es el desempate honesto, y es el mismo criterio que el catálogo ya exige para conceder
+ * identidad a una ficha. Se descarta SOLO cuando el nombre declara un año y ese año no es el de
+ * la ficha: si el fichero no dice ninguno no se puede demostrar nada y se queda, igual que en
+ * series un fichero que no declara capítulo no se coloca a ciegas.
+ *
+ * Sin año de ficha no se filtra nada: quien no sabe contra qué comparar no debe descartar.
+ */
+function declaraOtroAnio(nombre: string, anioDeLaFicha?: string): boolean {
+  const esperado = String(anioDeLaFicha || '').trim();
+  if (!/^(19|20)\d{2}$/.test(esperado)) return false;
+
+  const m = /\((19|20)\d{2}\)/.exec(String(nombre || ''));
+  if (!m) return false;
+
+  return m[0].slice(1, 5) !== esperado;
+}
+
 const MINIMO_VIDEO_BYTES = 40 * 1024 * 1024;
 
 /** Y al menos esta fracción del fichero mayor del item: por debajo es un extra, no la obra. */
 const FRACCION_MINIMA_DEL_MAYOR = 0.25;
 
-export function ficherosDeVideoArchive(files: any[]): Array<{ name: string; size: number }> {
+export function ficherosDeVideoArchive(
+  files: any[],
+  anioDeLaFicha?: string,
+): Array<{ name: string; size: number }> {
   const candidatos = (files || [])
     .map(f => ({ name: String(f?.name || ''), size: Number(f?.size || 0) }))
     .filter(f => /\.(mp4|mkv|webm|avi)$/i.test(f.name))
     .filter(f => !/\.ia\.mp4$/i.test(f.name))
-    .filter(f => f.size >= MINIMO_VIDEO_BYTES);
+    .filter(f => f.size >= MINIMO_VIDEO_BYTES)
+    .filter(f => !declaraOtroAnio(f.name, anioDeLaFicha));
 
   if (!candidatos.length) return [];
 
@@ -2530,7 +2567,8 @@ export class RealScraperService {
     const year = anioDeArchive(tituloCrudo, String(md.description || ''));
     if (!year) return null;
 
-    const ficheros = ficherosDeVideoArchive(data?.files || []);
+    // El año va porque el item puede llevar dentro varias películas; ver `declaraOtroAnio`.
+    const ficheros = ficherosDeVideoArchive(data?.files || [], year);
     if (!ficheros.length) return null;
 
     const title = tituloDeArchive(tituloCrudo);

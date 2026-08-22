@@ -312,6 +312,26 @@ export function getSourceId(server: ServerOption): string {
  *
  * También filtra servidores pertenecientes a fuentes deshabilitadas (enabled: false).
  */
+/**
+ * CUÁNTO RIESGO TIENE CADA CONTENEDOR. Menos es mejor; 0 es un mp4 y no se anota.
+ *
+ * No es una preferencia estética, es lo que ExoPlayer puede abrir sin sorpresas. Y el orden entre
+ * los dos malos está medido sobre `asterix-el-galo-1967-cine.flipax.es`, donde el mismo item trae
+ * la película en los dos:
+ *
+ *     Asterix El Galo (1967).avi   699 MB   formato Cinepack
+ *     Asterix El Galo (1967).mp4   363 MB   formato h.264
+ *
+ * Cinepack es un códec de 1992 que ningún Android decodifica, así que ese `.avi` no es «una copia
+ * más pesada»: es una copia que no se ve. Y encima iba PRIMERO, con lo que cada reproducción
+ * empezaba gastándose el vigilante de arranque en un fichero imposible. Reportado como que ese
+ * título tarda muchísimo en reproducir.
+ *
+ * Ninguno se retira: los dos siguen de reserva por si el mp4 falla. Solo dejan de ir delante.
+ */
+const RIESGO_MKV = 1;
+const RIESGO_AVI = 2;
+
 export function sortServersBySourcePriority(servers: ServerOption[], sourcesConfig?: SourceConfig[]): ServerOption[] {
   if (!servers || servers.length === 0) return [];
 
@@ -356,7 +376,7 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
    * la de la caché (`/v?e=…`), cuya ruta es `/v` y no acaba en ninguna extensión. O sea que para
    * cuando el comparador quiere saber si esto era un `.mkv`, la pista ya no está.
    */
-  const esMkvOriginal = (s: ServerOption): boolean => {
+  const riesgoDeContenedor = (s: ServerOption): number => {
     /*
      * Hay que mirar TRES sitios, y no por gusto: la url guardada puede venir ya convertida.
      *
@@ -370,26 +390,28 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
       if (!url) continue;
       const dentro = ficheroDentroDeNuestraCache(url) || url;
       try {
-        if (/\.mkv$/i.test(new URL(dentro).pathname)) return true;
+        const ruta = new URL(dentro).pathname;
+        if (/\.avi$/i.test(ruta)) return RIESGO_AVI;
+        if (/\.mkv$/i.test(ruta)) return RIESGO_MKV;
       } catch {
         // Una url que no se puede leer no dice nada; se prueba la siguiente.
       }
     }
-    return false;
+    return 0;
   };
 
   const withEffectiveMode = activeServers.map(s => {
     const mode = effectiveDirectMode(s);
     const name = nombreConTipo(s.name, Boolean(s.direct_stream));
     const stream = enlaceDirecto(s);
-    const mkv = esMkvOriginal(s);
+    const riesgo = riesgoDeContenedor(s);
     return {
       ...s,
       name,
       ...(stream ? { direct_stream: stream } : {}),
       ...(mode ? { direct_mode: mode } : {}),
-      ...(mkv ? { __mkv: true } : {}),
-    } as ServerOption & { __mkv?: boolean };
+      ...(riesgo ? { __riesgo: riesgo } : {}),
+    } as ServerOption & { __riesgo?: number };
   });
 
   /**
@@ -458,7 +480,7 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
     if (verA !== verB) return verA ? -1 : 1;
 
     /**
-     * ENTRE DOS COPIAS DEL MISMO VÍDEO, EL MP4 ANTES QUE EL MKV.
+     * ENTRE DOS COPIAS DEL MISMO VÍDEO, EL MP4 ANTES QUE EL MKV Y QUE EL AVI.
      *
      * archive.org sube a menudo la misma película en los dos contenedores dentro del mismo item, y
      * el catálogo se quedaba con los dos y ofrecía primero el que viniera antes en la lista. Se vio
@@ -469,12 +491,16 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
      * hay reproducción — y por el camino confunde a todo lo que mire el fichero por fuera dando
      * por hecho que es mp4.
      *
-     * No se retira ninguno: el mkv sigue estando de reserva por si el mp4 falla. Solo deja de ser
-     * el primero que se prueba.
+     * Lo mismo, y peor, con el `.avi`: ahí lo que suele venir dentro es Cinepack o DivX, que no
+     * es que dependa del aparato — es que no lo decodifica ninguno. El baremo está en
+     * [RIESGO_MKV] / [RIESGO_AVI], con el porqué medido.
+     *
+     * No se retira ninguno: siguen estando de reserva por si el mp4 falla. Solo dejan de ser lo
+     * primero que se prueba.
      */
-    const mkvA = Boolean((a as any).__mkv);
-    const mkvB = Boolean((b as any).__mkv);
-    if (mkvA !== mkvB) return mkvA ? 1 : -1;
+    const riesgoA = Number((a as any).__riesgo) || 0;
+    const riesgoB = Number((b as any).__riesgo) || 0;
+    if (riesgoA !== riesgoB) return riesgoA - riesgoB;
 
     /**
      * LO QUE NO DA EL ANCHO DE BANDA, AL FONDO. No se retira: se deja de ofrecer primero.
@@ -620,9 +646,9 @@ export function paraElCliente<T extends ServerOption>(servers: T[] | undefined |
     .filter(s => verificadoVigente(s))
     .filter(s => s?.direct_stream && s.status !== 'offline')
     .map(s => {
-      // `__mkv` es una anotación interna para ordenar (ver `sortServersBySourcePriority`); fuera
-      // de aquí no significa nada y no tiene por qué viajar al reproductor.
-      const { embed_url, __mkv, ...resto } = s as ServerOption & { __mkv?: boolean };
+      // `__riesgo` es una anotación interna para ordenar (ver `sortServersBySourcePriority`);
+      // fuera de aquí no significa nada y no tiene por qué viajar al reproductor.
+      const { embed_url, __riesgo, ...resto } = s as ServerOption & { __riesgo?: number };
       return resto as T;
     });
 }
