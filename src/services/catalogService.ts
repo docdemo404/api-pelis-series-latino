@@ -2272,12 +2272,27 @@ export class CatalogService {
     } catch {}
   }
 
-  /** Descuenta de una lista ya construida lo que se ha retirado desde que se construyó. */
-  static async sinRetirados<T extends { id?: string }>(items: T[]): Promise<T[]> {
+  /**
+   * Descuenta de una lista ya construida lo que se ha retirado desde que se construyó.
+   *
+   * Y TAMBIÉN LO QUE NO TIENE FICHA DE TMDB, que es la otra forma de no ser publicable.
+   *
+   * La condición de identidad vive en `soloPublicables`, pero la BÚSQUEDA no pasa por ahí: va por
+   * un RPC de Postgres, así que ningún filtro escrito en el query builder la alcanza. Se vio en
+   * producción — la portada dejó de enseñar «CINESAURIO - 2025 12 04 CARTELERA DE ESTRENOS» y el
+   * buscador seguía sirviéndolo, que es justo por donde el usuario lo estaba viendo.
+   *
+   * Este es el sitio correcto por la misma razón que ya lo era para los retirados: se aplica a la
+   * SALIDA, después del caché, así que vale para las respuestas guardadas y para las nuevas sin
+   * esperar a que caduque nada. Cambiar el RPC exigiría una migración a mano en Supabase, y esto
+   * no necesita ninguna.
+   */
+  static async sinRetirados<T extends { id?: string; tmdb_id?: number }>(items: T[]): Promise<T[]> {
     if (!items || items.length === 0) return items || [];
+    const oficiales = items.filter(i => i?.tmdb_id === undefined || Number(i.tmdb_id) > 0);
     const fuera = await this.retirados();
-    if (fuera.size === 0) return items;
-    return items.filter(i => !i?.id || !fuera.has(i.id));
+    if (fuera.size === 0) return oficiales;
+    return oficiales.filter(i => !i?.id || !fuera.has(i.id));
   }
 
   /**
