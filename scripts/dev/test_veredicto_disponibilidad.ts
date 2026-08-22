@@ -57,5 +57,15 @@ ok('servidor SIN verificar no cuenta', veredictoDisponibilidad({ type: 'movie', 
 ok('serie: los servidores de ficha no cuentan', veredictoDisponibilidad({ type: 'tvseries', servers: [vivo], seasons: [{ episodes: [cap([], true)] }] }, 'todo'), false);
 ok('película: los suyos sí cuentan', veredictoDisponibilidad({ type: 'movie', servers: [vivo] }, 'todo'), true);
 
+console.log('\n── Y la identidad: en la app solo salen películas oficiales');
+// Reportado viendo «CINESAURIO - 2025 12 04 CARTELERA DE ESTRENOS» en la app: no es una película,
+// es la cartelera semanal de un canal, y entró porque TMDB no la reconoció y se le puso un id
+// sintético negativo. Con enlaces vivos y todo, una ficha así no se anuncia.
+ok('sin match en TMDB no se anuncia', veredictoDisponibilidad({ type: 'movie', tmdb_id: -1107660755, servers: [vivo] }, 'todo'), false);
+ok('tmdb_id 0 (a la espera de match) tampoco', veredictoDisponibilidad({ type: 'movie', tmdb_id: 0, servers: [vivo] }, 'todo'), false);
+ok('con ficha de TMDB de verdad, sí', veredictoDisponibilidad({ type: 'movie', tmdb_id: 41002, servers: [vivo] }, 'todo'), true);
+// Y el silencio no es un suspenso: quien no pasa el campo no está juzgando la identidad.
+ok('sin pasar tmdb_id, el criterio no se aplica', veredictoDisponibilidad({ type: 'movie', servers: [vivo] }, 'todo'), true);
+
 console.log(fallos === 0 ? '\n✅ todo correcto\n' : `\n❌ ${fallos} fallo(s)\n`);
 process.exit(fallos === 0 ? 0 : 1);

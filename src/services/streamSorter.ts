@@ -785,6 +785,7 @@ function quedaPorMirar(servers?: ServerOption[] | null): boolean {
 export function veredictoDisponibilidad(
   item: {
     type?: string | null;
+    tmdb_id?: number | null;
     servers?: ServerOption[] | null;
     seasons?: Array<{ episodes?: Array<{ servers?: ServerOption[] | null; checked_at?: string }> | null }> | null;
   },
@@ -796,6 +797,35 @@ export function veredictoDisponibilidad(
    */
   alcance: 'todo' | 'parcial' | 'nada'
 ): Disponibilidad {
+  /**
+   * SIN FICHA DE TMDB NO SE ANUNCIA, tenga los enlaces que tenga.
+   *
+   * En la app solo salen películas oficiales, y quien decide qué es una película oficial es TMDB.
+   * Un `tmdb_id` que no es positivo significa que el matcher NO encontró la obra y el catálogo se
+   * quedó con un id sintético derivado del título (`tmdbService.syntheticTmdbId`). Eso no es una
+   * película con la ficha incompleta: es un vídeo del que no se sabe qué es.
+   *
+   * Lo reportó el usuario viendo en la app «CINESAURIO - 2025 12 04 CARTELERA DE ESTRENOS», que
+   * no es una película sino la cartelera semanal de un canal. Con él salían otras once, y el
+   * patrón es siempre el mismo: subidas de archive.org cuyo título trae tanto ruido —«Lust,
+   * Caution Mandarín + Subtítulos En»— que TMDB no las reconoce.
+   *
+   * Va AQUÍ y no en cada consulta porque este es el único sitio que decide `has_streams`, que es
+   * lo que gobierna si una ficha aparece en listados y búsquedas. Ponerlo en las consultas
+   * significaría repetirlo en veinte sitios y que el primero que se olvide vuelva a colar ruido.
+   *
+   * No borra nada: la fila sigue con sus enlaces, y el día que el matcher la reconozca —o que se
+   * le limpie el título— vuelve a anunciarse sola.
+   *
+   * Solo se juzga si el campo VIENE. Un llamador que no lo pasa no está diciendo «esta ficha no
+   * tiene identidad», está diciendo que aquí no toca ese asunto — y tratar su silencio como un
+   * suspenso escondería el catálogo entero desde el primer sitio que se olvidara de pasarlo. Los
+   * cuatro que deciden `has_streams` en producción lo pasan; las pruebas de disponibilidad, no.
+   */
+  if (item?.tmdb_id !== undefined && item?.tmdb_id !== null && !(Number(item.tmdb_id) > 0)) {
+    return false;
+  }
+
   if (fichaReproducible(item)) return true;   // basta con encontrar uno
   if (alcance === 'nada') return undefined;
   if (alcance === 'todo') return false;

@@ -1089,7 +1089,7 @@ export class CatalogService {
      * veces.
      */
     const veredicto = veredictoDisponibilidad(
-      { type: (data as any).type, servers, seasons } as any, 'todo'
+      { type: (data as any).type, tmdb_id: (data as any).tmdb_id, servers, seasons } as any, 'todo'
     );
 
     const update: Record<string, unknown> = { servers, seasons };
@@ -1713,6 +1713,7 @@ export class CatalogService {
     const veredicto = veredictoDisponibilidad(
       {
         type: (data as any).type,
+        tmdb_id: (data as any).tmdb_id,
         servers: (update.servers as any[]) || servers,
         seasons: (update.seasons as any[]) || seasons,
       } as any,
@@ -3315,7 +3316,7 @@ export class CatalogService {
     };
     // Acabamos de mirar UN capítulo: alcance parcial. Es `veredictoDisponibilidad` quien sabe que
     // con eso solo se puede concluir «sí», o «no» si ya no queda ninguno por comprobar.
-    const veredicto = veredictoDisponibilidad({ type: serie.type, servers: serie.servers, seasons } as any, 'parcial');
+    const veredicto = veredictoDisponibilidad({ type: serie.type, tmdb_id: serie.tmdb_id, servers: serie.servers, seasons } as any, 'parcial');
     if (veredicto !== undefined) update.has_streams = veredicto;
 
     try {
