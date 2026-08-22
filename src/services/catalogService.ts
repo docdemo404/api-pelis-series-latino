@@ -3211,6 +3211,17 @@ export class CatalogService {
     servers: ServerOption[]
   ): Promise<void> {
     if (!serie?.id) return;
+    // Leer-modificar-escribir sobre `seasons`: de una en una por ficha. Ver `enColaPorFicha`.
+    return enColaPorFicha(String(serie.id), () =>
+      this.escribirServidoresDelCapitulo(serie, season, episode, servers));
+  }
+
+  private static async escribirServidoresDelCapitulo(
+    serie: MediaItem,
+    season: number,
+    episode: number,
+    servers: ServerOption[]
+  ): Promise<void> {
     // Cinturón: quien escriba capítulos tiene que ser una serie. El camino de arriba ya lo filtra,
     // pero esta función es la que dejó 25 películas con árbol de episodios y no puede volver a
     // depender de que la llamen bien.
@@ -4194,6 +4205,42 @@ export async function hostsDelCatalogo(): Promise<Array<{ host: string; servidor
   return [...porHost.entries()]
     .map(([host, v]) => ({ host, servidores: v.servidores, titulos: v.titulos.size }))
     .sort((a, b) => b.servidores - a.servidores);
+}
+
+/**
+ * UNA ESCRITURA POR FICHA CADA VEZ.
+ *
+ * `seasons` es una columna JSON, así que guardar un capítulo es leer el árbol entero, cambiarle
+ * un episodio y volver a escribirlo. Dos de esas a la vez sobre la misma serie y la segunda pisa
+ * a la primera: leyó antes de que la primera escribiera, así que su árbol no la incluye.
+ *
+ * No es teórico. Se midió completando «Breaking Bad» con tres capítulos en vuelo: el registro
+ * decía «✓ 2x10 — 1 servidor(es)» y al releer la ficha el 2x10 estaba a cero y sin sello, como si
+ * no se hubiera mirado nunca. Se perdieron 3 de 50 así, y la única señal era el descuadre entre lo
+ * que el registro cantaba y lo que había guardado.
+ *
+ * La cola encadena las escrituras de UNA ficha; las de fichas distintas siguen yendo en paralelo,
+ * que es donde está la velocidad. Vale dentro de un proceso —el crawl, y una instancia de la
+ * API sirviendo dos capítulos de la misma serie a la vez—, que es donde se ha visto el fallo.
+ * Dos instancias distintas escribiendo la misma serie en el mismo segundo siguen pudiendo pisarse:
+ * eso pide un bloqueo en la base y no lo hay.
+ */
+const colaPorFicha = new Map<string, Promise<unknown>>();
+
+async function enColaPorFicha<T>(id: string, tarea: () => Promise<T>): Promise<T> {
+  const anterior = colaPorFicha.get(id);
+  const mia = (async () => {
+    // El fallo de la anterior no puede arrastrar a la siguiente: solo interesa que haya terminado.
+    if (anterior) await anterior.catch(() => {});
+    return tarea();
+  })();
+  colaPorFicha.set(id, mia);
+  try {
+    return await mia;
+  } finally {
+    // Si nadie se encoló detrás, se olvida el id: si no, el mapa crece con el catálogo entero.
+    if (colaPorFicha.get(id) === mia) colaPorFicha.delete(id);
+  }
 }
 
 /**

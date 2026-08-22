@@ -26,6 +26,7 @@ import { inspectEmbed } from '../src/scrapers/embedHealth';
 import { bajarManifiesto, segmentoDescargable } from '../src/services/manifestHealth';
 import { streamClient } from '../src/utils/httpClient';
 import { CacheStore } from '../src/cache/store';
+import { paraElCliente } from '../src/services/streamSorter';
 import { MediaItem } from '../src/types';
 
 // Con RLS activado en media_items, escribir requiere la SUPABASE_SERVICE_ROLE_KEY
@@ -1111,6 +1112,147 @@ async function latir(fase: string, hechos?: number, total?: number): Promise<voi
   } catch { /* el latido nunca puede tumbar el crawl */ }
 }
 
+
+/**
+ * COMPLETAR UNA SERIE ENTERA ANTES DE PASAR A LA SIGUIENTE.
+ *
+ * Hasta ahora ninguna pasada terminaba una serie. El crawl deja resuelto el 1x01 —por donde entra
+ * casi todo el mundo— y los demás capítulos solo se resolvían cuando alguien los abría en la app.
+ * Medido sobre «Breaking Bad»: 62 capítulos guardados, 12 con servidor, 51 sin mirar nunca. Y los
+ * 12 no eran los 12 primeros, eran los que alguien había abierto: 1x1, 1x6, 2x3, 2x11, 3x3… Una
+ * serie así no se puede ver de principio a fin, que es como se ve una serie.
+ *
+ * Esta pasada va POR SERIES, no por capítulos: coge una y no la suelta hasta terminarla. Es lo
+ * contrario de repartir el tiempo entre todas, y es a propósito — una serie entera sirve para algo
+ * y veinte series a un cuarto no sirven para nada. El presupuesto de tiempo se mira ENTRE series,
+ * nunca dentro: la que se empieza se acaba.
+ *
+ * No resuelve nada por su cuenta: llama a `CatalogService.getEpisode`, que es el camino que ya
+ * usa la app. Eso trae gratis todo lo que ese camino sabe —comprobar que el servidor reproduce de
+ * verdad antes de sellarlo, guardar capítulo a capítulo, tirar el caché de la ficha— y evita tener
+ * dos maneras distintas de resolver un capítulo, que en este proyecto siempre acaba en que una se
+ * arregla y la otra no.
+ *
+ * Como guarda capítulo a capítulo, que la maten a medias no pierde el trabajo hecho.
+ */
+async function completarSeries(opts: { soloId?: string; cuantasSeries: number; minutos: number }): Promise<void> {
+  const filas: any[] = [];
+  for (let desde = 0; ; desde += 500) {
+    // Con `.order()`: paginar sin él en Postgres se salta filas y repite otras.
+    const { data, error } = await db
+      .from('media_items')
+      .select('id,title,type,seasons')
+      .eq('type', 'tvseries')
+      .order('id')
+      .range(desde, desde + 499);
+    if (error) { console.warn(`   ⚠ no se pueden leer las series: ${error.message}`); return; }
+    if (!data?.length) break;
+    filas.push(...data);
+    if (data.length < 500) break;
+  }
+
+  let series = filas;
+  if (opts.soloId) {
+    series = filas.filter(r => r.id === opts.soloId);
+    if (!series.length) { console.log(`   no hay ninguna serie con id ${opts.soloId}`); return; }
+  } else {
+    /**
+     * Primero las que MÁS CERCA están de terminarse, no las más vacías.
+     *
+     * Rematar una serie a la que le faltan tres capítulos deja una serie completa; empezar una de
+     * sesenta deja otra a medias. Con el tiempo siempre corto, terminar es lo que hay que premiar.
+     * Las que no tienen ni un capítulo resuelto van al final: esas son trabajo del crawl.
+     */
+    const pendientes = (r: any) => contarCapitulos(r).sinResolver;
+    series = filas
+      .filter(r => contarCapitulos(r).resueltos > 0 && pendientes(r) > 0)
+      .sort((a, b) => pendientes(a) - pendientes(b));
+  }
+
+  const limite = Date.now() + opts.minutos * 60_000;
+  const aTrabajar = series.slice(0, opts.cuantasSeries);
+  console.log(`📺 Completar ${aTrabajar.length} serie(s), una entera cada vez (presupuesto ${opts.minutos} min entre series)`);
+
+  let terminadas = 0, capitulosNuevos = 0;
+  for (const serie of aTrabajar) {
+    if (Date.now() > limite) {
+      console.log(`   ⏱ se acabó el presupuesto; ${terminadas} serie(s) terminadas. El resto, en la siguiente corrida.`);
+      break;
+    }
+    capitulosNuevos += await completarUnaSerie(serie);
+    terminadas++;
+  }
+  console.log(`✅ ${terminadas} serie(s) recorridas de principio a fin · ${capitulosNuevos} capítulos nuevos con vídeo`);
+}
+
+/** Cuántos capítulos tiene una serie guardados, resueltos y por resolver. */
+function contarCapitulos(fila: any): { total: number; resueltos: number; sinResolver: number } {
+  let total = 0, resueltos = 0;
+  for (const t of (fila.seasons || [])) {
+    for (const e of (t?.episodes || [])) {
+      total++;
+      if (paraElCliente(e?.servers).length > 0) resueltos++;
+    }
+  }
+  return { total, resueltos, sinResolver: total - resueltos };
+}
+
+/**
+ * Una serie, entera, capítulo a capítulo.
+ *
+ * Se salta los que ya se anuncian: `getEpisode` sabe no volver a scrapear lo fresco, pero
+ * preguntárselo 62 veces cuesta 62 lecturas de caché para nada. Lo que no se salta es un capítulo
+ * resuelto hace tiempo — de eso decide `getEpisode`, que es quien tiene la regla.
+ */
+async function completarUnaSerie(fila: any): Promise<number> {
+  const pendientes: Array<{ season: number; episode: number }> = [];
+  for (const t of (fila.seasons || [])) {
+    for (const e of (t?.episodes || [])) {
+      if (paraElCliente(e?.servers).length > 0) continue;
+      pendientes.push({ season: Number(t.season_number), episode: Number(e.episode_number) });
+    }
+  }
+
+  const antes = contarCapitulos(fila);
+  if (!pendientes.length) {
+    console.log(`   «${fila.title}»: ya estaba entera (${antes.resueltos}/${antes.total})`);
+    return 0;
+  }
+  console.log(`   «${fila.title}» (${fila.id}): ${antes.resueltos}/${antes.total} anunciables, faltan ${pendientes.length}`);
+
+  /**
+   * De tres en tres. Cada capítulo sondea hasta ocho servidores, así que tres a la vez ya son
+   * veinticuatro conexiones en vuelo — el techo que este proyecto ya aprendió a respetar: lo que
+   * tumba al runner es la RÁFAGA, no el rato.
+   */
+  const CONC = 3;
+  let logrados = 0, mirados = 0;
+  for (let i = 0; i < pendientes.length; i += CONC) {
+    await Promise.all(pendientes.slice(i, i + CONC).map(async cap => {
+      mirados++;
+      try {
+        const r = await CatalogService.getEpisode(fila.id, cap.season, cap.episode);
+        const n = (r?.servers || []).length;
+        if (n > 0) {
+          logrados++;
+          console.log(`      ✓ ${cap.season}x${cap.episode} — ${n} servidor(es)`);
+        }
+      } catch (e: any) {
+        console.log(`      ✗ ${cap.season}x${cap.episode} — ${e?.message || e}`);
+      }
+    }));
+  }
+
+  // Se relee de la base para contar lo que de verdad quedó guardado, no lo que se creyó resolver.
+  const { data } = await db.from('media_items').select('id,title,seasons').eq('id', fila.id).maybeSingle();
+  const despues = contarCapitulos(data || fila);
+  console.log(
+    `   «${fila.title}»: ${despues.resueltos}/${despues.total} anunciables ` +
+    `(${logrados} nuevos de ${mirados} mirados)` +
+    (despues.resueltos === despues.total ? '  ← COMPLETA' : ''));
+  return logrados;
+}
+
 const INICIO_DEL_CRAWL = new Date().toISOString();
 
 async function main() {
@@ -1130,6 +1272,23 @@ async function main() {
   // `--direct-only`: extraer el vídeo directo de lo ya guardado, sin crawlear.
   if (process.argv.includes('--direct-only')) {
     await fillDirectStreams(directLimit || 200);
+    return;
+  }
+
+  /**
+   * `--completar-series`: terminar series enteras, sin crawlear nada nuevo.
+   *
+   * `--serie=<id>` para una concreta; `--series=<n>` cuántas como mucho; `--minutos=<n>` el
+   * presupuesto, que se mira ENTRE series — la que se empieza se acaba.
+   */
+  if (process.argv.includes('--completar-series')) {
+    const bandera = (nombre: string) =>
+      Number((process.argv.find(a => a.startsWith(`--${nombre}=`)) || '').split('=')[1]) || 0;
+    await completarSeries({
+      soloId: (process.argv.find(a => a.startsWith('--serie=')) || '').split('=')[1] || undefined,
+      cuantasSeries: bandera('series') || 5,
+      minutos: bandera('minutos') || 120,
+    });
     return;
   }
 
