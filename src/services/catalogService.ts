@@ -1245,9 +1245,19 @@ export class CatalogService {
      * decir cuál es la del 1x01 y cuál la del 1x02.
      */
     episodios?: Array<{ season: number; episode: number; urls: string[] }>;
+    /**
+     * MODO EDICIÓN: lo que llega es la lista COMPLETA, no una añadidura.
+     *
+     * Sin esto el formulario solo sabía sumar — cada guardado apilaba urls encima de las que
+     * hubiera y no había forma de quitar una mala ni de corregir una errata. Con esto puesto, lo
+     * que el formulario ya no lista se borra. Lo enciende el panel solo cuando ha CARGADO antes
+     * lo guardado, que es la única situación en la que una caja vacía significa «quítalo» y no
+     * «todavía no lo he escrito».
+     */
+    reemplazar?: boolean;
   }): Promise<{
     ok: boolean; id?: string; titulo?: string;
-    aceptadas: string[]; rechazadas: string[]; capitulos_ok?: number; error?: string;
+    aceptadas: string[]; rechazadas: string[]; capitulos_ok?: number; quitadas?: number; error?: string;
   }> {
     /**
      * Se normaliza ANTES de comprobar, para que lo que se prueba sea lo que se guarda.
@@ -1259,11 +1269,48 @@ export class CatalogService {
     const limpiar = (lista: string[]) =>
       Array.from(new Set(lista.map(u => canonicalArchiveOrg(u.trim())).filter(Boolean)));
     const urls = limpiar(opts.urls);
-    const porCapitulo = (opts.episodios || [])
-      .map(e => ({ ...e, urls: limpiar(e.urls) }))
-      .filter(e => e.urls.length);
-    if (!urls.length && !porCapitulo.length) {
+
+    /**
+     * DOS LISTAS DE CAPÍTULOS, y la diferencia entre ellas es lo que permite borrar.
+     *
+     * `capitulosDeclarados` es todo lo que el formulario dijo, incluidos los que ha dejado VACÍOS
+     * a propósito; `porCapitulo` es solo lo que hay que comprobar y guardar. Filtrando los vacíos
+     * de una vez, un capítulo al que le acaban de quitar la url quedaba indistinguible de uno que
+     * nadie ha tocado nunca — y entonces no hay forma de expresar «esto ya no».
+     */
+    const capitulosDeclarados = (opts.episodios || []).map(e => ({
+      season: Number(e.season),
+      episode: Number(e.episode),
+      urls: limpiar(e.urls),
+    }));
+    const porCapitulo = capitulosDeclarados.filter(e => e.urls.length);
+
+    // Editando, una caja vacía es una orden. Solo se rechaza el envío vacío cuando se AÑADE.
+    if (!urls.length && !porCapitulo.length && !opts.reemplazar) {
       return { ok: false, aceptadas: [], rechazadas: [], error: 'No se pasó ninguna url' };
+    }
+
+    /**
+     * Y QUÉ MANDA SOBRE QUÉ. En una película, la caja de urls es la lista completa de la ficha.
+     * En una serie el vídeo vive en los capítulos y la ficha NO se toca: el formulario de series
+     * ni siquiera enseña esa caja, así que tomarla por autoridad sería borrar a ciegas algo que
+     * nadie ha visto.
+     */
+    const listadoParaPodar = opts.tipo === 'tvseries'
+      ? { ficha: null, capitulos: capitulosDeclarados }
+      : { ficha: urls, capitulos: null };
+
+    /**
+     * Vaciarlo todo es una edición válida, y no pasa por comprobar ni por TMDB: no hay ninguna
+     * url que comprobar. Se poda y se contesta.
+     */
+    if (opts.reemplazar && !urls.length && !porCapitulo.length) {
+      const guardado = await this.manualesDeLaFicha(opts.tmdbId, opts.tipo);
+      if (!guardado.existe || !guardado.id) {
+        return { ok: false, aceptadas: [], rechazadas: [], error: 'No hay ninguna ficha guardada que editar' };
+      }
+      const quitadas = await this.podarManualesNoListados(guardado.id, listadoParaPodar);
+      return { ok: true, id: guardado.id, titulo: guardado.titulo, aceptadas: [], rechazadas: [], quitadas };
     }
 
     const detalle = await TmdbService.getTmdbDetails(opts.tmdbId, opts.tipo);
@@ -1439,6 +1486,11 @@ export class CatalogService {
 
       if (errorFusion) return { ok: false, aceptadas, rechazadas, error: errorFusion.message };
 
+      // Y ahora, si esto era una edición, se va lo que el formulario ya no lista.
+      const quitadas = opts.reemplazar
+        ? await this.podarManualesNoListados(String(yaEstaba.id), listadoParaPodar)
+        : 0;
+
       await this.invalidateItem({ id: yaEstaba.id });
       await this.invalidateListings();
       return {
@@ -1448,17 +1500,233 @@ export class CatalogService {
         aceptadas,
         rechazadas,
         capitulos_ok: capitulosBuenos.length,
+        quitadas,
         fusionada_con_existente: true,
         urls_nuevas: nuevos.length,
       } as any;
     }
 
+    /**
+     * SI LA FILA YA EXISTÍA, LO QUE TENÍA NO SE PISA.
+     *
+     * `upsert` reemplaza la fila ENTERA, así que guardar por segunda vez sobre la misma ficha
+     * manual dejaba únicamente las urls de este envío y hacía desaparecer las de los envíos
+     * anteriores — en silencio, y con un «✅ guardado» por delante. Es el mismo agujero que se
+     * acaba de tapar en el crawl, entrando por otra puerta.
+     *
+     * Se fusiona, y lo que sobre lo quita después la poda, que es quien sabe si esto era una
+     * edición o solo una añadidura.
+     */
+    if (yaEstaba) {
+      const previos = ((yaEstaba as any).servers as any[]) || [];
+      const recienPuestas = new Set((fila.servers as any[]).map(urlDe));
+      fila.servers = [
+        ...(fila.servers as any[]),
+        ...previos.filter(sv => !recienPuestas.has(urlDe(sv))),
+      ];
+      const seasonsFusionadas = fusionarTemporadas(
+        ((yaEstaba as any).seasons as any[]) || [],
+        (fila.seasons as any[]) || []
+      );
+      if (seasonsFusionadas.length) fila.seasons = seasonsFusionadas;
+    }
+
     const { error } = await db.from('media_items').upsert(fila, { onConflict: 'id' });
     if (error) return { ok: false, aceptadas, rechazadas, error: error.message };
 
+    const quitadas = opts.reemplazar
+      ? await this.podarManualesNoListados(id, listadoParaPodar)
+      : 0;
+
     await this.invalidateItem({ id });
     await this.invalidateListings();
-    return { ok: true, id, titulo, aceptadas, rechazadas, capitulos_ok: capitulosBuenos.length };
+    return { ok: true, id, titulo, aceptadas, rechazadas, capitulos_ok: capitulosBuenos.length, quitadas };
+  }
+
+
+  /**
+   * LO QUE YA HAY GUARDADO A MANO PARA UN TÍTULO — para poder editarlo, no solo añadir.
+   *
+   * El formulario de la fuente propia solo sabía sumar: cada guardado añadía urls encima de las
+   * que hubiera, y no había forma de quitar una que resultó mala ni de corregir una pegada con
+   * una errata. Para editar hay que VER primero, y verlo desde la base, que es donde está la
+   * verdad — no desde lo que el formulario recuerde de la última vez.
+   *
+   * Se devuelve SOLO lo marcado como `source_id: 'manual'`. Lo que trajo un scraper no se enseña
+   * aquí a propósito: ofrecer un botón para borrarlo sería mentir, porque la siguiente pasada lo
+   * vuelve a poner. Lo que sí se dice es cuántos hay, que es lo que explica por qué un título
+   * sigue viéndose en la app después de vaciarle las urls propias.
+   */
+  static async manualesDeLaFicha(tmdbId: number, tipo: ContentType): Promise<{
+    existe: boolean;
+    id?: string;
+    titulo?: string;
+    urls: string[];
+    episodios: Array<{ season: number; episode: number; urls: string[] }>;
+    de_otras_fuentes: number;
+  }> {
+    const vacio = { existe: false, urls: [] as string[], episodios: [], de_otras_fuentes: 0 };
+    const { data } = await getSupabaseAdmin()
+      .from('media_items')
+      .select('id,title,servers,seasons')
+      .eq('tmdb_id', tmdbId)
+      .eq('type', tipo === 'tvseries' ? 'tvseries' : 'movie')
+      .maybeSingle();
+    if (!data) return vacio;
+
+    const servers = ((data as any).servers as any[]) || [];
+    const episodios: Array<{ season: number; episode: number; urls: string[] }> = [];
+    for (const t of (((data as any).seasons as any[]) || [])) {
+      for (const e of (t?.episodes || [])) {
+        const suyas = ((e?.servers || []) as any[]).filter(esServidorManual).map(urlDe).filter(Boolean);
+        if (suyas.length) {
+          episodios.push({
+            season: Number(t?.season_number),
+            episode: Number(e?.episode_number),
+            urls: suyas,
+          });
+        }
+      }
+    }
+
+    return {
+      existe: true,
+      id: String((data as any).id),
+      titulo: String((data as any).title || ''),
+      urls: servers.filter(esServidorManual).map(urlDe).filter(Boolean),
+      episodios,
+      de_otras_fuentes: servers.filter(sv => !esServidorManual(sv)).length,
+    };
+  }
+
+  /**
+   * BORRAR ES UNA OPERACIÓN APARTE, y por eso ocurre DESPUÉS de guardar y no dentro.
+   *
+   * Guardar y borrar no se parecen: guardar comprueba cada url contra su servidor y la fusiona
+   * con lo que hubiera; borrar solo compara dos listas. Meter las dos cosas en el mismo camino
+   * obligaba a repetir la decisión en las dos ramas de `anadirFichaManual` —la que crea la ficha
+   * y la que la fusiona con una que ya existía—, que es justo el tipo de duplicado que aquí
+   * termina en que una rama se arregla y la otra no. Se hace al final, sobre la fila ya escrita,
+   * y hay un único sitio donde se decide qué desaparece.
+   *
+   * Dos reglas, y las dos importan:
+   *
+   *   · Solo se tocan los servidores de la fuente propia. Los de un scraper no son de nadie que
+   *     pueda arreglarlos desde este formulario.
+   *   · Solo desaparece lo que el formulario YA NO LISTA. Una url que sigue en la caja pero que
+   *     hoy no contesta se queda donde estaba: fallar una comprobación no es lo mismo que pedir
+   *     que se borre, y perderla por un timeout sería perder algo que nadie pidió perder.
+   *
+   * Y para los capítulos, solo se miran los que el formulario haya declarado. Un capítulo del que
+   * no dijo nada se queda intacto — que es lo que permite editar una temporada sin vaciar las
+   * otras.
+   */
+  private static async podarManualesNoListados(
+    rowId: string,
+    listado: {
+      ficha?: string[] | null;
+      capitulos?: Array<{ season: number; episode: number; urls: string[] }> | null;
+    }
+  ): Promise<number> {
+    const db = getSupabaseAdmin();
+    const { data } = await db
+      .from('media_items')
+      .select('id,type,servers,seasons')
+      .eq('id', rowId)
+      .maybeSingle();
+    if (!data) return 0;
+
+    /**
+     * La lista manual se REHACE a imagen de lo que quedó escrito, no se filtra.
+     *
+     * Filtrar habría bastado para borrar, pero deja fuera dos cosas que el formulario ahora
+     * promete: el ORDEN —la primera url es la que se entrega para reproducir, así que moverla
+     * arriba es una decisión de verdad— y los REPETIDOS, que no son dos respaldos sino la misma
+     * url puesta dos veces, y que filtrando por conjunto de urls no hay forma de quitar (las dos
+     * copias sobreviven a cualquier criterio que se aplique a una).
+     *
+     * Se reutiliza el objeto que ya había para cada url en vez de crear uno nuevo: ahí vive su
+     * `verified_at`, y perderlo sería obligar al verificador a redescubrir algo ya comprobado.
+     * Una url que está en la lista pero no entre los guardados simplemente no se pudo guardar
+     * —no pasó la comprobación—; no se inventa aquí.
+     */
+    const rehacer = (previos: any[], lista: string[]) => {
+      const manuales = previos.filter(esServidorManual);
+      const otros = previos.filter(sv => !esServidorManual(sv));
+      const finales: any[] = [];
+      for (const url of lista) {
+        const suyo = manuales.find(sv => urlDe(sv) === url);
+        if (suyo && !finales.includes(suyo)) finales.push(suyo);
+      }
+      // Los suyos delante: quien pega una url a mano sabe algo que el scraper no sabía.
+      const servidores = [...finales, ...otros];
+      /**
+       * Se escribe si la lista quedó DISTINTA, no solo si menguó. Mover una url al principio no
+       * quita nada y aun así cambia qué se reproduce, que es justamente para lo que se reordena.
+       */
+      const cambiado =
+        servidores.length !== previos.length ||
+        servidores.some((sv, i) => sv !== previos[i]);
+      return { servidores, cambiado, quitadas: manuales.length - finales.length };
+    };
+
+    let quitadas = 0;
+    let cambiado = false;
+    const servers = ((data as any).servers as any[]) || [];
+    let seasons = ((data as any).seasons as any[]) || [];
+    const update: Record<string, unknown> = {};
+
+    if (listado.ficha) {
+      const r = rehacer(servers, listado.ficha);
+      if (r.cambiado) { quitadas += r.quitadas; cambiado = true; update.servers = r.servidores; }
+    }
+
+    if (listado.capitulos?.length) {
+      const porCapitulo = new Map(
+        listado.capitulos.map(c => [`${c.season}x${c.episode}`, c.urls])
+      );
+      let tocados = false;
+      seasons = seasons.map(t => ({
+        ...t,
+        episodes: ((t?.episodes || []) as any[]).map(e => {
+          // Un capítulo del que el formulario no dijo nada se queda intacto.
+          const lista = porCapitulo.get(`${t?.season_number}x${e?.episode_number}`);
+          if (!lista) return e;
+          const r = rehacer((e?.servers || []) as any[], lista);
+          if (!r.cambiado) return e;
+          tocados = true;
+          quitadas += r.quitadas;
+          return { ...e, servers: r.servidores };
+        }),
+      }));
+      if (tocados) { cambiado = true; update.seasons = seasons; }
+    }
+
+    if (!cambiado) return 0;
+
+    /**
+     * Y el veredicto lo vuelve a decidir `veredictoDisponibilidad` sobre lo que queda, no este
+     * sitio. Vaciar de urls la última fuente de un título tiene que dejar de anunciarlo, pero
+     * quién puede anunciarse se decide en un único sitio en todo el proyecto — tener dos
+     * criterios es como esto se ha roto ya varias veces.
+     */
+    const veredicto = veredictoDisponibilidad(
+      {
+        type: (data as any).type,
+        servers: (update.servers as any[]) || servers,
+        seasons: (update.seasons as any[]) || seasons,
+      } as any,
+      'todo'
+    );
+    if (veredicto !== undefined) update.has_streams = veredicto;
+    update.updated_at = new Date().toISOString();
+
+    const escrito = await this.escribirFila(update, rowId, 'poda de urls manuales');
+    if (!escrito) return 0;
+
+    await this.invalidateItem({ id: rowId });
+    await this.invalidateListings();
+    return quitadas;
   }
 
   /**
@@ -3891,6 +4159,23 @@ export async function hostsDelCatalogo(): Promise<Array<{ host: string; servidor
   return [...porHost.entries()]
     .map(([host, v]) => ({ host, servidores: v.servidores, titulos: v.titulos.size }))
     .sort((a, b) => b.servidores - a.servidores);
+}
+
+/**
+ * Qué cuenta como puesto a mano, en un solo sitio.
+ *
+ * Esta pregunta se hacía escrita a pelo en media docena de puntos —el crawl, la persistencia de
+ * películas, la de capítulos, el formulario— y ya ha pasado que se arreglara en uno y no en los
+ * otros: las urls manuales sobrevivían a `persistStreams` y aun así se las llevaba el crawl. Con
+ * una sola función esa clase de fallo deja de ser posible.
+ */
+function esServidorManual(sv: any): boolean {
+  return String(sv?.source_id || '').toLowerCase() === 'manual';
+}
+
+/** La url de un servidor. El respaldo a `embed_url` importa: en los manuales van las dos iguales. */
+function urlDe(sv: any): string {
+  return String(sv?.direct_stream || sv?.embed_url || '');
 }
 
 /**

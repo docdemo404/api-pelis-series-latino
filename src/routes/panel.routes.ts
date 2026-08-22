@@ -143,6 +143,28 @@ router.get('/api/v1/panel/manual/episodios', async (req: Request, res: Response,
 });
 
 /**
+ * QUÉ HAY YA GUARDADO A MANO PARA UN TÍTULO — lo que convierte el formulario en un editor.
+ *
+ * Sin esto, «añadir contenido» solo sabía añadir: no se veía lo que uno mismo había pegado antes,
+ * así que no se podía corregir una errata ni retirar una url que resultó mala. Se pregunta por
+ * `tmdb_id`, que es la identidad, y no por el id de la fila — quien está delante del formulario
+ * acaba de elegir un título de TMDB y no tiene por qué saber con qué id se guardó.
+ */
+router.get('/api/v1/panel/manual/guardado', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const tmdbId = Number(req.query.tmdb_id);
+    const tipo = String(req.query.type) === 'tvseries' ? 'tvseries' : 'movie';
+    if (!Number.isFinite(tmdbId) || tmdbId <= 0) {
+      return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'Se requiere tmdb_id');
+    }
+    const r = await CatalogService.manualesDeLaFicha(tmdbId, tipo as any);
+    res.json({ status: 'success', ...r });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
  * AÑADIR UNA FICHA A MANO — la fuente propia.
  *
  * Se elige un título de TMDB (con `/panel/media/search`) y se pegan una o varias urls directas.
@@ -168,7 +190,14 @@ router.post('/api/v1/panel/manual', async (req: Request, res: Response, next: Ne
     if (!Number.isFinite(tmdbId) || tmdbId <= 0) {
       return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'Se requiere un tmdb_id válido');
     }
-    const r = await CatalogService.anadirFichaManual({ tmdbId, tipo: tipo as any, urls, episodios });
+    /**
+     * `reemplazar` solo lo manda el panel cuando ANTES ha cargado lo guardado. Es lo que
+     * distingue una caja vacía que dice «quítalo» de una que dice «aún no lo he escrito», y por
+     * eso no se deduce aquí: si alguien llama a este endpoint a pelo sin la bandera, lo suyo se
+     * suma a lo que hubiera, como siempre.
+     */
+    const reemplazar = b.reemplazar === true;
+    const r = await CatalogService.anadirFichaManual({ tmdbId, tipo: tipo as any, urls, episodios, reemplazar });
     if (!r.ok) {
       return res.status(422).json({ status: 'error', message: r.error, aceptadas: r.aceptadas, rechazadas: r.rechazadas });
     }
