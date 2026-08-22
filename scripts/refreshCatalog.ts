@@ -167,6 +167,8 @@ async function mergeIntoExisting(
 
   const columns =
     'id,title,original_title,aliases,release_date,poster,backdrop,logo,overview,runtime,director,source_url,trailer' +
+    // Lo que la ficha absorbida APORTA de verdad: sus capítulos y sus enlaces (ver el final).
+    ',seasons,servers,has_streams' +
     (opts.withMultiSource ? ',source_urls' : '');
 
   // El tipo forma parte de la identidad de la ficha: TMDB numera películas y series por
@@ -235,6 +237,63 @@ async function mergeIntoExisting(
     if (opts.withNormalized) {
       patch.title_normalized = searchIndexKey(existing.title, existing.original_title, mergedAliases);
     }
+  }
+
+  /**
+   * Y AHORA LO QUE DE VERDAD TRAÍA LA FICHA ABSORBIDA: SUS CAPÍTULOS Y SUS ENLACES.
+   *
+   * Hasta aquí esta función solo rellenaba huecos de metadata, apuntaba la página de origen y
+   * sumaba alias. Todo lo demás de la fila entrante —los servidores que acababan de demostrar que
+   * reproducen, y el árbol de capítulos entero— se descartaba en silencio. O sea que cuando dos
+   * fuentes traen la misma obra, la segunda solo aportaba su nombre.
+   *
+   * Se ve entero con "La casa del dragón": moviedays la tiene por tmdb 94997 y FuegoCine publica
+   * los posts de sus capítulos. En cuanto el matcher empareja bien la de FuegoCine, choca con la
+   * que ya está, entra por aquí… y sus 24 capítulos con vídeo comprobado se iban a la basura.
+   * Esa es justo la promesa que el `source_urls` de la migración 005 dejó escrita en el esquema:
+   * «unificar los servidores de TioPlus y FuegoCine bajo un único registro».
+   *
+   * Los capítulos se FUSIONAN, nunca se reemplazan —`fusionarTemporadas`, la misma que usa el
+   * crawl al escribir—: la ficha que se queda conserva todo lo suyo, los capítulos que solo tenía
+   * la absorbida se añaden y los que están en las dos acumulan los servidores de ambas. Reemplazar
+   * es como en este proyecto han desaparecido capítulos tres veces.
+   *
+   * Solo se escribe si SUMA. Un `update` que deja la columna igual no es gratis: reescribe un
+   * JSON enorme y mueve `updated_at`, que es por donde ordenan los feeds.
+   */
+  const capitulosEntrantes = Array.isArray(row.seasons) ? (row.seasons as any[]) : [];
+  if (capitulosEntrantes.length) {
+    const previas = Array.isArray(existing.seasons) ? existing.seasons : [];
+    // Cuenta capítulos Y servidores: añadir un enlace a un capítulo que ya estaba también suma.
+    const bultoDe = (temps: any[]) => temps.reduce(
+      (n: number, t: any) => n + (t?.episodes || []).reduce(
+        (m: number, e: any) => m + 1 + (e?.servers || []).length, 0), 0);
+    const fusionadas = fusionarTemporadas(previas, capitulosEntrantes);
+    if (bultoDe(fusionadas) > bultoDe(previas)) patch.seasons = fusionadas;
+  }
+
+  // Y los servidores de la ficha (una película, o el respaldo de ficha de una serie): los de la
+  // absorbida se añaden detrás de los que ya estaban, sin repetir url. Quién va primero lo decide
+  // después `sortServersBySourcePriority`, que es el único sitio donde se ordena para el cliente.
+  const enlacesEntrantes = Array.isArray(row.servers) ? (row.servers as any[]) : [];
+  if (enlacesEntrantes.length) {
+    const actuales: any[] = Array.isArray(existing.servers) ? existing.servers : [];
+    const urlDe = (sv: any) => String(sv?.direct_stream || sv?.embed_url || '');
+    const yaEstan = new Set(actuales.map(urlDe));
+    const nuevos = enlacesEntrantes.filter(sv => urlDe(sv) && !yaEstan.has(urlDe(sv)));
+    if (nuevos.length) patch.servers = [...actuales, ...nuevos];
+  }
+
+  /**
+   * Si lo absorbido REPRODUCE, la ficha que se queda deja de estar escondida.
+   *
+   * `has_streams` es lo que gobierna si una ficha sale en portada y en el buscador. La fila
+   * entrante solo llega aquí con `true` después de haber demostrado vídeo (`quedarseConLoQueRepro-
+   * duce`), así que una ficha marcada como fantasma que acaba de recibir esos enlaces ya no lo es.
+   */
+  if (row.has_streams === true && existing.has_streams !== true
+    && (patch.seasons || patch.servers)) {
+    patch.has_streams = true;
   }
 
   if (Object.keys(patch).length === 0) return true; // nada que aportar: no es un fallo
@@ -538,7 +597,14 @@ async function withSourceSignals(item: MediaItem, onHit: () => void): Promise<Me
     // post, y eso falla en cuanto no lleva la palabra "serie": la miniserie "Eric" (2024) se
     // recolectaba como película, buscaba en el catálogo de películas de TMDB y acababa con la
     // ficha de un especial de monólogos. La página sí publica sus temporadas y episodios.
-    type: signals.type || item.type
+    type: signals.type || item.type,
+    /**
+     * Y DE QUÉ CAPÍTULO ES ESTA PÁGINA, que para una serie agrupada de FuegoCine es la única
+     * prueba de identidad que va a haber: sus posts de episodio no publican año ni título
+     * original, solo el fotograma del capítulo. `fetchSourceSignals` ya lo leía del título del
+     * post y aquí se tiraba, así que el matcher nunca podía usarlo por el camino del crawl.
+     */
+    _episode_hint: signals.episode || item._episode_hint || null
   };
 }
 

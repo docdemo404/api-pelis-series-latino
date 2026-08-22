@@ -696,7 +696,16 @@ export class TmdbService {
     const cleanOriginal = opts.originalTitle ? cleanForSearch(opts.originalTitle) : '';
     const useOriginal = !!cleanOriginal && canonicalTitle(cleanOriginal) !== canonicalTitle(cleanTitle);
 
-    const cacheKey = `${type}:${cleanTitle.toLowerCase()}:${year || ''}:${useOriginal ? canonicalTitle(cleanOriginal) : ''}:${imageHint || ''}`;
+    /**
+     * EL CAPÍTULO DEL QUE VIENE LA PÁGINA FORMA PARTE DE LA PREGUNTA, así que va en la clave.
+     *
+     * Es la última prueba de identidad que se intenta (ver el final de esta función) y cambia la
+     * respuesta: la misma serie sale respaldada con él y sin respaldar sin él. Faltando en la
+     * clave, la primera resolución sin capítulo dejaba cacheado el «no hay respaldo» y la
+     * siguiente —que sí traía el capítulo— se lo comía sin llegar a preguntar. Se midió aquí
+     * mismo, resolviendo "La casa del dragón" dos veces en el mismo proceso.
+     */
+    const cacheKey = `${type}:${cleanTitle.toLowerCase()}:${year || ''}:${useOriginal ? canonicalTitle(cleanOriginal) : ''}:${imageHint || ''}:${opts.episodeHint ? `${opts.episodeHint.season}x${opts.episodeHint.episode}` : ''}`;
     const cached = tmdbIdCache.get(cacheKey);
     if (cached) return cached;
 
@@ -755,7 +764,31 @@ export class TmdbService {
     // Cada variante de la consulta recorre la misma escalera. Se para en cuanto el match
     // es inequívoco, así que para los títulos "normales" el coste no cambia: la primera
     // variante es el título limpio de siempre.
-    const knownOriginal = opts.originalTitle || null;
+    /**
+     * UN TÍTULO ORIGINAL QUE REPITE EL TÍTULO BUSCADO NO RESPALDA NADA: es el mismo dato dos veces.
+     *
+     * `scoreResult` trata el título original de la fuente como una señal INDEPENDIENTE del nombre
+     * regional —si calca al `original_name` del candidato, esa es la obra— y con eso da la ficha
+     * por respaldada. Pero muchas fuentes no publican título original y el scraper rellena el
+     * hueco con el que ya tenían: FuegoCine agrupa sus series por el nombre del post y guarda
+     * `original_title` = `title`, y `scrapeFuegocineDetail` hace lo mismo con `d.originalTitle ||
+     * titleRaw`. Eso convierte «el título se parece» en «algo independiente lo confirma», que es
+     * justo lo que la regla existía para impedir.
+     *
+     * Y cuando hay un homónimo antiguo cuyo nombre ORIGINAL es de verdad el título buscado, el
+     * eco lo corona. Medido: la serie "Merlina" de FuegoCine —Wednesday, 2022, tmdb 119051—
+     * entraba con el eco `original_title: "Merlina"`, y TMDB tiene una serie de 1983 cuyo
+     * `original_name` es literalmente "Merlina" (tmdb 61564):
+     *
+     *     con el eco:  61564  «Merlina» (1983)  respaldada   ← se guardó ESTA
+     *     sin el eco:  119051 «Merlina» (2022)  sin respaldo, gana por respaldo de público
+     *     sin el eco + fotograma del capítulo:  119051 RESPALDADA
+     *
+     * `useOriginal` ya sabe distinguirlo —por eso no gasta una consulta aparte repitiendo la
+     * misma palabra—; lo que faltaba era no darle valor de PRUEBA. Sin eco, el desempate vuelve a
+     * donde debe: el fotograma del capítulo, y si no lo hay, el respaldo del público.
+     */
+    const knownOriginal = useOriginal ? (opts.originalTitle || null) : null;
     const runVariant = async (variant: string): Promise<boolean> => {
       const common = { knownYear: year, imageHint, knownOriginal };
       if (year && collect(await this.searchCandidates(endpoint, variant, { ...common, filterYear: year }))) return true;
@@ -1140,7 +1173,25 @@ export class TmdbService {
         ? { id: item.tmdb_id, matched: true, score: 1, verified: true, type: item.type }
         : await this.resolveTmdb(item.title, item.type, year, item.id, {
             originalTitle: item.original_title,
-            imageHint
+            imageHint,
+            /**
+             * DE QUÉ CAPÍTULO ES LA PÁGINA, cuando quien trae el ítem lo sabe (`_episode_hint`).
+             *
+             * Sin esto, el único respaldo que una serie agrupada de FuegoCine puede llegar a
+             * tener no se intentaba NUNCA por este camino, que es el del crawl. Sus series no
+             * tienen página propia: se arman juntando los posts de sus capítulos, y esos posts no
+             * publican ni año ni título original. Lo único que traen es el fotograma del capítulo
+             * —una ruta de image.tmdb.org—, y para poder compararlo hay que saber de qué capítulo
+             * es. `resolveTmdb` ya sabía hacerlo; nadie le pasaba el dato.
+             *
+             * Medido con "La casa del dragón" (tmdb 94997), que es como se encontró:
+             *
+             *     sin el capítulo:  94997 encontrada, SIN respaldo → id sintético negativo,
+             *                       ficha aparte, sin carátula y sin fundirse con la que ya
+             *                       existía por moviedays.
+             *     con el capítulo:  94997 RESPALDADA por el fotograma de 3x8.
+             */
+            episodeHint: (item as any)._episode_hint || null
           });
 
       /**

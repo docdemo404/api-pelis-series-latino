@@ -69,7 +69,7 @@ import { getSupabaseAdmin } from '../src/services/supabaseService';
 import { canonicalTitle, normalizeTitle, searchIndexKey, dedupeTitles, sourceTitleFromSlug, slugify } from '../src/utils/text';
 // La puerta de identidad de las fuentes vive en catalogService: el script y la API tienen que
 // decidir lo MISMO sobre qué página pertenece a qué ficha.
-import { CatalogService, esPaginaPropia, candidateIdsForUrl, tipoDeLaRuta, duenoDeLaPagina } from '../src/services/catalogService';
+import { CatalogService, esPaginaPropia, candidateIdsForUrl, tipoDeLaRuta, duenoDeLaPagina, fusionarTemporadas } from '../src/services/catalogService';
 import { CacheStore } from '../src/cache/store';
 import { streamClient } from '../src/utils/httpClient';
 import { inspectEmbed } from '../src/scrapers/embedHealth';
@@ -719,7 +719,14 @@ async function fuseRowInto(
   twin: any,
   extraAliases: string[],
   opts: { apply: boolean; withMultiSource: boolean; sourceYear?: string; pruebaDeImagen?: boolean }
-): Promise<{ ok: boolean; urls: [number, number]; aliases: [number, number]; rechazada?: string }> {
+): Promise<{
+  ok: boolean;
+  urls: [number, number];
+  aliases: [number, number];
+  /** Capítulos con vídeo de la ficha que se queda, antes y después de absorber al duplicado. */
+  capitulos: [number, number];
+  rechazada?: string;
+}> {
   // El año de la fila se toma de su PÁGINA de origen, no de `release_date`.
   //
   // Aquí se llega porque la página confirmó que la fila es la ficha que ya tiene la gemela, así
@@ -757,6 +764,7 @@ async function fuseRowInto(
       ok: false,
       urls: [0, 0],
       aliases: [0, 0],
+      capitulos: [0, 0],
       rechazada: `"${row.title}" (${yearA}) y "${twin.title}" (${yearB}) no son de la misma época`
     };
   }
@@ -773,9 +781,49 @@ async function fuseRowInto(
   const currentAliases: string[] = twin.aliases || [];
   const mergedAliases = dedupeTitles([...currentAliases, ...extraAliases]);
 
+  /**
+   * LO QUE EL DUPLICADO TENÍA DE VERDAD: SUS CAPÍTULOS Y SUS ENLACES. Se vuelcan ANTES de borrarlo.
+   *
+   * Esta función absorbía la página de origen y el nombre, y acto seguido borraba la fila. Todo lo
+   * que esa fila había costado —los capítulos que el crawl resolvió uno a uno, con su vídeo ya
+   * comprobado— se iba con ella. Con `fc-merlina` son 16 capítulos de FuegoCine reproduciéndose;
+   * la ficha que se queda (moviedays) los tiene por otro camino, pero un capítulo con dos fuentes
+   * se ve el doble de veces que uno con una, y el día que una fuente caiga se nota.
+   *
+   * Se fusiona con `fusionarTemporadas`, la misma que usan el crawl y la API: la ficha que se
+   * queda conserva TODO lo suyo, los capítulos que solo tenía el duplicado se añaden y los
+   * comunes acumulan los servidores de los dos. Reemplazar aquí sería borrar capítulos, que es el
+   * fallo que este proyecto ya ha cometido tres veces.
+   *
+   * Los cuerpos se releen por id: las consultas que traen `row` y `twin` no piden estas columnas
+   * —son las más pesadas de la tabla— y pedirlas para todo el catálogo por un caso que aparece
+   * una vez cada mil filas sería pagar el peaje al revés.
+   */
+  const { data: cuerpos } = await db
+    .from('media_items').select('id,seasons,servers,has_streams').in('id', [row.id, twin.id]);
+  const cuerpoDe = (id: string): any => ((cuerpos as any[]) || []).find(f => String(f.id) === String(id)) || {};
+  const delDuplicado = cuerpoDe(row.id);
+  const deLaQueSeQueda = cuerpoDe(twin.id);
+
+  const conVideo = (temps: any[]) => (temps || []).reduce(
+    (n: number, t: any) => n + (t?.episodes || []).filter((e: any) => (e?.servers || []).length > 0).length, 0);
+
+  const temporadasPrevias: any[] = Array.isArray(deLaQueSeQueda.seasons) ? deLaQueSeQueda.seasons : [];
+  const temporadasDelDup: any[] = Array.isArray(delDuplicado.seasons) ? delDuplicado.seasons : [];
+  const temporadasFusionadas = temporadasDelDup.length
+    ? fusionarTemporadas(temporadasPrevias, temporadasDelDup)
+    : temporadasPrevias;
+
+  const urlDeServidor = (sv: any) => String(sv?.direct_stream || sv?.embed_url || '');
+  const enlacesPrevios: any[] = Array.isArray(deLaQueSeQueda.servers) ? deLaQueSeQueda.servers : [];
+  const yaEstan = new Set(enlacesPrevios.map(urlDeServidor));
+  const enlacesNuevos = (Array.isArray(delDuplicado.servers) ? delDuplicado.servers : [])
+    .filter((sv: any) => urlDeServidor(sv) && !yaEstan.has(urlDeServidor(sv)));
+
   const sizes = {
     urls: [currentUrls.length, mergedUrls.length] as [number, number],
-    aliases: [currentAliases.length, mergedAliases.length] as [number, number]
+    aliases: [currentAliases.length, mergedAliases.length] as [number, number],
+    capitulos: [conVideo(temporadasPrevias), conVideo(temporadasFusionadas)] as [number, number]
   };
   if (!opts.apply) return { ok: true, ...sizes };
 
@@ -784,6 +832,19 @@ async function fuseRowInto(
   if (mergedAliases.length > currentAliases.length) {
     patch.aliases = mergedAliases;
     patch.title_normalized = searchIndexKey(twin.title, twin.original_title, mergedAliases);
+  }
+  // Solo se escribe el árbol si SUMA: un update que deja la columna igual reescribe un JSON
+  // enorme y mueve `updated_at`, que es por donde ordenan los feeds.
+  const bulto = (temps: any[]) => (temps || []).reduce(
+    (n: number, t: any) => n + (t?.episodes || []).reduce(
+      (m: number, e: any) => m + 1 + (e?.servers || []).length, 0), 0);
+  if (bulto(temporadasFusionadas) > bulto(temporadasPrevias)) patch.seasons = temporadasFusionadas;
+  if (enlacesNuevos.length) patch.servers = [...enlacesPrevios, ...enlacesNuevos];
+  // Y si lo absorbido reproduce, la que se queda deja de estar escondida (`has_streams` gobierna
+  // portada y buscador). El duplicado solo llega con `true` habiendo demostrado vídeo.
+  if (delDuplicado.has_streams === true && deLaQueSeQueda.has_streams !== true
+    && (patch.seasons || patch.servers)) {
+    patch.has_streams = true;
   }
 
   if (Object.keys(patch).length > 0) {
@@ -858,7 +919,8 @@ async function relocateOccupant(
     if (!merged.ok) return { freed: false, reason: 'no se pudo fundir con su ficha oficial' };
     console.log(
       `     ↳ se desaloja ${twin.id}: "${twin.title}" era un duplicado de ${owner.id} = "${owner.title}" (tmdb ${own.id}), su página dice "${signals.title}" ${signals.year || 's/a'}` +
-      `\n       se funde ahí (fuentes ${merged.urls[0]}→${merged.urls[1]}, alias ${merged.aliases[0]}→${merged.aliases[1]}) y libera el ${twin.tmdb_id}`
+      `\n       se funde ahí (fuentes ${merged.urls[0]}→${merged.urls[1]}, alias ${merged.aliases[0]}→${merged.aliases[1]},` +
+      ` capítulos con vídeo ${merged.capitulos[0]}→${merged.capitulos[1]}) y libera el ${twin.tmdb_id}`
     );
     return { freed: true, reason: '' };
   }
@@ -1394,7 +1456,8 @@ async function verifyAgainstSource(
         if (!merged.ok) continue;
         console.log(
           `   ⇄ ${row.id}\n     "${row.title}" (tmdb ${row.tmdb_id}) era en realidad "${signals.title}" = tmdb ${match.id}, que ya es ${twin.id} = "${twin.title}"` +
-          `\n       se funde ahí (fuentes ${merged.urls[0]}→${merged.urls[1]}, alias ${merged.aliases[0]}→${merged.aliases[1]}) y se elimina el duplicado`
+          `\n       se funde ahí (fuentes ${merged.urls[0]}→${merged.urls[1]}, alias ${merged.aliases[0]}→${merged.aliases[1]},` +
+          ` capítulos con vídeo ${merged.capitulos[0]}→${merged.capitulos[1]}) y se elimina el duplicado`
         );
         fused++;
         continue;

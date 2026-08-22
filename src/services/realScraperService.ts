@@ -2112,7 +2112,13 @@ export class RealScraperService {
         tmdb_id: 0,
         imdb_id: null,
         type: isMovie ? 'movie' as const : 'tvseries' as const,
-        title: titleRaw,
+        /**
+         * EL `2x8` NO ES PARTE DEL NOMBRE DE LA SERIE. `fetchSourceSignals` ya lo recortaba y
+         * este camino —el de pedir una ficha EN VIVO por su slug— no, así que al matcher le
+         * llegaba "Merlina 2x8" y ninguna serie de TMDB se llama así: la ficha salía con id
+         * sintético y rotulada con el número del capítulo. El nombre del post queda en `aliases`.
+         */
+        title: titleRaw.replace(/\s\d{1,2}\s*x\s*\d{1,3}\s*$/i, '').trim() || titleRaw,
         // El título original de la página es una señal INDEPENDIENTE del nombre regional, y es lo
         // que permite confirmar el emparejado; repetir el título mostrado no aporta nada.
         original_title: d.originalTitle || titleRaw,
@@ -2134,7 +2140,17 @@ export class RealScraperService {
         dubbing_cast: [],
         primary_stream: servers[0] || undefined,
         servers: servers.length > 0 ? servers : undefined,
-        _tioplus_url: fuegocineUrl
+        _tioplus_url: fuegocineUrl,
+        // "MERLINA 2x8" → la página es del capítulo 8 de la temporada 2. Mismo motivo que en el
+        // crawl: en un post de episodio el fotograma es la única prueba de identidad, y sin saber
+        // de qué capítulo es no se puede comparar. Sin esto, una serie pedida EN VIVO por su slug
+        // se emparejaba con lo único que le quedaba —el parecido del título— y se llevaba al
+        // homónimo antiguo.
+        _episode_hint: (() => {
+          const m = titleRaw.match(/\s(\d{1,2})\s*x\s*(\d{1,3})\s*$/i)
+            || fuegocineUrl.match(/-(\d{1,2})x(\d{1,3})\.html?$/i);
+          return m ? { season: parseInt(m[1], 10), episode: parseInt(m[2], 10) } : null;
+        })()
       } as any;
     } catch {
       return null;
@@ -2319,6 +2335,15 @@ export class RealScraperService {
          * ellas "Invencible". El post de cualquiera de sus episodios SÍ publica esos datos.
          */
         _source_url: group.episodes[0]?.link || undefined,
+        /**
+         * …Y DE QUÉ CAPÍTULO ES ESA PÁGINA. Va con ella porque sin él no sirve para identificar
+         * nada: el post de un episodio no publica año ni título original, y lo único que trae —el
+         * fotograma— solo se puede comprobar contra TMDB sabiendo qué capítulo es. Es el mismo
+         * episodio cuya url queda como `_source_url`, no otro. Lo consume `enrichMediaItem`.
+         */
+        _episode_hint: group.episodes[0]
+          ? { season: group.episodes[0].season, episode: group.episodes[0].episode }
+          : null,
         _fuegocine_blogger_id: bloggerIdCat,
       } as any);
     }

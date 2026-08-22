@@ -3236,6 +3236,26 @@ export class CatalogService {
       if (!yaResuelto) {
         await this.persistEpisodeServers(serie, season, episode, todos).catch(() => {});
       }
+    } else if (!yaResuelto) {
+      /**
+       * Y SI NO SE ENCONTRÓ NADA, QUEDA CONSTANCIA DE QUE SE PREGUNTÓ. Solo el sello, nada más.
+       *
+       * El caché sí se deja sin escribir —arriba— para que el siguiente que abra el capítulo
+       * vuelva a intentarlo de verdad. Pero no anotar NADA convierte «se preguntó y la fuente no
+       * lo tiene» en «no se ha mirado nunca», y eso es lo que impide terminar una serie:
+       * `completarSeries` elige los capítulos por ahí, así que cada corrida vuelve a pedir los
+       * mismos, gasta el presupuesto entero y no llega nunca a la siguiente serie.
+       *
+       * Medido sobre «Los Simpson» (802 capítulos, 600 se ven): una pasada de completado miró sus
+       * 184 pendientes, ninguna fuente dio una sola url, y al terminar seguían contando como 184
+       * sin mirar. La corrida siguiente iba a hacer exactamente lo mismo.
+       *
+       * El sello no condena el capítulo: `capituloPendiente` le da SIETE DÍAS a un «no está en la
+       * fuente» y solo UN día a un «hay url pero hoy no reprodujo». Y no se le tocan los
+       * servidores —`soloSello`—, porque aquí no se ha contradicho nada de lo guardado: no se ha
+       * encontrado la página siquiera.
+       */
+      await this.persistEpisodeServers(serie, season, episode, [], { soloSello: true }).catch(() => {});
     }
     return resultado;
   }
@@ -3260,19 +3280,26 @@ export class CatalogService {
     serie: MediaItem,
     season: number,
     episode: number,
-    servers: ServerOption[]
+    servers: ServerOption[],
+    /**
+     * `soloSello`: anotar que se preguntó SIN tocar los servidores del capítulo. Es el caso de
+     * cuando no se encontró ninguna fuente: no se ha contradicho lo guardado, así que sustituirlo
+     * por una lista vacía sería borrar lo que otra pasada sí encontró.
+     */
+    opts: { soloSello?: boolean } = {}
   ): Promise<void> {
     if (!serie?.id) return;
     // Leer-modificar-escribir sobre `seasons`: de una en una por ficha. Ver `enColaPorFicha`.
     return enColaPorFicha(String(serie.id), () =>
-      this.escribirServidoresDelCapitulo(serie, season, episode, servers));
+      this.escribirServidoresDelCapitulo(serie, season, episode, servers, opts));
   }
 
   private static async escribirServidoresDelCapitulo(
     serie: MediaItem,
     season: number,
     episode: number,
-    servers: ServerOption[]
+    servers: ServerOption[],
+    opts: { soloSello?: boolean } = {}
   ): Promise<void> {
     // Cinturón: quien escriba capítulos tiene que ser una serie. El camino de arriba ya lo filtra,
     // pero esta función es la que dejó 25 películas con árbol de episodios y no puede volver a
@@ -3307,6 +3334,19 @@ export class CatalogService {
     // Se parte de lo que ya tenga la ficha y se sustituye SOLO este episodio. Si la temporada o el
     // episodio no estaban, se crean: una serie recién descubierta no tiene árbol todavía.
     const seasons = JSON.parse(JSON.stringify(base)) as any[];
+    /**
+     * UN SELLO A SECAS NO INVENTA CAPÍTULOS.
+     *
+     * Cuando solo se viene a anotar «se preguntó y no había nada» (`soloSello`), el capítulo tiene
+     * que estar YA en el árbol: si no está, no hay nada de lo que dejar constancia. Sin esta
+     * guarda, pedir a la API un episodio que no existe —`/season/9/episode/99` de cualquier
+     * serie— lo añadiría a la ficha, y quien mira la ficha vería un capítulo que no existe.
+     */
+    if (opts.soloSello) {
+      const t = seasons.find(x => Number(x?.season_number) === season);
+      const e = (t?.episodes || []).find((x: any) => Number(x?.episode_number) === episode);
+      if (!e) return;
+    }
     let temporada = seasons.find(t => Number(t?.season_number) === season);
     if (!temporada) {
       temporada = { season_number: season, name: `Temporada ${season}`, episodes_count: 0, poster: null, episodes: [] };
@@ -3333,7 +3373,7 @@ export class CatalogService {
     const rescatados = manualesDelCapitulo.filter(
       (m: any) => !yaEstan.has(String(m?.direct_stream || ''))
     );
-    cap.servers = rescatados.length ? [...rescatados, ...servers] : servers;
+    if (!opts.soloSello) cap.servers = rescatados.length ? [...rescatados, ...servers] : servers;
     // El sello va SIEMPRE, con enlaces o sin ellos: «comprobado y vacío» es justo lo que
     // autoriza a dejar de anunciar el capítulo, y sin él no se distingue de «aún no mirado».
     cap.checked_at = new Date().toISOString();
@@ -4332,7 +4372,23 @@ export function fusionarTemporadas(previas: any[], nuevas: any[]): any[] {
   if (!nuevas.length) return previas;
   if (!previas.length) return nuevas;
 
-  const salida = previas.map(t => ({ ...t, episodes: [...(t.episodes || [])] }));
+  /**
+   * CADA CAPÍTULO SE COPIA, no solo el array que los contiene.
+   *
+   * Con `episodes: [...]` el array era nuevo pero los capítulos de dentro seguían siendo LOS
+   * MISMOS OBJETOS de `previas`, así que el `ePrevio.servers = [...]` de más abajo escribía
+   * también en la lista de entrada. Quien llama no lo espera —una función que se llama «fusionar
+   * y devolver» no debería tocar lo que le dan— y a quien quiera saber si la fusión APORTA algo
+   * le miente: comparar el resultado con la lista previa es comparar la lista consigo misma.
+   *
+   * Se encontró midiendo justo eso: al fundir la ficha de FuegoCine de "La casa del dragón"
+   * dentro de la de moviedays, la comparación decía «no suma nada» y los servidores de FuegoCine
+   * no llegaban a escribirse, aunque la fusión los tenía delante.
+   */
+  const salida = previas.map(t => ({
+    ...t,
+    episodes: (t.episodes || []).map((e: any) => ({ ...e, servers: [...(e?.servers || [])] })),
+  }));
 
   for (const tNueva of nuevas) {
     let tPrevia = salida.find(t => Number(t.season_number) === Number(tNueva.season_number));

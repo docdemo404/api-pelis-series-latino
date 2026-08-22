@@ -178,6 +178,16 @@ export interface MediaItem {
    * Interno: no se serializa al cliente.
    */
   _source_urls?: string[];
+  /**
+   * DE QUÉ CAPÍTULO ES LA PÁGINA DE ORIGEN, cuando la fuente no publica página de serie.
+   *
+   * Las series de FuegoCine se arman agrupando los posts de sus capítulos, así que su
+   * `_source_url` es la de UN capítulo. Esas páginas no traen ni año ni título original: el
+   * fotograma del capítulo es la única prueba de identidad que existe, y para poder buscarlo en
+   * TMDB hay que saber de qué capítulo es. Lo consume `TmdbService.enrichMediaItem`.
+   * Interno: no se serializa al cliente.
+   */
+  _episode_hint?: { season: number; episode: number } | null;
   // Solo para series
   total_seasons?: number;
   total_episodes?: number;
