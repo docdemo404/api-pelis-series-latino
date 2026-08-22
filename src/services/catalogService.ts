@@ -695,6 +695,21 @@ export class CatalogService {
       .eq('has_streams', true)
       .not('poster', 'is', null)
       /**
+       * Y CON FICHA DE TMDB DE VERDAD. En la app solo salen películas oficiales.
+       *
+       * Un `tmdb_id` que no es positivo significa que el matcher no encontró la obra y el
+       * catálogo se quedó con un id sintético derivado del título
+       * (`tmdbService.syntheticTmdbId`). Eso no es una película con la ficha a medias: es un
+       * vídeo del que no se sabe qué es. Se coló «CINESAURIO - 2025 12 04 CARTELERA DE
+       * ESTRENOS» —la cartelera semanal de un canal— y otras once.
+       *
+       * VA AQUÍ, EN LA CONSULTA, y no solo donde se decide `has_streams`. Se probó lo segundo y
+       * no bastó: la resolución bajo demanda vuelve a calcular ese veredicto con un item que no
+       * siempre lleva `tmdb_id` encima, así que el criterio se saltaba y las doce reaparecían a
+       * los minutos. Una condición en la consulta no la puede saltar ningún escritor.
+       */
+      .gt('tmdb_id', 0)
+      /**
        * Y CON LA PRUEBA AL DÍA, no con una que valió hace medio día.
        *
        * `has_streams` dice «la última vez que se miró, reproducía». Eso NO es lo mismo que «se
@@ -4099,6 +4114,12 @@ export class CatalogService {
  * el barrido, y «sin carátula» manda a la metadata.
  */
 function razonDeVisibilidad(r: any): { en_la_app: boolean; motivo: string | null } {
+  if (!(Number(r?.tmdb_id) > 0)) {
+    return {
+      en_la_app: false,
+      motivo: 'sin ficha de TMDB: no se pudo saber qué obra es, y en la app solo salen oficiales',
+    };
+  }
   if (!r?.has_streams) {
     const tieneUrls = [
       ...(Array.isArray(r?.servers) ? r.servers : []),
