@@ -293,6 +293,29 @@ export async function servidoresDeMoviedays(
 }
 
 /**
+ * Los servidores SIN resolver: lo que moviedays dice tener, sin bajar a ningún embed.
+ *
+ * Es lo que usa el crawl para descubrir (ver `scrapeMoviedaysDetail`). Devuelve el servidor con su
+ * `embed_url` y su nombre, pero sin `direct_stream` y con estado `checking` — que es la verdad:
+ * todavía no se ha mirado. Ponerle `online` sería afirmar algo que no se ha comprobado, y este
+ * proyecto ya ha pagado dos veces por dar por bueno un servidor que nadie abrió.
+ */
+export function sondaDeServidoresMoviedays(payload: MoviedaysPayload | null): ServerOption[] {
+  return (payload?.servers || [])
+    .filter(s => s?.url && PROVEEDORES_ALCANZABLES.has(String(s.provider || '').toLowerCase()))
+    .map((s, i) => ({
+      id: `srv_md_${i + 1}`,
+      name: String(s.name || 'Vimeos'),
+      quality: calidadDeMoviedays(s.quality),
+      language: idiomaDeMoviedays(s.lang),
+      embed_url: String(s.url),
+      status: 'checking' as const,
+      last_checked: new Date().toISOString(),
+      source_id: 'moviedays',
+    }));
+}
+
+/**
  * El árbol de temporadas de una serie, con los servidores puestos SOLO en el capítulo al que
  * pertenecen.
  *

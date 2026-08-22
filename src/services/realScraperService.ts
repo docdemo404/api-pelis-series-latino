@@ -18,6 +18,7 @@ import {
   tituloDeMoviedays,
   temporadasDeMoviedays,
   pedirTemporadasMoviedays,
+  sondaDeServidoresMoviedays,
 } from '../scrapers/moviedays';
 import { yearFromSlug, slugify } from '../utils/text';
 
@@ -1818,7 +1819,23 @@ export class RealScraperService {
    * otro está escrito en `PROVEEDORES_ALCANZABLES` (src/scrapers/moviedays.ts) y se resume en que
    * termina contra el muro de Cloudflare de zonaaps.com, que no deja pasar a ningún datacenter.
    */
-  static async scrapeMoviedaysDetail(url: string): Promise<MediaItem | null> {
+  static async scrapeMoviedaysDetail(
+    url: string,
+    /**
+     * `resolverServidores: false` es la SONDA del crawl, y existe porque en esta fuente descubrir
+     * y leer la ficha son la misma petición.
+     *
+     * En las otras webs el descubrimiento es barato (una página de listado con veinte tarjetas) y
+     * lo caro es el detalle, así que el crawl recorre listados y después baja a las fichas. Aquí no
+     * hay listado: cada título se descubre preguntando por él. Si el descubrimiento resolviera
+     * además todos los embeds, el crawl pagaría la extracción DOS VECES — una al descubrir y otra
+     * en `quedarseConLoQueReproduce`, que vuelve a llamar a `scrapeDetail` sobre cada ficha.
+     *
+     * Con la sonda, el descubrimiento solo pregunta «¿tienes algún servidor alcanzable de esto?»,
+     * que es una petición y ninguna extracción. Quien de verdad necesita el vídeo lo pide luego.
+     */
+    opts: { resolverServidores?: boolean } = {}
+  ): Promise<MediaItem | null> {
     const ref = parseMoviedaysUrl(url);
     if (!ref) return null;
 
@@ -1828,7 +1845,9 @@ export class RealScraperService {
     const title = tituloDeMoviedays(payload);
     if (!title) return null;
 
-    const servers = await servidoresDeMoviedays(payload);
+    const servers = opts.resolverServidores === false
+      ? sondaDeServidoresMoviedays(payload)
+      : await servidoresDeMoviedays(payload);
     /**
      * SIN SERVIDORES NO HAY FICHA.
      *
@@ -1951,7 +1970,9 @@ export class RealScraperService {
     for (let i = 0; i < ids.length; i += LOTE) {
       const tanda = await Promise.allSettled(
         ids.slice(i, i + LOTE).map(id =>
-          this.scrapeMoviedaysDetail(moviedaysSourceUrl(id, tipo))
+          // Solo la sonda: el crawl vuelve a bajar a la ficha después, y extraer aquí sería
+          // pagar la extracción dos veces por cada título. Ver el comentario de `opts`.
+          this.scrapeMoviedaysDetail(moviedaysSourceUrl(id, tipo), { resolverServidores: false })
         )
       );
       for (const r of tanda) {
@@ -2563,12 +2584,15 @@ export class RealScraperService {
      * añadirla: la mitad del cupo para cada clase.
      */
     if (solo === 'moviedays') {
-      const desdePagina = Number(
-        (process.argv.find(a => a.startsWith('--desde=')) || '').split('=')[1]
-      ) || 1;
+      const bandera = (nombre: string) =>
+        Number((process.argv.find(a => a.startsWith(`--${nombre}=`)) || '').split('=')[1]) || 0;
+      const desdePagina = bandera('desde') || 1;
+      // `--titulos=` acota la pasada. Sin él, 500 de cada clase: lo que cabe en una corrida sin
+      // que el runner se lleve por delante el trabajo, que es la lección de `--saltar-guardados`.
+      const cuantos = bandera('titulos') || 500;
       const [pelis, series] = await Promise.all([
-        this.scrapeMoviedaysLatest('movie', 500, { desdePagina }).catch(() => [] as MediaItem[]),
-        this.scrapeMoviedaysLatest('tvseries', 500, { desdePagina }).catch(() => [] as MediaItem[]),
+        this.scrapeMoviedaysLatest('movie', cuantos, { desdePagina }).catch(() => [] as MediaItem[]),
+        this.scrapeMoviedaysLatest('tvseries', cuantos, { desdePagina }).catch(() => [] as MediaItem[]),
       ]);
       return dedup([pelis, series]);
     }

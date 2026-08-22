@@ -21,7 +21,9 @@ import { CatalogService } from '../src/services/catalogService';
 import { TmdbService } from '../src/services/tmdbService';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
 import { canonicalTitle, searchIndexKey, yearFromSlug } from '../src/utils/text';
-import { mereceRepasoDeExtraccion, hasVolatileToken, canonicalArchiveOrg, esUrlDeFicheroPermanente } from '../src/scrapers/directStream';
+import { mereceRepasoDeExtraccion, hasVolatileToken, canonicalArchiveOrg, esUrlDeFicheroPermanente, extractDirect } from '../src/scrapers/directStream';
+import { inspectEmbed } from '../src/scrapers/embedHealth';
+import { bajarManifiesto, segmentoDescargable } from '../src/services/manifestHealth';
 import { streamClient } from '../src/utils/httpClient';
 import { CacheStore } from '../src/cache/store';
 import { MediaItem } from '../src/types';
@@ -734,6 +736,85 @@ async function urlsBuenasDe(servidores: any[], fuente: string, minutos?: number)
 }
 
 /**
+ * LO QUE REPRODUCE AHORA AUNQUE SU URL NO SEA PERMANENTE — la puerta de moviedays.
+ *
+ * `urlsBuenasDe` exige que el embed SEA ya un fichero permanente (`esUrlDeFicheroPermanente`), y
+ * esa regla es la que mantiene el catálogo en un 96 % de reproducción: solo entra lo que va a
+ * seguir estando mañana. Pero deja fuera a toda fuente cuyo vídeo se sirva por un CDN que firma la
+ * url con caducidad, que es exactamente el caso de moviedays (`vimeos.net`) — y por eso su primera
+ * pasada recolectó 33 títulos y guardó 0.
+ *
+ * Aquí la promesa es otra, y no es más débil: NO SE GUARDA LA URL DEL CDN, se guarda el embed. El
+ * `direct_stream` que ve el cliente es una ruta de esta misma API (`/api/v1/stream/direct?e=…`),
+ * permanente y sin token, que vuelve a acuñar la url del CDN en CADA reproducción — que es
+ * literalmente para lo que existe esa ruta y toda la maquinaria de `hostPolicy`. Lo que caduca es
+ * un detalle interno; lo que se guarda no caduca.
+ *
+ * Y la prueba que se exige es MÁS fuerte que la de `urlsBuenasDe`, no más débil: allí basta con que
+ * la url tenga forma de fichero permanente y entregue bytes; aquí hay que extraer el vídeo del
+ * reproductor Y bajarse un trozo. Un servidor que no llegue hasta el final no se guarda.
+ *
+ * Está acotada a moviedays a propósito. Abrirla a las otras cuatro fuentes cambiaría de golpe qué
+ * entra en el catálogo, y ese es justo el cambio que hay que medir antes de hacer, no de paso.
+ */
+const REFERER_MOVIEDAYS = 'https://moviedays.lat/';
+
+async function urlsQueReproducenAhora(servidores: any[], fuente: string): Promise<any[]> {
+  const candidatos = (servidores || []).filter(sv => sv?.embed_url && sv?.direct_stream);
+  if (!candidatos.length) return [];
+
+  const POR_FICHA = 4;
+  const buenos: any[] = [];
+  for (let i = 0; i < candidatos.length; i += POR_FICHA) {
+    const lote = candidatos.slice(i, i + POR_FICHA);
+    const medidos = await Promise.all(lote.map(async sv => {
+      try {
+        const { html } = await inspectEmbed(String(sv.embed_url), REFERER_MOVIEDAYS);
+        const directo = await extractDirect(String(sv.embed_url), html, { allowNetwork: true });
+        if (!directo?.url) return null;
+
+        /**
+         * Y LA PRUEBA SE ELIGE SEGÚN LO QUE SEA, porque `entregaVideo` no vale para un m3u8.
+         *
+         * `entregaVideo` pide un trozo desde el byte 1.000.000 y exige más de 8 KB: está pensada
+         * para un fichero de vídeo, y con eso mide de paso la velocidad del host. Un manifiesto
+         * HLS ocupa dos kilobytes, así que contesta 416, cae al respaldo de los primeros 64 KB y
+         * lo tira por pequeño. O sea que TODO el vídeo HLS —que es el de esta fuente— salía
+         * reprobado por la forma de la prueba, no por su estado. Ese fue el motivo real de que la
+         * primera pasada recolectara 34 títulos y guardara cero.
+         *
+         * Para HLS la prueba correcta ya existe en la casa: bajar el manifiesto y comprobar que un
+         * SEGMENTO se descarga (`segmentoDescargable`), que es justo lo que hace un reproductor y
+         * lo que exige `arranque-mp4-antes-de-anunciar`: un 206 no prueba que abra.
+         */
+        const esHls = /\.m3u8(\?|$)/i.test(directo.url) || directo.kind === 'hls';
+        if (esHls) {
+          const manifiesto = await bajarManifiesto(directo.url, REFERER_MOVIEDAYS);
+          if (!manifiesto) return null;
+          if (!(await segmentoDescargable(manifiesto, directo.url, REFERER_MOVIEDAYS))) return null;
+          return { ...sv, status: 'online', verified_at: new Date().toISOString(), source_id: fuente };
+        }
+
+        const medida = await entregaVideo(directo.url);
+        if (!medida.ok) return null;
+        return {
+          ...sv,
+          status: 'online',
+          verified_at: new Date().toISOString(),
+          source_id: fuente,
+          kbps: Math.round(medida.kbs),
+        };
+      } catch {
+        return null;
+      }
+    }));
+    buenos.push(...medidos.filter(Boolean));
+  }
+  // El más rápido primero, igual que en `urlsBuenasDe`.
+  return buenos.sort((a, b) => (b.kbps || 0) - (a.kbps || 0));
+}
+
+/**
  * Escribe estas fichas en la base. Es la MISMA escritura de siempre, sacada a una función para
  * poder llamarla por tandas mientras el crawl avanza en vez de solo al terminar (ver
  * `guardarTanda`). No cambia nada de lo que hacía: lote de 50, y si el lote falla se reintenta
@@ -840,7 +921,11 @@ async function quedarseConLoQueReproduce(
       if (!detalle?.servers?.length) return;
 
       const fuente = fuenteDeLaUrl(pagina);
-      const servidores = await urlsBuenasDe(detalle.servers as any[], fuente, (item as any).runtime);
+      // Moviedays no publica ficheros permanentes: su vídeo se acuña en cada reproducción. Ver
+      // `urlsQueReproducenAhora`, que exige la prueba completa (extraer + bajar un trozo).
+      const servidores = fuente === 'moviedays'
+        ? await urlsQueReproducenAhora(detalle.servers as any[], fuente)
+        : await urlsBuenasDe(detalle.servers as any[], fuente, (item as any).runtime);
 
       /**
        * Y LOS CAPÍTULOS, que es donde vive el vídeo de una serie. Una serie no se reproduce por
@@ -851,14 +936,34 @@ async function quedarseConLoQueReproduce(
       for (const t of ((detalle as any).seasons || [])) {
         const capitulos: any[] = [];
         for (const e of (t?.episodes || [])) {
-          const suyos = await urlsBuenasDe(e?.servers || [], fuente, (item as any).runtime);
+          const suyos = fuente === 'moviedays'
+            ? await urlsQueReproducenAhora(e?.servers || [], fuente)
+            : await urlsBuenasDe(e?.servers || [], fuente, (item as any).runtime);
+          /**
+           * LOS CAPÍTULOS SIN ENLACE SE TIRAN... SALVO EN MOVIEDAYS, donde tirarlos borra la serie.
+           *
+           * La poda es correcta para las otras fuentes: su página de serie trae los servidores de
+           * TODOS los capítulos, así que un capítulo sin enlace es un capítulo que se comprobó y no
+           * tiene nada. En moviedays no: sus capítulos se resuelven UNO A UNO al abrirlos, y la
+           * ficha solo llega con los del capítulo con el que se sondeó la serie. Podarla dejaba
+           * «The Mandalorian» guardado con una temporada y un episodio de los 24 que tiene.
+           *
+           * Y no es que se anuncie nada sin comprobar: el tipo `Episode` ya distingue las dos
+           * cosas con `checked_at` —ausente significa «todavía no se ha mirado», y esos se siguen
+           * anunciando a propósito—, y quien abre el capítulo dispara la resolución de verdad. Lo
+           * que sí se exige para que la SERIE entre en el catálogo no cambia: al menos un capítulo
+           * con vídeo demostrado (`hayCapitulos`).
+           */
           if (suyos.length) capitulos.push({ ...e, servers: suyos });
+          else if (fuente === 'moviedays') capitulos.push({ ...e, servers: [] });
         }
         if (capitulos.length) temporadas.push({ ...t, episodes: capitulos });
       }
 
-      // Una película necesita url propia; una serie, al menos un capítulo con url.
-      const hayCapitulos = temporadas.some(t => (t.episodes || []).length > 0);
+      // Una película necesita url propia; una serie, al menos un capítulo con url DEMOSTRADA.
+      // Se mira `servers`, no la mera presencia del capítulo: desde que moviedays conserva sus
+      // capítulos sin resolver, «tiene capítulos» ya no significa «alguno reproduce».
+      const hayCapitulos = temporadas.some(t => (t.episodes || []).some((e: any) => (e.servers || []).length > 0));
       if (!servidores.length && !hayCapitulos) return;
 
       item.servers = servidores;

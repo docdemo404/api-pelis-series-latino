@@ -1681,7 +1681,7 @@ export class CatalogService {
       anunciables,
       reproducibleConPoster,
       // Las fuentes se reconocen por el molde del id, que ES el slug de su página (FUENTES.md §2.3).
-      deFuegocine, deCinecalidad,
+      deFuegocine, deCinecalidad, deMoviedays,
       ultimaHora, ultimas24h,
     ] = await enTandas<number>([
       () => cuantas(q => q),
@@ -1702,6 +1702,8 @@ export class CatalogService {
       () => cuantas(q => q.eq('has_streams', true).not('poster', 'is', null)),
       () => cuantas(q => q.or('id.like.fc-%,id.like.2%-%-%')),
       () => cuantas(q => q.like('id', 'ver-%')),
+      // Moviedays no tiene slug: sus ids son `md-<tmdb_id>`, que es lo único estable que da.
+      () => cuantas(q => q.like('id', 'md-%')),
       // EL RITMO. Con la base recién vaciada, «última actividad» dice «nunca» y no informa de
       // nada: lo que prueba que el crawl está trabajando es que entren fichas, no que haya
       // escrito alguna vez. `updated_at` se pone al escribir, así que contarlo por ventanas es
@@ -1772,10 +1774,22 @@ export class CatalogService {
         con_uno_solo: conUna,
         por_fuente: porFuente,
       },
+      /**
+       * Se cuentan por el molde del id, que ES el slug de su página (FUENTES.md §2.3), y a
+       * TioPlus le toca «todo lo demás». Por eso cada fuente nueva HAY QUE RESTARLA aquí: si no,
+       * sus fichas se cuentan como de TioPlus y el panel miente sobre las dos a la vez. Le pasó a
+       * moviedays el día que se añadió, con sus 34 primeras fichas.
+       *
+       * (Archive sigue dentro del resto, que es un desajuste anterior a esto y no se toca aquí
+       * para no mezclar dos cambios en la misma corrida.)
+       */
       fuentes: {
         cinecalidad: deCinecalidad,
         fuegocine: deFuegocine,
-        tioplus: total >= 0 && deFuegocine >= 0 && deCinecalidad >= 0 ? total - deFuegocine - deCinecalidad : -1,
+        moviedays: deMoviedays,
+        tioplus: total >= 0 && deFuegocine >= 0 && deCinecalidad >= 0 && deMoviedays >= 0
+          ? total - deFuegocine - deCinecalidad - deMoviedays
+          : -1,
       },
       ultima_actividad: { crawl, extraccion, verificacion },
       ritmo: { ultima_hora: ultimaHora, ultimas_24h: ultimas24h },
