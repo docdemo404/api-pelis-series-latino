@@ -340,11 +340,29 @@ export function similarity(a: string, b: string): number {
  * Es un mapa en memoria y no una petición dentro de `scoreCandidate` a propósito: puntuar es
  * síncrono y se hace sobre decenas de candidatos por búsqueda. Aquí solo se consulta.
  */
-const imagenesExtra = new Map<number, Set<string>>();
+const imagenesExtra = new Map<string, Set<string>>();
 
-function imagenExtraDeLaFicha(id: number | undefined, hash: string): boolean {
-  if (!id) return false;
-  return imagenesExtra.get(id)?.has(hash) === true;
+/**
+ * La clave lleva el CAPÍTULO, no solo la ficha.
+ *
+ * Con la clave puesta solo en el id, el primer capítulo que se preguntara de una serie dejaba sus
+ * fotogramas cacheados como si fueran los de la serie entera, y cualquier consulta posterior sobre
+ * OTRO capítulo de la misma ficha se contestaba con los del primero — que nunca coinciden, porque
+ * cada capítulo tiene los suyos. O sea: un «no» rotundo sin haber preguntado.
+ *
+ * No es teórico ni raro: es exactamente lo que hace falta para poder probar la identidad de una
+ * serie con varias de sus páginas (`identidadPorFotograma`), que es como se identifican las series
+ * de FuegoCine cuando la página que quedó de origen no lleva un fotograma registrado.
+ */
+const claveDeFotogramas = (id: number, temporada: number, episodio: number) => `${id}:${temporada}x${episodio}`;
+
+function imagenExtraDeLaFicha(
+  id: number | undefined,
+  hash: string,
+  episodio?: { season: number; episode: number } | null
+): boolean {
+  if (!id || !episodio) return false;
+  return imagenesExtra.get(claveDeFotogramas(id, episodio.season, episodio.episode))?.has(hash) === true;
 }
 
 /**
@@ -358,7 +376,8 @@ export async function precargarImagenesDeFicha(
   temporada: number,
   episodio: number
 ): Promise<void> {
-  if (imagenesExtra.has(id)) return;
+  const clave = claveDeFotogramas(id, temporada, episodio);
+  if (imagenesExtra.has(clave)) return;
   try {
     const res = await axios.get(`https://api.themoviedb.org/3/tv/${id}/season/${temporada}/episode/${episodio}/images`, {
       params: { api_key: API_KEY },
@@ -366,9 +385,9 @@ export async function precargarImagenesDeFicha(
       validateStatus: () => true,
     });
     const stills: any[] = res.data?.stills || [];
-    imagenesExtra.set(id, new Set(stills.map(s => tmdbImagePath(s.file_path)).filter((p): p is string => !!p)));
+    imagenesExtra.set(clave, new Set(stills.map(s => tmdbImagePath(s.file_path)).filter((p): p is string => !!p)));
   } catch {
-    imagenesExtra.set(id, new Set());
+    imagenesExtra.set(clave, new Set());
   }
 }
 
@@ -411,7 +430,9 @@ function scoreResult(
   query: string,
   year?: string,
   imageHint?: string | null,
-  knownOriginal?: string | null
+  knownOriginal?: string | null,
+  /** De qué capítulo es la página que trajo `imageHint`, para poder comparar su fotograma. */
+  episodeHint?: { season: number; episode: number } | null
 ): ScoredResult {
   // Confirmación por IMAGEN: si la página de origen trae la ruta de TMDB (og:image) y coincide
   // con el póster o el fondo del candidato, es la MISMA ficha con certeza, se llame como se llame
@@ -422,7 +443,7 @@ function scoreResult(
       return { score: 1, verified: true, originalMatch: true };
     }
   }
-  if (imageHint && imagenExtraDeLaFicha(result.id, imageHint)) {
+  if (imageHint && imagenExtraDeLaFicha(result.id, imageHint, episodeHint)) {
     return { score: 1, verified: true, originalMatch: true };
   }
 
@@ -547,7 +568,13 @@ export class TmdbService {
   private static async searchCandidates(
     endpoint: 'movie' | 'tv' | 'multi',
     query: string,
-    opts: { filterYear?: string; knownYear?: string; imageHint?: string | null; knownOriginal?: string | null } = {}
+    opts: {
+      filterYear?: string;
+      knownYear?: string;
+      imageHint?: string | null;
+      knownOriginal?: string | null;
+      episodeHint?: { season: number; episode: number } | null;
+    } = {}
   ): Promise<Candidate[]> {
     // Los dos usos del año son distintos y confundirlos costaba matches equivocados:
     //  · filterYear → se manda a TMDB para acotar la búsqueda;
@@ -555,7 +582,7 @@ export class TmdbService {
     // Cuando el año solo servía de filtro, las consultas sin él no penalizaban nada y una
     // coincidencia exacta de título de otra época ganaba: "Solo en casa" (Home Alone, 1990)
     // se resolvía como "Gambling House" (1944) con puntuación perfecta.
-    const { filterYear, knownYear, imageHint, knownOriginal } = opts;
+    const { filterYear, knownYear, imageHint, knownOriginal, episodeHint } = opts;
     try {
       const res = await axios.get(`https://api.themoviedb.org/3/search/${endpoint}`, {
         params: {
@@ -573,7 +600,7 @@ export class TmdbService {
 
       return results.slice(0, 10).map((r: any) => ({
         id: r.id,
-        ...scoreResult(r, query, knownYear, imageHint, knownOriginal),
+        ...scoreResult(r, query, knownYear, imageHint, knownOriginal, episodeHint),
         credibility: (r.vote_count || 0) * 1000 + (r.popularity || 0),
         // En /search/multi el tipo lo dice cada resultado; en el resto, el propio endpoint.
         endpoint: (endpoint === 'multi' ? (r.media_type === 'tv' ? 'tv' : 'movie') : endpoint) as 'movie' | 'tv'
@@ -790,7 +817,7 @@ export class TmdbService {
      */
     const knownOriginal = useOriginal ? (opts.originalTitle || null) : null;
     const runVariant = async (variant: string): Promise<boolean> => {
-      const common = { knownYear: year, imageHint, knownOriginal };
+      const common = { knownYear: year, imageHint, knownOriginal, episodeHint: opts.episodeHint || null };
       if (year && collect(await this.searchCandidates(endpoint, variant, { ...common, filterYear: year }))) return true;
       if (collect(await this.searchCandidates(endpoint, variant, common))) return true;
       if (collect(await this.searchCandidates(opposite, variant, common))) return true;
@@ -918,7 +945,7 @@ export class TmdbService {
           ).catch(() => null);
 
           const scored: ScoredResult = details
-            ? scoreResult(details, cleanTitle, year, imageHint, knownOriginal)
+            ? scoreResult(details, cleanTitle, year, imageHint, knownOriginal, opts.episodeHint || null)
             : { score: Math.min(similarity(cleanTitle, cardTitle), MATCH_THRESHOLD - 0.01), verified: false, originalMatch: false };
 
           if (scored.score > bestScore) {
@@ -946,7 +973,7 @@ export class TmdbService {
      */
     if (!bestVerified && bestId > 0 && imageHint && opts.episodeHint && bestEndpoint === 'tv') {
       await precargarImagenesDeFicha(bestId, opts.episodeHint.season, opts.episodeHint.episode);
-      if (imagenExtraDeLaFicha(bestId, imageHint)) {
+      if (imagenExtraDeLaFicha(bestId, imageHint, opts.episodeHint)) {
         bestVerified = true;
         bestScore = 1;
       }

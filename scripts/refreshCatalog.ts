@@ -608,6 +608,43 @@ async function withSourceSignals(item: MediaItem, onHit: () => void): Promise<Me
   };
 }
 
+/**
+ * SEGUNDA OPORTUNIDAD PARA UNA SERIE QUE SE HA QUEDADO SIN FICHA: preguntar a otro capítulo.
+ *
+ * Una serie de FuegoCine solo se puede identificar por el fotograma de un capítulo, y no todas
+ * sus páginas sirven: que el fotograma esté registrado en TMDB depende de lo que haya subido la
+ * gente. Medido sobre «Stranger Things», página a página, 35 de sus 42 capítulos valen como
+ * prueba — y la que quedó como página de origen de la ficha, la del último publicado (5x8), es
+ * una de las 7 que no. Resultado: la serie entraba con id sintético, o sea escondida, teniendo la
+ * prueba en las otras 35 páginas. Con una sola página, cada serie se juega su ficha a un 17 % de
+ * fallo; con tres intentos, al 0,5 %.
+ *
+ * Solo se paga cuando la primera no bastó, y solo para series con páginas propias por capítulo.
+ * Lo que exige para adoptar la ficha no cambia ni un ápice: `identidadPorFotograma` devuelve
+ * únicamente lo RESPALDADO por el hash de una imagen, que no admite parecidos.
+ */
+async function segundaOportunidadDeSerie(conSeñales: MediaItem, enriquecida: MediaItem): Promise<MediaItem> {
+  if (enriquecida.type !== 'tvseries' || enriquecida.tmdb_id > 0) return enriquecida;
+
+  const paginas = RealScraperService.paginasDeCapitulos(
+    (conSeñales as any).seasons,
+    (conSeñales as any)._tioplus_url || conSeñales._source_url
+  );
+  if (!paginas.length) return enriquecida;
+
+  const identidad = await RealScraperService.identidadPorFotograma(paginas).catch(() => null);
+  if (!identidad) return enriquecida;
+
+  // Con el id ya PROBADO, `enrichMediaItem` no vuelve a emparejar: se limita a traer la ficha.
+  const conFicha = await TmdbService.enrichMediaItem(
+    { ...conSeñales, tmdb_id: identidad.match.id }, { skipSeasons: true }
+  ).catch(() => enriquecida);
+  if (conFicha.tmdb_id > 0) {
+    console.log(`   ↻ «${conSeñales.title}» se identificó con otro capítulo: tmdb ${conFicha.tmdb_id}`);
+  }
+  return conFicha;
+}
+
 /** `--verify` / `--verify=N`: cuántas fichas sin comprobar se verifican al final del crawl. */
 function parseVerifyFlag(argv: string[]): number {
   const flag = argv.find(a => a === '--verify' || a.startsWith('--verify='));
@@ -1728,7 +1765,9 @@ async function main() {
     const chunk = items.slice(i, i + CONCURRENCY);
     const enriched = await Promise.all(chunk.map(async (item) => {
       try {
-        return await TmdbService.enrichMediaItem(await withSourceSignals(item, () => withSignals++), { skipSeasons: true });
+        const conSeñales = await withSourceSignals(item, () => withSignals++);
+        const enriquecida = await TmdbService.enrichMediaItem(conSeñales, { skipSeasons: true });
+        return await segundaOportunidadDeSerie(conSeñales, enriquecida);
       } catch {
         return TmdbService.fromSourceMetadata(item);
       }

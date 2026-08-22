@@ -1266,6 +1266,28 @@ async function verifyAgainstSource(
         episodeHint: signals.episode || null
       }).catch(() => null);
 
+      /**
+       * Etapa 3, SOLO PARA SERIES SIN RESPALDO: preguntarle a otro de sus capítulos.
+       *
+       * Una serie cuya página de origen es la de un capítulo se identifica por el fotograma, y no
+       * todas sus páginas sirven: medido sobre «Stranger Things», 35 de sus 42 capítulos traen un
+       * fotograma registrado en TMDB y 7 no — entre ellos justo el que quedó de página de origen.
+       * Rendirse con la primera es jugarse la ficha a un 17 % de fallo por serie.
+       *
+       * Cuesta una lectura de la fila (los capítulos con su url no vienen en el listado, que ya es
+       * pesado de sobra) y como mucho tres páginas, y solo para las series que no se han podido
+       * respaldar. Lo que se exige para adoptar la ficha no cambia: `identidadPorFotograma`
+       * devuelve únicamente lo confirmado por el hash de una imagen.
+       */
+      if (type === 'tvseries' && !match?.verified) {
+        const { data: fila } = await db.from('media_items').select('seasons').eq('id', row.id).maybeSingle();
+        const paginas = RealScraperService.paginasDeCapitulos((fila as any)?.seasons, sourceUrlOf(row));
+        const identidad = paginas.length
+          ? await RealScraperService.identidadPorFotograma(paginas).catch(() => null)
+          : null;
+        if (identidad) return { row, type, signals: identidad.signals, confirmedByImage: false, match: identidad.match };
+      }
+
       return { row, type, signals, confirmedByImage: false, match };
     }));
 

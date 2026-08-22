@@ -2,7 +2,7 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { MediaItem, ServerOption, CastMember, ContentType } from '../types';
 import { SourceManager } from './sourceManager';
-import { TmdbService, tmdbImagePath } from './tmdbService';
+import { TmdbService, tmdbImagePath, TmdbMatch } from './tmdbService';
 import { USER_AGENT, httpClient } from '../utils/httpClient';
 import { inspectEmbed, getServerName } from '../scrapers/embedHealth';
 import { nombreConTipo, getPrimaryStream } from './streamSorter';
@@ -891,6 +891,70 @@ export class RealScraperService {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * LAS PÁGINAS DE LOS CAPÍTULOS DE UNA SERIE, ordenadas de la primera a la última.
+   *
+   * Una serie de FuegoCine no tiene página propia: cada capítulo es un post suelto y su url queda
+   * guardada con él (`_fuegocine_url`). Sirven para dos cosas —resolver sus servidores y PROBAR
+   * QUIÉN ES la serie— y esta función es el único sitio donde se sabe de dónde sacarlas.
+   */
+  static paginasDeCapitulos(seasons: any[] | undefined | null, excepto?: string | null): string[] {
+    const urls: Array<{ orden: number; url: string }> = [];
+    for (const t of (seasons || [])) {
+      for (const e of ((t as any)?.episodes || [])) {
+        const url = String((e as any)?._fuegocine_url || '');
+        if (!url || url === excepto) continue;
+        urls.push({ orden: Number(t?.season_number || 0) * 1000 + Number(e?.episode_number || 0), url });
+      }
+    }
+    urls.sort((a, b) => a.orden - b.orden);
+    return Array.from(new Set(urls.map(u => u.url)));
+  }
+
+  /**
+   * ¿QUIÉN ES ESTA SERIE? PREGUNTÁNDOSELO A VARIOS DE SUS CAPÍTULOS.
+   *
+   * Las series de FuegoCine se identifican por el fotograma del capítulo: sus posts no publican ni
+   * año ni título original, y ese hash es la única prueba dura que hay. Pero NO TODOS los
+   * capítulos sirven — que el fotograma que publica la página esté registrado en TMDB para ese
+   * capítulo depende de lo que haya subido la gente. Medido sobre «Stranger Things», capítulo a
+   * capítulo: 35 de sus 42 páginas valen como prueba, y las 7 que no están repartidas por todas
+   * las temporadas. Da la casualidad de que la que quedó como página de origen de la ficha —la
+   * del último capítulo publicado, 5x8— es una de esas 7, y por eso la serie entraba sin ficha
+   * de TMDB teniendo la prueba en las otras 35 páginas.
+   *
+   * Preguntar a UNA página y rendirse era, entonces, jugárselo a un 17 % de fallo por serie. Con
+   * tres intentos ese fallo baja al 0,5 %, y solo se pagan cuando la primera no ha bastado: una
+   * serie que se identifica a la primera no cuesta ni una petición más que antes.
+   *
+   * Solo se devuelve lo RESPALDADO. Si ninguna página confirma, se devuelve `null` y la serie se
+   * queda con la metadata de su fuente, como manda la regla de la casa: sin respaldo no se adopta
+   * la ficha de TMDB.
+   */
+  static async identidadPorFotograma(
+    paginas: string[],
+    intentos = 3
+  ): Promise<{ signals: SourceSignals; match: TmdbMatch } | null> {
+    for (const url of paginas.slice(0, Math.max(0, intentos))) {
+      const signals = await this.fetchSourceSignals(url).catch(() => null);
+      // Sin capítulo declarado o sin imagen de TMDB, esta página no puede probar nada: no se
+      // gasta una consulta al matcher en ella.
+      if (!signals?.title || !signals.episode || !tmdbImagePath(signals.imageHint)) continue;
+
+      const match = await TmdbService.resolveTmdb(
+        signals.title, 'tvseries', signals.year || undefined, `fc:${signals.title}`,
+        {
+          originalTitle: signals.originalTitle || null,
+          imageHint: signals.imageHint,
+          episodeHint: signals.episode,
+        }
+      ).catch(() => null);
+
+      if (match?.matched && match.verified && match.type === 'tvseries') return { signals, match };
+    }
+    return null;
   }
 
   /**
