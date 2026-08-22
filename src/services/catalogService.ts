@@ -2462,11 +2462,21 @@ export class CatalogService {
 
     const update: Record<string, unknown> = {
       servers: servidores,
-      // Y los capítulos, por lo mismo: `seasons` también se reemplaza entero.
-      seasons: this.injertarManualesEnTemporadas(item.seasons || [], manualesDeCapitulos),
       source_url: item._source_url || null,
       streams_updated_at: new Date().toISOString()
     };
+
+    /**
+     * Y LOS CAPÍTULOS SOLO SE ESCRIBEN SI HAY ALGO QUE ESCRIBIR.
+     *
+     * `seasons` se reemplaza entera, así que pasar por aquí con un item que no traiga árbol
+     * —una película, o una serie servida por un camino que no baja temporadas— guardaba `[]` y
+     * dejaba la serie sin capítulos. Un árbol vacío no es una serie sin capítulos: es que quien
+     * escribe no sabe nada de ellos, y entonces lo que toca es no tocarlos.
+     */
+    if ((item.seasons || []).length) {
+      update.seasons = this.injertarManualesEnTemporadas(item.seasons || [], manualesDeCapitulos);
+    }
     /**
      * El veredicto lo decide `veredictoDisponibilidad`, no este sitio. `verified` dice si la
      * resolución fue exhaustiva —o sea, cuánto derecho hay a concluir— y eso es lo único que
@@ -3206,9 +3216,34 @@ export class CatalogService {
     // depender de que la llamen bien.
     if (serie.type === 'movie') return;
 
+    /**
+     * EL ÁRBOL SE LEE DE LA BASE JUSTO ANTES DE ESCRIBIRLO, no del objeto en memoria.
+     *
+     * Aquí se escribe la columna `seasons` ENTERA. Y `serie.seasons` viene de donde viniera la
+     * ficha: casi siempre del caché, que dura horas. O sea que esta función guardaba un árbol
+     * fotografiado hace rato y se llevaba por delante TODO lo que hubiera entrado en la fila desde
+     * entonces — otro capítulo comprobado en la petición de al lado, o una url que alguien acababa
+     * de pegar por el panel.
+     *
+     * Se midió a propósito: con una url manual plantada en el 1x01 de quince series y sin lanzar
+     * ningún crawl, la API se llevó dos de ellas en menos de dos minutos, solo por servir esas
+     * fichas. Se estaba culpando al crawl de algo que hacía esto.
+     *
+     * Leer aquí cuesta una consulta en una función que ya va en fire-and-forget, y es la única
+     * forma de que «sustituir SOLO este episodio» sea verdad. Si la lectura falla se sigue con lo
+     * que haya en memoria: guardar el capítulo recién resuelto vale más que no guardar nada.
+     */
+    let base: any[] = serie.seasons || [];
+    try {
+      const { data: filaActual } = await getSupabaseAdmin()
+        .from('media_items').select('seasons').eq('id', serie.id).maybeSingle();
+      const guardadas = (filaActual as any)?.seasons;
+      if (Array.isArray(guardadas) && guardadas.length) base = guardadas;
+    } catch { /* sin lectura, lo de memoria */ }
+
     // Se parte de lo que ya tenga la ficha y se sustituye SOLO este episodio. Si la temporada o el
     // episodio no estaban, se crean: una serie recién descubierta no tiene árbol todavía.
-    const seasons = JSON.parse(JSON.stringify(serie.seasons || [])) as any[];
+    const seasons = JSON.parse(JSON.stringify(base)) as any[];
     let temporada = seasons.find(t => Number(t?.season_number) === season);
     if (!temporada) {
       temporada = { season_number: season, name: `Temporada ${season}`, episodes_count: 0, poster: null, episodes: [] };
