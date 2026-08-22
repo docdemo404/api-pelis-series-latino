@@ -1185,16 +1185,50 @@ async function completarSeries(opts: { soloId?: string; cuantasSeries: number; m
   console.log(`✅ ${terminadas} serie(s) recorridas de principio a fin · ${capitulosNuevos} capítulos nuevos con vídeo`);
 }
 
-/** Cuántos capítulos tiene una serie guardados, resueltos y por resolver. */
+/**
+ * TERMINAR UNA SERIE NO ES QUE TODOS SUS CAPÍTULOS SE VEAN.
+ *
+ * Es que de todos se sepa algo. Hay capítulos que la fuente sencillamente no tiene, y tratarlos
+ * como trabajo pendiente convierte esa serie en una que no se acaba nunca: cada corrida vuelve a
+ * preguntar por los mismos veinte, gasta el presupuesto y no llega nunca a la siguiente serie.
+ *
+ * Pero «no se ve» esconde DOS situaciones que no merecen el mismo trato, y confundirlas se paga
+ * de las dos maneras posibles:
+ *
+ *   · LA FUENTE NO LO TIENE (se preguntó y no dio ni una url). Volver a preguntar mañana es tirar
+ *     el presupuesto: la respuesta va a ser la misma. Siete días, que es el borde con el que este
+ *     proyecto ya da por caducado lo aprendido.
+ *   · LA FUENTE LO TIENE Y HOY NO FUNCIONÓ (hay url, pero no llegó a demostrar que reproduce, o
+ *     su host acaba de quedar condenado). Eso NO es una respuesta estable: los hosts van y vienen
+ *     —tres capítulos de «Breaking Bad» pasaron de verse a no verse en una hora, porque sus
+ *     embeds dejaron de entregar segmentos—. Un día, para que una corrida diaria los reintente
+ *     sin quedarse a vivir en ellos.
+ *
+ * Un capítulo del que nunca se ha preguntado está pendiente siempre: eso es trabajo sin hacer.
+ */
+const REINTENTO_SIN_FUENTE_MS = 7 * 24 * 60 * 60 * 1000;
+const REINTENTO_FALLO_MS = 24 * 60 * 60 * 1000;
+
+function capituloPendiente(e: any): boolean {
+  if (paraElCliente(e?.servers).length > 0) return false;
+  if (!e?.checked_at) return true;
+  const cuando = Date.parse(e.checked_at);
+  if (!Number.isFinite(cuando)) return true;
+  const plazo = (e?.servers || []).length ? REINTENTO_FALLO_MS : REINTENTO_SIN_FUENTE_MS;
+  return Date.now() - cuando > plazo;
+}
+
+/** Cuántos capítulos tiene una serie guardados, cuántos se ven y cuántos quedan por mirar. */
 function contarCapitulos(fila: any): { total: number; resueltos: number; sinResolver: number } {
-  let total = 0, resueltos = 0;
+  let total = 0, resueltos = 0, pendientes = 0;
   for (const t of (fila.seasons || [])) {
     for (const e of (t?.episodes || [])) {
       total++;
       if (paraElCliente(e?.servers).length > 0) resueltos++;
+      if (capituloPendiente(e)) pendientes++;
     }
   }
-  return { total, resueltos, sinResolver: total - resueltos };
+  return { total, resueltos, sinResolver: pendientes };
 }
 
 /**
@@ -1208,14 +1242,17 @@ async function completarUnaSerie(fila: any): Promise<number> {
   const pendientes: Array<{ season: number; episode: number }> = [];
   for (const t of (fila.seasons || [])) {
     for (const e of (t?.episodes || [])) {
-      if (paraElCliente(e?.servers).length > 0) continue;
+      if (!capituloPendiente(e)) continue;
       pendientes.push({ season: Number(t.season_number), episode: Number(e.episode_number) });
     }
   }
 
   const antes = contarCapitulos(fila);
   if (!pendientes.length) {
-    console.log(`   «${fila.title}»: ya estaba entera (${antes.resueltos}/${antes.total})`);
+    const sinFuente = antes.total - antes.resueltos;
+    console.log(
+      `   «${fila.title}»: nada que mirar (${antes.resueltos}/${antes.total} se ven` +
+      (sinFuente > 0 ? `; ${sinFuente} ya preguntados sin resultado` : '') + ')');
     return 0;
   }
   console.log(`   «${fila.title}» (${fila.id}): ${antes.resueltos}/${antes.total} anunciables, faltan ${pendientes.length}`);
@@ -1246,11 +1283,63 @@ async function completarUnaSerie(fila: any): Promise<number> {
   // Se relee de la base para contar lo que de verdad quedó guardado, no lo que se creyó resolver.
   const { data } = await db.from('media_items').select('id,title,seasons').eq('id', fila.id).maybeSingle();
   const despues = contarCapitulos(data || fila);
+  const sinFuente = despues.total - despues.resueltos - despues.sinResolver;
   console.log(
     `   «${fila.title}»: ${despues.resueltos}/${despues.total} anunciables ` +
     `(${logrados} nuevos de ${mirados} mirados)` +
-    (despues.resueltos === despues.total ? '  ← COMPLETA' : ''));
+    (sinFuente > 0 ? ` · ${sinFuente} que la fuente no tiene` : '') +
+    (despues.resueltos === despues.total
+      ? '  ← COMPLETA'
+      : despues.sinResolver === 0
+        ? '  ← TERMINADA (lo que falta no está en la fuente)'
+        : ''));
   return logrados;
+}
+
+/**
+ * REGLA DEL CRAWL: UNA SERIE QUE ENTRA, ENTRA ENTERA.
+ *
+ * El crawl descubría la serie, le dejaba resuelto el 1x01 y se iba al título siguiente. Los demás
+ * capítulos solo aparecían si alguien los abría en la app, así que el catálogo se llenó de series
+ * que no se pueden ver de principio a fin: medido el 2026-08-22, 23 de 26 series a medias y 1.792
+ * capítulos que no se habían mirado nunca. Un catálogo con veintiséis series al 14 % no son
+ * veintiséis series.
+ *
+ * Va aquí, colgado de la escritura, y no dentro de `quedarseConLoQueReproduce`, porque completar
+ * exige que la fila EXISTA: `getEpisode` resuelve contra la ficha guardada. La tanda se escribe y
+ * acto seguido se terminan sus series.
+ *
+ * El presupuesto se mira ENTRE series, nunca dentro: la que se empieza se acaba. Y como
+ * `getEpisode` guarda capítulo a capítulo, que maten la corrida no tira el trabajo hecho — solo
+ * deja el resto para la siguiente.
+ */
+async function completarSeriesDeLaTanda(lote: MediaItem[], limite: number): Promise<void> {
+  const series = lote.filter(it => it.type === 'tvseries');
+  if (!series.length) return;
+
+  for (const it of series) {
+    if (Date.now() > limite) {
+      console.log('   ⏱ sin presupuesto para completar más series en esta corrida.');
+      return;
+    }
+
+    /**
+     * Se relee por id y, si no aparece, por identidad: `mergeIntoExisting` pudo volcar esta ficha
+     * dentro de otra que ya tenía su `tmdb_id`, y entonces el id de la tanda no existe en la tabla.
+     */
+    let fila: any = null;
+    const porId = await db.from('media_items').select('id,title,type,seasons').eq('id', it.id).maybeSingle();
+    fila = porId.data;
+    if (!fila && it.tmdb_id) {
+      const porIdentidad = await db
+        .from('media_items').select('id,title,type,seasons')
+        .eq('tmdb_id', it.tmdb_id).eq('type', 'tvseries').maybeSingle();
+      fila = porIdentidad.data;
+    }
+    if (!fila) continue;
+
+    await completarUnaSerie(fila);
+  }
 }
 
 const INICIO_DEL_CRAWL = new Date().toISOString();
@@ -1518,6 +1607,15 @@ async function main() {
   const banderas = { withNormalized, withMetadataSource, withRichMetadata, withMultiSource };
   const escritas = { ok: 0, fail: 0, merged: 0 };
   let guardadas = 0;
+  /**
+   * Cuánto tiempo puede gastar esta corrida en terminar series. Se mira entre series, no dentro.
+   * `--sin-completar-series` lo apaga para una pasada que solo quiera abarcar mucho.
+   */
+  const completarMinutos = Number(
+    (process.argv.find(a => a.startsWith('--completar-minutos=')) || '').split('=')[1]) || 90;
+  const completarSeriesAlVuelo = !process.argv.includes('--sin-completar-series');
+  const limiteCompletar = Date.now() + completarMinutos * 60_000;
+
   const guardarTanda = async (lote: MediaItem[]) => {
     if (!lote.length) return;
     const r = await guardarFilas(lote, banderas);
@@ -1526,6 +1624,8 @@ async function main() {
     escritas.merged += r.merged;
     guardadas += lote.length;
     console.log(`   💾 guardadas ${guardadas} (${escritas.ok} ok · ${escritas.merged} fusionadas · ${escritas.fail} fallidas)`);
+    // Y antes de seguir con más títulos, las series de esta tanda se terminan. Ver la función.
+    if (completarSeriesAlVuelo) await completarSeriesDeLaTanda(lote, limiteCompletar);
   };
 
   const conDirecto = await quedarseConLoQueReproduce(all, guardarTanda);
