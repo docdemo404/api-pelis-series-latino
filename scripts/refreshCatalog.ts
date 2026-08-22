@@ -659,9 +659,29 @@ async function urlsBuenasDe(servidores: any[], fuente: string, minutos?: number)
 
   for (const sv of servidores || []) {
     const embed = String(sv?.embed_url || '');
-    if (!embed) continue;
-    // Un mismo servidor puede ofrecer la url por el envoltorio y a pelo: se miran las dos.
-    for (const crudo of [urlDentroDelEnvoltorio(embed), embed]) {
+    /**
+     * Y EL `direct_stream` TAMBIÉN, que es donde el scraper deja lo que YA resolvió.
+     *
+     * Esto solo miraba el `embed_url` y sus envoltorios, así que tiraba el trabajo hecho: cuando
+     * `scrapeDetail` ya había sacado el fichero de dentro del reproductor, esa url no se miraba
+     * NUNCA. Y en FuegoCine es el caso normal — su `embed_url` es la página del reproductor
+     * (`repfuegocinefree.blogspot.com/?player=…`), que jamás va a parecer un fichero permanente,
+     * mientras el fichero de verdad cuelga al lado:
+     *
+     *     embed_url      https://repfuegocinefree.blogspot.com/?player=…   → no permanente
+     *     direct_stream  https://hugh.cdn.rumble.cloud/video/…/X.mp4       → SÍ permanente
+     *
+     * Medido en la tanda del 22-08: `2/300 títulos tienen url directa permanente y funcional`.
+     * No es que FuegoCine no publique ficheros: es que se miraba el envoltorio y no lo de dentro.
+     *
+     * Las guardas siguientes no se relajan: lo que venga por aquí pasa por
+     * `esUrlDeFicheroPermanente` y `hasVolatileToken` igual que el resto, así que las urls
+     * acuñadas al vuelo y las de nuestro propio proxy (`/api/v1/stream/direct/…`) se caen solas.
+     */
+    const directo = String(sv?.direct_stream || '');
+    if (!embed && !directo) continue;
+    // Un mismo servidor puede ofrecer la url ya resuelta, por el envoltorio y a pelo: las tres.
+    for (const crudo of [directo, urlDentroDelEnvoltorio(embed), embed]) {
       if (!crudo) continue;
       // El enlace de NODO de archive.org (`dn711505.ca.archive.org/0/items/…`) no es permanente y
       // encima le da 500 a este mismo cliente. Se guarda su forma canónica. Ver `canonicalArchiveOrg`.
