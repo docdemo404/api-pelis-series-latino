@@ -3111,7 +3111,24 @@ export class CatalogService {
       && Date.now() - selloEp < STREAMS_FRESH_MS
       && paraElCliente(deLaFicha?.servers).length >= 2;
 
-    const sourceUrls = [...(serie._source_urls || []), serie._source_url].filter(Boolean) as string[];
+    /**
+     * LA PÁGINA EXACTA DE ESTE CAPÍTULO VA LA PRIMERA, si el catálogo la guardó.
+     *
+     * Para las fuentes que no tienen página de serie —FuegoCine: cada capítulo es un post
+     * suelto— la ruta del capítulo pedido se ADIVINA sustituyendo el `NxM` en la de otro. Y en
+     * Blogger el mes forma parte de la ruta, así que esa adivinanza falla justo en lo que hace
+     * falta: los capítulos de una serie se publican en meses distintos, y son los que faltan por
+     * resolver los que más lejos quedan del que sirvió de plantilla.
+     *
+     * El rastreo sí conoce la url buena de cada capítulo y ahora la guarda con él. Usarla aquí
+     * convierte «terminar una serie» en pedir páginas que existen, en vez de en acertar el mes.
+     */
+    const suya = String((deLaFicha as any)?._fuegocine_url || '');
+    const sourceUrls = [
+      ...(suya ? [suya] : []),
+      ...(serie._source_urls || []),
+      serie._source_url,
+    ].filter(Boolean) as string[];
     const scraped = yaResuelto
       ? null
       : await RealScraperService

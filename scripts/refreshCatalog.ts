@@ -1001,7 +1001,15 @@ async function resolverCapitulosPropios(item: MediaItem, limite: number): Promis
     const eps = (t?.episodes || []) as any[];
 
     for (let i = 0; i < eps.length; i += 2) {
-      if (Date.now() > limite || pedidos >= CAPITULOS_POR_SERIE_Y_PASADA) break;
+      /**
+       * Al agotarse el cupo NO se corta la lista: los que quedan se devuelven tal cual, con sus
+       * servidores vacíos y su url intacta. Cortarlos aquí los borraría de la ficha y la serie no
+       * se podría terminar nunca — ver la nota de la poda en `quedarseConLoQueReproduce`.
+       */
+      if (Date.now() > limite || pedidos >= CAPITULOS_POR_SERIE_Y_PASADA) {
+        capitulos.push(...eps.slice(i).map((e: any) => ({ ...e, servers: e?.servers || [] })));
+        break;
+      }
 
       const tanda = eps.slice(i, i + 2);
       const resueltos = await Promise.all(tanda.map(async (e: any) => {
@@ -1147,8 +1155,28 @@ async function quedarseConLoQueReproduce(
            * que sí se exige para que la SERIE entre en el catálogo no cambia: al menos un capítulo
            * con vídeo demostrado (`hayCapitulos`).
            */
+          /**
+           * Y FUEGOCINE TAMBIÉN CONSERVA LOS QUE AÚN NO SE HAN MIRADO, por lo mismo que moviedays.
+           *
+           * La poda es correcta para una fuente cuya página de serie trae los servidores de TODOS
+           * los capítulos: allí un capítulo sin enlace es uno que se comprobó y no tiene nada. En
+           * FuegoCine no hay página de serie —cada capítulo es un post— y esta pasada resuelve
+           * como mucho `CAPITULOS_POR_SERIE_Y_PASADA`. Podando, los que no dio tiempo a mirar
+           * DESAPARECÍAN de la ficha, y con ellos la única forma de terminarla después:
+           * `completarSeries` elige por `sinResolver`, y lo que no está guardado no cuenta como
+           * pendiente. Silo entraba con 24 capítulos y se quedaba en 24 para siempre.
+           *
+           * Guardándolos vacíos, la serie entra con lo que ya se ve y el completado la remata en
+           * las corridas siguientes. Lo que se exige para que la serie ENTRE no cambia: sigue
+           * haciendo falta al menos un capítulo con vídeo demostrado (`hayCapitulos`).
+           *
+           * Se conserva el episodio ENTERO —`...e`— y eso incluye su `_fuegocine_url`, que es la
+           * página exacta de ese capítulo. Sin ella habría que adivinar la ruta a partir de la de
+           * otro, y en Blogger el mes va en la ruta: los capítulos de una serie se publican en
+           * meses distintos, así que adivinar falla justo en los que faltan.
+           */
           if (suyos.length) capitulos.push({ ...e, servers: suyos });
-          else if (fuente === 'moviedays') capitulos.push({ ...e, servers: [] });
+          else if (fuente === 'moviedays' || fuente === 'fuegocine') capitulos.push({ ...e, servers: [] });
         }
         if (capitulos.length) temporadas.push({ ...t, episodes: capitulos });
       }
