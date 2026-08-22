@@ -1003,7 +1003,23 @@ async function quedarseConLoQueReproduce(
       const pagina = (item as any)._tioplus_url || item._source_url;
       if (!pagina) { descartados?.push(item.id); return; }
       const detalle = await RealScraperService.scrapeDetail(pagina).catch(() => null);
-      if (!detalle?.servers?.length) { descartados?.push(item.id); return; }
+      /**
+       * UNA SERIE NO TIENE SERVIDORES EN LA FICHA: LOS TIENE EN SUS CAPÍTULOS.
+       *
+       * Esta guarda pedía `detalle.servers.length` y ahí se moría TODA serie de archive.org, que
+       * devuelve la ficha con `servers: []` y el vídeo colgando de cada capítulo. Treinta líneas
+       * más abajo hay un bucle que recorre las temporadas con todo el cuidado del mundo — y nunca
+       * se llegaba a ejecutar. Por eso el catálogo tenía 108 películas de archive.org y CERO
+       * series, con «Nano» (44 capítulos), «Collar de Esmeraldas» (65) o «Encadenados» (176)
+       * esperando ahí fuera, comprobados uno a uno: sus capítulos entregan vídeo (206 y 256 KB
+       * en menos de dos segundos).
+       *
+       * Es la misma trampa que FUENTES.md §4: dar por hecho que una serie se parece a una
+       * película con más metadata. No se parece — el vídeo vive en otro sitio.
+       */
+      const capitulosConVideo = ((detalle as any)?.seasons || [])
+        .some((t: any) => (t?.episodes || []).some((e: any) => (e?.servers || []).length > 0));
+      if (!detalle || (!detalle.servers?.length && !capitulosConVideo)) { descartados?.push(item.id); return; }
 
       const fuente = fuenteDeLaUrl(pagina);
       // Moviedays no publica ficheros permanentes: su vídeo se acuña en cada reproducción. Ver
@@ -1110,7 +1126,13 @@ async function quedarseConLoQueReproduce(
  * lo que se quedó sin mirar por presupuesto no se sabe si reproduce.
  * ══════════════════════════════════════════════════════════════════════════════════════════
  */
-const CLAVE_DESCARTES = 'crawl:descartes';
+/**
+ * El `v2` NO es decoración: la primera tanda con memoria de descartes corrió con la guarda de
+ * `servers` rota, así que apuntó como «sin vídeo» a las series de archive.org, que sí lo tienen.
+ * Cambiar el nombre de la clave tira ese recuerdo equivocado en vez de arrastrarlo catorce días.
+ * Quien cambie lo que significa un descarte, que suba el número.
+ */
+const CLAVE_DESCARTES = 'crawl:descartes:v2';
 const DIAS_DESCARTE = 14;
 /** Tope de la lista, para que el blob no crezca sin fin. Se van los más antiguos. */
 const MAX_DESCARTES = 20000;
@@ -1596,7 +1618,35 @@ async function main() {
   const covered = new Set(Array.from(byTmdb.values()).map(key));
   const byFallback = new Map<string, MediaItem>();
   let droppedDupes = 0;
+  let sinIdentidad = 0;
   for (const item of fallbacks) {
+    /**
+     * ══════════════════════════════════════════════════════════════════════════════════════
+     * EN ARCHIVE.ORG, SIN TMDB NO HAY FICHA. El fallback de metadata no vale para esta fuente.
+     *
+     * El fallback existe para webs que publican un TÍTULO: si el matcher no da con la obra, la
+     * ficha se guarda con lo que publicó la web y se pierde poco. En archive.org no hay título —
+     * hay el nombre que le puso quien subió el fichero. Guardar eso como si fuera una obra mete
+     * en el catálogo cosas como «Bob Esponja Parodia La Película Luisjefe1», «CINESAURIO -
+     * 2025 10 23 - CARTELERA DE ESTRENOS», «Видео Violeta Se Fue A Los Cielos OK. RU 2» o
+     * «Tom y Jerry: La Pelicula Version 4:3 SD para Television, VHS, DVD,»: 20 de las 109 fichas
+     * que la fuente había traído, todas sin carátula y con un tmdb_id sintético.
+     *
+     * Es el mismo razonamiento por el que esta fuente ya exige año y etiqueta de clase (ver el
+     * bloque de `anioDeArchive`): su metadata la escribe quien sube, así que hace falta un
+     * árbitro externo. Ese árbitro es TMDB, y si TMDB no reconoce la obra, la obra no entra.
+     * Cuesta contenido y es el precio de no inventar fichas.
+     *
+     * Solo archive.org. Las demás fuentes publican títulos de verdad y su fallback se queda.
+     * ══════════════════════════════════════════════════════════════════════════════════════
+     */
+    const paginaDeLaFicha = String((item as any)._tioplus_url || item._source_url || '');
+    const esDeArchive = String(item.id || '').startsWith('archive-')
+      || (paginaDeLaFicha && fuenteDeLaUrl(paginaDeLaFicha) === 'archive');
+    if (esDeArchive) {
+      sinIdentidad++;
+      continue;
+    }
     const k = key(item);
     if (!canonicalTitle(item.title)) continue;
     if (covered.has(k)) {
@@ -1619,7 +1669,8 @@ async function main() {
     `   Con metadata TMDB: ${byTmdb.size} | con metadata de la fuente: ${byFallback.size} | ` +
     `duplicados descartados: ${droppedDupes} | sin póster: ${withoutPoster} | ` +
     `páginas absorbidas de otra fuente: ${absorbidas}` +
-    (noFundidasPorAno ? ` | no fundidas por el año: ${noFundidasPorAno}` : '')
+    (noFundidasPorAno ? ` | no fundidas por el año: ${noFundidasPorAno}` : '') +
+    (sinIdentidad ? ` | archive.org sin identidad en TMDB (fuera): ${sinIdentidad}` : '')
   );
   console.log(`   Cobertura de metadata: ${all.length}/${all.length} (100%) — ${(byTmdb.size / (all.length || 1) * 100).toFixed(1)}% desde TMDB`);
 

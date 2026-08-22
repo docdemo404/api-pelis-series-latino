@@ -482,6 +482,34 @@ Y una quinta, que no es de archive.org sino del crawl entero:
    cada tanda coge un tramo nuevo. Solo entra lo que se MIRÓ: lo que se quedó sin mirar por
    presupuesto no se sabe si reproduce, y condenarlo sería inventarse una medición.
 
+Y una sexta, que es la que de verdad explicaba el «archive.org no tiene series»:
+
+6. **`quedarseConLoQueReproduce` pedía `detalle.servers.length` antes de mirar nada más**, y una
+   serie de archive.org devuelve la ficha con `servers: []` porque **su vídeo cuelga de cada
+   capítulo**. Treinta líneas más abajo hay un bucle que recorre las temporadas con todo el
+   cuidado del mundo, y no se llegaba a ejecutar nunca. Ahí murieron todas: «Nano» (44 capítulos),
+   «Collar de Esmeraldas» (65), «Encadenados» (176), «Separadas», «Consentidos» — comprobados uno
+   a uno, sus capítulos entregan vídeo en menos de dos segundos. De 30 candidatas muestreadas, 16
+   tienen los capítulos rotulados; las otras son clips sueltos y esas sí sobran.
+
+   La regla, que ya está escrita en §4 y volvió a morder: **una serie no es una película con más
+   metadata.** Si tu guarda pregunta por el vídeo de la ficha, las series no pasan.
+
+Y una séptima, que la puso el usuario al ver el resultado: **en archive.org, sin TMDB no hay
+ficha.**
+
+7. El fallback de metadata —«si el matcher no da con la obra, se guarda con lo que publicó la
+   web»— es bueno para una web que publica TÍTULOS. En archive.org no hay título: hay el nombre
+   que le puso quien subió el fichero. Guardarlo como si fuera una obra metió en el catálogo
+   «Bob Esponja Parodia La Película Luisjefe1», «CINESAURIO - 2025 10 23 - CARTELERA DE ESTRENOS»
+   y «Видео Violeta Se Fue A Los Cielos OK. RU 2»: **20 de las 109 fichas** que la fuente había
+   traído, todas sin carátula y con `tmdb_id` sintético. Es la misma razón por la que esta fuente
+   ya exige año y etiqueta de clase — su metadata la escribe quien sube, así que **el árbitro es
+   externo, y es TMDB**. Las 20 se retiraron con `scripts/dev/limpiar_archive_sin_tmdb.ts`.
+
+   La regla es SOLO de archive.org: las demás fuentes publican títulos de verdad y su fallback se
+   queda como está.
+
 Cómo comprobarlo si vuelve a pasar: `scripts/dev/diag_archive_universo.ts` mide cada etiqueta
 completa y dice cuántos de sus supervivientes no están en la base;
 `scripts/dev/diag_archive_embudo.ts` dice por qué filtro se van los que se van.
