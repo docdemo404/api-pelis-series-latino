@@ -2445,6 +2445,13 @@ async function checkEpisodes(apply: boolean, limitArg?: number): Promise<void> {
       .from('media_items')
       .select('id,title,seasons,has_streams')
       .eq('type', 'tvseries')
+      /**
+       * CON `order`. Un SELECT sin ORDER BY no garantiza el mismo orden entre consultas, así que
+       * paginar sin él se salta filas y repite otras — y no se nota, porque el recuento sale
+       * plausible y además estable. Con 26 series cabían en una página y daba igual; en cuanto el
+       * catálogo pase de `PAGINA` series, empieza a perder series enteras sin decir nada.
+       */
+      .order('id')
       .range(from, from + PAGINA - 1);
     if (error) { console.warn(`   ⚠ ${error.message}`); break; }
     if (!data || data.length === 0) break;

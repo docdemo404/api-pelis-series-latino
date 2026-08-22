@@ -78,4 +78,9 @@ jobs:
         # El tope de 300 y los 18 minutos salen de la ventana en la que muere el runner: se busca
         # que la tanda TERMINE, no que aproveche hasta el último segundo. Lo que no dé tiempo sale
         # en la vuelta siguiente, que es dentro de media hora.
-        run: npx ts-node scripts/refreshCatalog.ts --solo=$FUENTE --saltar-guardados --minutos=18 300
+        #
+        # Y `--completar-minutos` va EXPLÍCITO por lo mismo. El crawl termina las series que
+        # guarda antes de seguir, y ese trabajo tiene su propio presupuesto: por defecto son 45
+        # minutos, que sumados a los 18 del recorrido se pasan del `timeout-minutes: 50` de este
+        # trabajo y lo matarían en cada corrida — cada media hora, para siempre. 18 + 20 sí cabe.
+        run: npx ts-node scripts/refreshCatalog.ts --solo=$FUENTE --saltar-guardados --minutos=18 --completar-minutos=20 300

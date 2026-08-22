@@ -1612,7 +1612,7 @@ async function main() {
    * `--sin-completar-series` lo apaga para una pasada que solo quiera abarcar mucho.
    */
   const completarMinutos = Number(
-    (process.argv.find(a => a.startsWith('--completar-minutos=')) || '').split('=')[1]) || 90;
+    (process.argv.find(a => a.startsWith('--completar-minutos=')) || '').split('=')[1]) || 45;
   const completarSeriesAlVuelo = !process.argv.includes('--sin-completar-series');
   const limiteCompletar = Date.now() + completarMinutos * 60_000;
 
