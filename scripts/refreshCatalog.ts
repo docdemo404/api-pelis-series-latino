@@ -820,12 +820,94 @@ async function urlsQueReproducenAhora(servidores: any[], fuente: string): Promis
  * `guardarTanda`). No cambia nada de lo que hacía: lote de 50, y si el lote falla se reintenta
  * fila a fila para aislar el conflicto de `tmdb_id` que sí sabe resolverse fusionando.
  */
+/**
+ * LO PUESTO A MANO SOBREVIVE AL CRAWL. Antes no.
+ *
+ * `upsert` reemplaza la fila entera, y `servers` es una columna: lo que el crawl acaba de scrapear
+ * PISA lo que hubiera guardado. Para las cuatro webs eso es correcto —lo que vale es lo último que
+ * se comprobó—, pero la fuente propia no se scrapea: sus urls las pega una persona en el panel y no
+ * hay ninguna pasada que las vuelva a descubrir. Así que cada crawl que tocaba una ficha con url
+ * manual se la llevaba por delante, en silencio.
+ *
+ * Se veía exactamente así: de todo lo añadido a mano solo sobrevivía «Shrek 4», y sobrevivía por un
+ * accidente —era el único título que NO estaba ya en el catálogo, así que se guardó en su propia
+ * fila `manual-…` que ningún crawl vuelve a tocar—. Todo lo demás se fusionó dentro de fichas de
+ * otras fuentes y ahí duró hasta la siguiente pasada.
+ *
+ * Es la misma idea que ya defiende `DEFAULT_SOURCES` al poner la fuente propia la primera: lo que
+ * puso una persona es lo que más probabilidades tiene de seguir bueno mañana, y desde luego no es
+ * algo que un scraper deba poder borrar sin decir nada.
+ */
+async function conservarLoPuestoAMano(rows: Array<Record<string, any>>): Promise<void> {
+  const ids = rows.map(r => String(r.id)).filter(Boolean);
+  if (!ids.length) return;
+
+  const esManual = (sv: any) => String(sv?.source_id || '').toLowerCase() === 'manual';
+  const guardadas = new Map<string, { servers: any[]; seasons: any[] }>();
+
+  const TANDA = 50;
+  for (let i = 0; i < ids.length; i += TANDA) {
+    const { data } = await db
+      .from('media_items')
+      .select('id,servers,seasons')
+      .in('id', ids.slice(i, i + TANDA));
+    for (const fila of (data as any[]) || []) {
+      guardadas.set(String(fila.id), {
+        servers: Array.isArray(fila.servers) ? fila.servers : [],
+        seasons: Array.isArray(fila.seasons) ? fila.seasons : [],
+      });
+    }
+  }
+  if (!guardadas.size) return;
+
+  for (const row of rows) {
+    const previa = guardadas.get(String(row.id));
+    if (!previa) continue;
+
+    // A nivel de ficha: los manuales vuelven, y DELANTE, que es su prioridad.
+    const manuales = previa.servers.filter(esManual);
+    if (manuales.length) {
+      const nuevos: any[] = Array.isArray(row.servers) ? row.servers : [];
+      const yaEstan = new Set(nuevos.map((x: any) => String(x?.direct_stream || x?.embed_url || '')));
+      const rescatados = manuales.filter(m => !yaEstan.has(String(m?.direct_stream || m?.embed_url || '')));
+      if (rescatados.length) row.servers = [...rescatados, ...nuevos];
+    }
+
+    /**
+     * Y a nivel de CAPÍTULO, que es donde vive el vídeo de una serie: una url pegada a mano en el
+     * 2x07 se perdía igual, y encima sin que se notara hasta que alguien pulsaba ese capítulo.
+     */
+    const manualesPorCapitulo = new Map<string, any[]>();
+    for (const t of previa.seasons) {
+      for (const e of (t?.episodes || [])) {
+        const suyos = (e?.servers || []).filter(esManual);
+        if (suyos.length) manualesPorCapitulo.set(`${t?.season_number}x${e?.episode_number}`, suyos);
+      }
+    }
+    if (!manualesPorCapitulo.size) continue;
+
+    const seasons: any[] = Array.isArray(row.seasons) ? row.seasons : [];
+    for (const t of seasons) {
+      for (const e of (t?.episodes || [])) {
+        const suyos = manualesPorCapitulo.get(`${t?.season_number}x${e?.episode_number}`);
+        if (!suyos?.length) continue;
+        const nuevos: any[] = Array.isArray(e.servers) ? e.servers : [];
+        const yaEstan = new Set(nuevos.map((x: any) => String(x?.direct_stream || x?.embed_url || '')));
+        const rescatados = suyos.filter(m => !yaEstan.has(String(m?.direct_stream || m?.embed_url || '')));
+        if (rescatados.length) e.servers = [...rescatados, ...nuevos];
+      }
+    }
+    row.seasons = seasons;
+  }
+}
+
 async function guardarFilas(
   items: MediaItem[],
   banderas: { withNormalized: boolean; withMetadataSource: boolean; withRichMetadata: boolean; withMultiSource: boolean }
 ): Promise<{ ok: number; fail: number; merged: number }> {
   const { withNormalized, withMetadataSource, withRichMetadata, withMultiSource } = banderas;
   const rows = items.map(it => toRow(it, withNormalized, withMetadataSource, withRichMetadata, withMultiSource));
+  await conservarLoPuestoAMano(rows);
   let ok = 0, fail = 0, merged = 0;
   const BATCH = 50;
 

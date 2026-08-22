@@ -2104,18 +2104,64 @@ export class CatalogService {
    * sabe nada de lo que alguien añadió por el panel — es justo lo que se estaba perdiendo.
    */
   private static async manualesGuardadosDe(id: string): Promise<ServerOption[]> {
+    return (await this.manualesGuardadosCompletos(id)).ficha;
+  }
+
+  /**
+   * Lo puesto a mano que hay guardado en una fila, A LOS DOS NIVELES.
+   *
+   * `manualesGuardadosDe` solo miraba `servers`, o sea el vídeo de la ficha. En una serie el vídeo
+   * NO vive ahí: vive en cada capítulo, dentro de `seasons`. Así que una url pegada a mano en el
+   * 2x07 se perdía en la siguiente escritura igual que se perdían antes las de las películas — y
+   * peor, porque no se notaba hasta que alguien pulsaba ese capítulo concreto.
+   *
+   * La clave del mapa es `<temporada>x<capítulo>`, que es lo que permite devolver cada url a SU
+   * sitio y no repartirlas por la serie entera.
+   */
+  private static async manualesGuardadosCompletos(
+    id: string
+  ): Promise<{ ficha: ServerOption[]; porCapitulo: Map<string, ServerOption[]> }> {
+    const vacio = { ficha: [] as ServerOption[], porCapitulo: new Map<string, ServerOption[]>() };
     try {
       const { data } = await getSupabaseAdmin()
         .from('media_items')
-        .select('servers')
+        .select('servers,seasons')
         .eq('id', id)
         .maybeSingle();
-      return (((data?.servers as any[]) || []) as ServerOption[])
-        .filter(s => String((s as any)?.source_id || '').toLowerCase() === 'manual');
+      if (!data) return vacio;
+      const esManual = (sv: any) => String(sv?.source_id || '').toLowerCase() === 'manual';
+      const ficha = (((data.servers as any[]) || []) as ServerOption[]).filter(esManual);
+      const porCapitulo = new Map<string, ServerOption[]>();
+      for (const t of ((data.seasons as any[]) || [])) {
+        for (const e of (t?.episodes || [])) {
+          const suyos = ((e?.servers || []) as ServerOption[]).filter(esManual);
+          if (suyos.length) porCapitulo.set(`${t?.season_number}x${e?.episode_number}`, suyos);
+        }
+      }
+      return { ficha, porCapitulo };
     } catch {
       // Sin lectura no se puede saber qué había; se sigue sin tocar nada más.
-      return [];
+      return vacio;
     }
+  }
+
+  /** Devuelve cada url manual a su capítulo dentro del árbol que se va a escribir. */
+  private static injertarManualesEnTemporadas(
+    seasons: any[],
+    porCapitulo: Map<string, ServerOption[]>
+  ): any[] {
+    if (!porCapitulo.size || !Array.isArray(seasons)) return seasons;
+    return seasons.map(t => ({
+      ...t,
+      episodes: (t?.episodes || []).map((e: any) => {
+        const suyos = porCapitulo.get(`${t?.season_number}x${e?.episode_number}`);
+        if (!suyos?.length) return e;
+        const nuevos: any[] = Array.isArray(e?.servers) ? e.servers : [];
+        const yaEstan = new Set(nuevos.map((x: any) => String(x?.direct_stream || '')));
+        const rescatados = suyos.filter(m => !yaEstan.has(String((m as any)?.direct_stream || '')));
+        return rescatados.length ? { ...e, servers: [...rescatados, ...nuevos] } : e;
+      }),
+    }));
   }
 
   private static async persistStreams(item: MediaItem, verified: boolean = false, seMiroAlgo: boolean = true): Promise<void> {
@@ -2138,7 +2184,8 @@ export class CatalogService {
      * esa misma url, se queda la manual: llevan el mismo vídeo y la etiqueta de origen importa
      * para lo que venga después.
      */
-    const manualesPrevios = await this.manualesGuardadosDe(item.id);
+    const { ficha: manualesPrevios, porCapitulo: manualesDeCapitulos } =
+      await this.manualesGuardadosCompletos(item.id);
     const resueltos = (item.servers || []) as ServerOption[];
     const urlsManuales = new Set(manualesPrevios.map(m => String(m?.direct_stream || '')));
     const servidores = manualesPrevios.length
@@ -2147,7 +2194,8 @@ export class CatalogService {
 
     const update: Record<string, unknown> = {
       servers: servidores,
-      seasons: item.seasons || [],
+      // Y los capítulos, por lo mismo: `seasons` también se reemplaza entero.
+      seasons: this.injertarManualesEnTemporadas(item.seasons || [], manualesDeCapitulos),
       source_url: item._source_url || null,
       streams_updated_at: new Date().toISOString()
     };
@@ -2904,7 +2952,22 @@ export class CatalogService {
       cap = { episode_number: episode, name: `Episodio ${episode}`, overview: '', still_path: null, air_date: null, servers: [] };
       temporada.episodes.push(cap);
     }
-    cap.servers = servers;
+    /**
+     * Y AQUÍ TAMBIÉN SE RESPETA LO PUESTO A MANO.
+     *
+     * Esto sustituye los servidores del capítulo por los que acaba de resolver el rastreo, que es
+     * correcto para lo que sale de un scraper —se vuelve a calcular cada vez— pero no para una url
+     * que pegó una persona: no hay ninguna pasada que la vuelva a descubrir, así que borrarla es
+     * perderla. Es el mismo fallo que ya se arregló en `persistStreams` para las películas, con la
+     * diferencia de que en una serie el vídeo vive justo aquí.
+     */
+    const manualesDelCapitulo = (Array.isArray(cap.servers) ? cap.servers : [])
+      .filter((sv: any) => String(sv?.source_id || '').toLowerCase() === 'manual');
+    const yaEstan = new Set(servers.map(sv => String((sv as any)?.direct_stream || '')));
+    const rescatados = manualesDelCapitulo.filter(
+      (m: any) => !yaEstan.has(String(m?.direct_stream || ''))
+    );
+    cap.servers = rescatados.length ? [...rescatados, ...servers] : servers;
     // El sello va SIEMPRE, con enlaces o sin ellos: «comprobado y vacío» es justo lo que
     // autoriza a dejar de anunciar el capítulo, y sin él no se distingue de «aún no mirado».
     cap.checked_at = new Date().toISOString();
