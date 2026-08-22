@@ -443,6 +443,51 @@ fuente es mejor. No es la tasa del catálogo entero.
 
 ---
 
+## 6 quinquies. Recorrer un archivo NO es paginarlo (archive.org, 2026-08-22)
+
+La fuente estaba enganchada en los diez sitios de §6 ter, el workflow corría cada media hora en
+verde, y aun así llevaba días sin traer **nada**: siete tandas seguidas terminadas con «0/N con url
+directa» y cero filas guardadas. Nueve fichas en total, todas películas, ninguna serie. El fallo no
+estaba en el enganche sino en **cómo se recorría el archivo**, y son cuatro cosas independientes:
+
+1. **El orden por defecto de la API `scrape` es la cabecera del archivo, no lo nuevo.** El barrido
+   empezaba siempre por los mismos identificadores alfabéticos — «007 Bond Street», «Fight Club»,
+   «Volver al Futuro»— que ya estaban guardados desde el primer día. Sobrevivían 24 de cada 300
+   mirados y los 24 eran viejos conocidos. Por `sorts=addeddate desc` sobreviven **147 de cada
+   300**, y son subidas de esta semana.
+
+2. **El cursor IGNORA `sorts`.** Pedir la segunda página con el cursor que devolvió la primera
+   vuelve a dar la primera. No se puede ordenar y paginar a la vez con esta API — hay que elegir, y
+   lo que hace falta es el orden.
+
+3. **No hacía falta paginar.** Una etiqueta entera cabe en UNA petición con `count` grande:
+   `subject:"Pelicula"` son 3.759 items en 6 s. El cursor de 100 en 100 tardaba trece minutos en
+   ver bastante menos.
+
+4. **Las etiquetas hay que medirlas ENTERAS, no por sus primeros cien items.** Contando la etiqueta
+   completa: `Pelicula` 849 supervivientes, `Peliculas` 144, `Serie` 92, `Telenovela` 45, `Series`
+   13, `Pelis` **0**. Se preguntaba por `Pelis` —que no aporta ni uno— y no por `Peliculas` ni
+   `Telenovela`, que aportan 189. Y la conclusión «archive.org no tiene series» era falsa: salía de
+   mirar los primeros 300 items de `subject:"Serie"`, que son episodios sueltos sin año.
+
+Con las cuatro, el filtro deja pasar **1.043 títulos —910 películas y 133 series—, de los que
+1.040 no habían entrado nunca**.
+
+Y una quinta, que no es de archive.org sino del crawl entero:
+
+5. **`--saltar-guardados` no salta lo que se miró y NO reproducía**, porque eso no se guarda en
+   ninguna parte. Con un presupuesto de 18 minutos por tanda —unos treinta títulos— las tandas se
+   pasaban la vida remidiendo los mismos treinta cadáveres sin llegar nunca al treinta y uno. Ahora
+   se recuerdan 14 días en Redis (`crawl:descartes`, `anotarDescartes` en `refreshCatalog.ts`) y
+   cada tanda coge un tramo nuevo. Solo entra lo que se MIRÓ: lo que se quedó sin mirar por
+   presupuesto no se sabe si reproduce, y condenarlo sería inventarse una medición.
+
+Cómo comprobarlo si vuelve a pasar: `scripts/dev/diag_archive_universo.ts` mide cada etiqueta
+completa y dice cuántos de sus supervivientes no están en la base;
+`scripts/dev/diag_archive_embudo.ts` dice por qué filtro se van los que se van.
+
+---
+
 ## 7. Resumen para pegar en la pared
 
 1. El título no identifica nada. El año, la imagen de TMDB, el título original y el dueño de la
@@ -469,3 +514,7 @@ fuente es mejor. No es la tasa del catálogo entero.
     ocultando: estás borrando. Comprueba a dónde va lo que devuelve la función antes de tocarla.
 17. **Todo lo que esconde catálogo tiene que saber devolverlo.** Un modo de un solo sentido va
     comiéndose el catálogo corrida a corrida y no se nota hasta que es tarde.
+18. **Una pasada en verde no es una pasada que aporte.** Si una fuente lleva días sin traer nada,
+    mira POR DÓNDE EMPIEZA su recorrido y QUÉ RECUERDA entre corridas: casi siempre está dando
+    vueltas a la misma cabecera. Y mide las etiquetas enteras antes de concluir que una fuente «no
+    tiene» algo (§6 quinquies).

@@ -421,6 +421,24 @@ function fuegocineDetalles($: cheerio.CheerioAPI): {
 const ARCHIVE_BASE = 'https://archive.org';
 
 /**
+ * Las etiquetas por las que se le pregunta al archivo, MEDIDAS UNA A UNA Y ENTERAS.
+ *
+ * No son las que suenan bien: son las que dejan títulos después del filtro de identidad, contando
+ * la etiqueta completa y no sus primeros cien items (2026-08-22).
+ *
+ *   Pelicula   3.759 items → 849 pasan        Serie       5.555 → 92
+ *   Peliculas  2.777 items → 144 pasan        Telenovela    311 → 45
+ *   Pelis        110 items →   0 pasan        Series     10.000 → 13
+ *
+ * «Pelis» estaba y no aporta ni uno; «Peliculas» y «Telenovela» no estaban y aportan 189. Quien
+ * quiera añadir otra que la mida igual: una etiqueta de más son miles de items que filtrar.
+ */
+const ETIQUETAS_ARCHIVE: Record<ContentType, string[]> = {
+  movie: ['Pelicula', 'Peliculas'],
+  tvseries: ['Serie', 'Telenovela', 'Series'],
+};
+
+/**
  * El año de la OBRA. Nunca `metadata.year` — ver el bloque de arriba.
  *
  * Dos sitios, los dos escritos por quien sube pero los dos referidos a la obra y no a la subida:
@@ -2328,57 +2346,101 @@ export class RealScraperService {
         dubbing_cast: [],
         servers: [],
         _source_url: `${ARCHIVE_BASE}/details/${identifier}`,
+        /**
+         * CUÁNDO SE SUBIÓ, para poder ordenar por lo más nuevo. Interno: los campos con `_`
+         * delante no se escriben en la tabla, igual que `_source_url`.
+         */
+        _archive_added: String(it?.addeddate || ''),
       } as MediaItem);
     }
     return salida;
   }
 
   /**
-   * Recorre el archivo de una clase paginando con el cursor de la API `scrape`.
+   * Recorre el archivo de una clase, LO MÁS NUEVO PRIMERO y sin paginar.
    *
-   * El tope sale del `limit`, nunca de un número escrito aquí (FUENTES.md §6 ter). Se para
-   * cuando la API deja de dar cursor —se acabó el archivo— o al llenar el cupo.
+   * Esta función iba de 100 en 100 con el cursor de la API y en el orden por defecto, y por eso
+   * archive.org llevaba días sin aportar nada. Tres medidas del 2026-08-22 la cambiaron entera:
    *
-   * `count=100` es el MÍNIMO que acepta esta API: pedir menos devuelve `RangeException`.
+   *   1. EL ORDEN POR DEFECTO ES LA CABECERA ALFABÉTICA DEL ARCHIVO, y esa cabecera ya estaba
+   *      guardada. De 300 items mirados sobrevivían 24 al filtro, y los 24 eran los mismos de
+   *      siempre —«007 Bond Street», «Fight Club», «Volver al Futuro»—. Pidiendo lo mismo por
+   *      `addeddate desc` sobreviven 147 de cada 300, y son subidas de esta semana.
+   *
+   *   2. EL CURSOR IGNORA `sorts`. Pedir la segunda página con el cursor que devolvió la primera
+   *      vuelve a dar la primera. Ordenar por fecha y paginar son incompatibles en esta API, así
+   *      que había que elegir — y lo que hace falta es el orden.
+   *
+   *   3. NO HACE FALTA PAGINAR. Una etiqueta entera cabe en UNA petición: `subject:"Pelicula"`
+   *      son 3.759 items en 6 s con `count` grande. Las trece páginas por minuto del cursor
+   *      tardaban trece minutos en ver menos.
+   *
+   * Y las etiquetas también salen de esa medición, mirando cada una completa en vez de sus
+   * primeros items: «Peliculas» (144 supervivientes) y «Telenovela» (45) no se preguntaban, y
+   * «Pelis» —que sí— no aporta ni uno. Con las de ahora el filtro deja pasar 1.043 títulos, de
+   * los que 1.040 no habían entrado nunca.
+   *
+   * El tope sale del `limit`, nunca de un número escrito aquí (FUENTES.md §6 ter): `count` se
+   * pide holgado respecto a él porque la mayoría de lo que llega se descarta, y con el techo de
+   * 10.000 que admite la API. Como se ordena por fecha, quedarse corto significa quedarse con lo
+   * más reciente, que es justo lo que se quiere.
    */
   static async scrapeArchiveLatest(tipo: ContentType, limit = 200): Promise<MediaItem[]> {
-    const etiquetas = tipo === 'tvseries' ? ['Serie', 'Series'] : ['Pelicula', 'Pelis'];
+    const etiquetas = ETIQUETAS_ARCHIVE[tipo];
     const items: MediaItem[] = [];
     const vistos = new Set<string>();
+    // Sobrevive del orden de un 10 % a un 25 % según la etiqueta, así que se pide veinte veces el
+    // cupo. Nunca menos de 100 —el mínimo de la API— ni más de 10.000, que es su techo.
+    const cuantos = Math.min(10000, Math.max(100, limit * 20));
+    const count = String(cuantos);
+    /**
+     * El plazo va con el tamaño de lo que se pide, no fijo. Una etiqueta entera son 4 MB y seis
+     * segundos, pero esta misma función la llama el listado en vivo con cupos pequeños, y ahí un
+     * plazo de dos minutos sería colgar la respuesta de la app si archive.org se atasca.
+     */
+    const timeout = cuantos > 1000 ? 120000 : 20000;
+
+    const pedir = async (etiqueta: string, cuantosPedir: number, plazo: number): Promise<any[] | null> => {
+      const params = new URLSearchParams({
+        q: `mediatype:movies AND subject:"${etiqueta}"`,
+        fields: 'identifier,title,subject,description,language,addeddate',
+        count: String(cuantosPedir),
+        sorts: 'addeddate desc',
+      });
+      try {
+        const res = await httpClient.get(
+          `${ARCHIVE_BASE}/services/search/v1/scrape?${params.toString()}`,
+          { timeout: plazo, validateStatus: () => true } as any
+        );
+        if (res.status >= 400) return null;
+        return ((res.data as any)?.items || []).filter(Boolean);
+      } catch {
+        return null;
+      }
+    };
 
     for (const etiqueta of etiquetas) {
-      let cursor = '';
-      // Guarda de seguridad: sin ella un cursor que se repitiera daría vueltas para siempre.
-      for (let tanda = 0; items.length < limit && tanda < 200; tanda++) {
-        const params = new URLSearchParams({
-          q: `mediatype:movies AND subject:"${etiqueta}"`,
-          fields: 'identifier,title,subject,description,language',
-          count: '100',
-        });
-        if (cursor) params.set('cursor', cursor);
-        try {
-          const res = await httpClient.get(
-            `${ARCHIVE_BASE}/services/search/v1/scrape?${params.toString()}`,
-            { timeout: 30000, validateStatus: () => true } as any
-          );
-          if (res.status >= 400) break;
-          const data = res.data as any;
-          const lote = (data?.items || []).filter(Boolean);
-          if (!lote.length) break;
-
-          for (const m of this.parseArchiveItems(lote, tipo)) {
-            if (vistos.has(m.id) || items.length >= limit) continue;
-            vistos.add(m.id);
-            items.push(m);
-          }
-          cursor = String(data?.cursor || '');
-          if (!cursor) break;
-        } catch {
-          break;
-        }
+      /**
+       * Y SI LA ETIQUETA ENTERA NO LLEGA, SE PIDE UN TROZO. Una etiqueta son varios MB y la
+       * petición puede caerse por lo que sea; sin este respaldo, esa etiqueta se pierde ENTERA en
+       * esa corrida —«Pelicula» son 849 de los 1.043 títulos que pasan el filtro—. Mil items
+       * ordenados por fecha son, como poco, lo nuevo, que es lo que la corrida viene a buscar.
+       */
+      const lote = (await pedir(etiqueta, cuantos, timeout))
+        ?? (cuantos > 1000 ? await pedir(etiqueta, 1000, 30000) : null);
+      if (!lote) continue;
+      for (const m of this.parseArchiveItems(lote, tipo)) {
+        if (vistos.has(m.id)) continue;
+        vistos.add(m.id);
+        items.push(m);
       }
     }
-    return items;
+
+    // Las etiquetas se piden por separado y cada una viene ordenada por su cuenta: el orden
+    // global hay que rehacerlo, o el cupo se lo comería la primera etiqueta en vez de lo más
+    // nuevo de todas.
+    items.sort((a, b) => String((b as any)._archive_added || '').localeCompare(String((a as any)._archive_added || '')));
+    return items.slice(0, limit);
   }
 
   /** Búsqueda en vivo. Misma API y mismos filtros: lo que no entra en el crawl tampoco al buscar. */
@@ -2390,11 +2452,20 @@ export class RealScraperService {
     if (!termino) return [];
     const salida: MediaItem[] = [];
 
-    for (const par of [['Pelicula', 'movie'], ['Serie', 'tvseries']] as Array<[string, ContentType]>) {
+    // Las MISMAS etiquetas que el crawl, y por la misma razón que el crawl las tiene medidas:
+    // buscar solo por «Pelicula» y «Serie» deja fuera a «Peliculas» y «Telenovela», que entre las
+    // dos son 189 de los 1.043 títulos que el filtro deja pasar. Quien busque una telenovela
+    // encontraría en la app lo que el buscador no le sabía decir.
+    const pares: Array<[string, ContentType]> = [];
+    for (const tipo of ['movie', 'tvseries'] as ContentType[]) {
+      for (const etiqueta of ETIQUETAS_ARCHIVE[tipo]) pares.push([etiqueta, tipo]);
+    }
+
+    for (const par of pares) {
       if (salida.length >= limit) break;
       const params = new URLSearchParams({
         q: `mediatype:movies AND subject:"${par[0]}" AND title:(${termino})`,
-        fields: 'identifier,title,subject,description,language',
+        fields: 'identifier,title,subject,description,language,addeddate',
         count: '100',
       });
       try {
@@ -2406,6 +2477,7 @@ export class RealScraperService {
         const lote = ((res.data as any)?.items || []).filter(Boolean);
         for (const m of this.parseArchiveItems(lote, par[1])) {
           if (salida.length >= limit) break;
+          if (salida.some(x => x.id === m.id)) continue;
           salida.push(m);
         }
       } catch { /* la búsqueda en vivo nunca puede tumbar la respuesta */ }
@@ -2570,7 +2642,16 @@ export class RealScraperService {
         this.scrapeArchiveLatest('movie', 20000).catch(() => [] as MediaItem[]),
         this.scrapeArchiveLatest('tvseries', 20000).catch(() => [] as MediaItem[]),
       ]);
-      return dedup([pelis, series]);
+      /**
+       * MEZCLADAS POR FECHA DE SUBIDA, no las películas primero y las series después.
+       *
+       * El tope por corrida corta esta lista por donde llegue —300 en las tandas de `poblar.yml`—
+       * y las películas que pasan el filtro son 987 contra 150 series. Concatenando, ninguna
+       * corrida llegaba nunca a la primera serie: se pasarían meses de tandas antes de rozarlas.
+       * Ordenadas por fecha, cada tanda coge lo más nuevo de las dos clases.
+       */
+      return dedup([pelis, series])
+        .sort((a, b) => String((b as any)._archive_added || '').localeCompare(String((a as any)._archive_added || '')));
     }
     /**
      * MOVIEDAYS, cuya pasada a fondo no se parece a la de ninguna otra.

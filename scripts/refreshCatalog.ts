@@ -962,7 +962,12 @@ async function quedarseConLoQueReproduce(
    * Sin esto el trabajo entero se escribía al final y una cancelación del runner —que en este
    * proyecto pasa a menudo— lo tiraba todo. Ver `guardarTanda`.
    */
-  alEncontrar?: (lote: MediaItem[]) => Promise<void>
+  alEncontrar?: (lote: MediaItem[]) => Promise<void>,
+  /**
+   * Se rellena con los títulos que SE MIRARON y no dieron vídeo. Los que se quedan sin mirar por
+   * presupuesto no entran aquí: no se sabe nada de ellos. Ver `anotarDescartes`.
+   */
+  descartados?: string[]
 ): Promise<MediaItem[]> {
   console.log(`🎬 Extrayendo la url directa de ${items.length} títulos (solo entra lo que reproduzca)...`);
   const buenos: MediaItem[] = [];
@@ -996,9 +1001,9 @@ async function quedarseConLoQueReproduce(
     await Promise.all(items.slice(i, i + CONC).map(async item => {
       mirados++;
       const pagina = (item as any)._tioplus_url || item._source_url;
-      if (!pagina) return;
+      if (!pagina) { descartados?.push(item.id); return; }
       const detalle = await RealScraperService.scrapeDetail(pagina).catch(() => null);
-      if (!detalle?.servers?.length) return;
+      if (!detalle?.servers?.length) { descartados?.push(item.id); return; }
 
       const fuente = fuenteDeLaUrl(pagina);
       // Moviedays no publica ficheros permanentes: su vídeo se acuña en cada reproducción. Ver
@@ -1044,7 +1049,7 @@ async function quedarseConLoQueReproduce(
       // Se mira `servers`, no la mera presencia del capítulo: desde que moviedays conserva sus
       // capítulos sin resolver, «tiene capítulos» ya no significa «alguno reproduce».
       const hayCapitulos = temporadas.some(t => (t.episodes || []).some((e: any) => (e.servers || []).length > 0));
-      if (!servidores.length && !hayCapitulos) return;
+      if (!servidores.length && !hayCapitulos) { descartados?.push(item.id); return; }
 
       item.servers = servidores;
       if (temporadas.length) (item as any).seasons = temporadas;
@@ -1083,6 +1088,63 @@ async function quedarseConLoQueReproduce(
     await alEncontrar(buenos.slice(entregados));
   }
   return buenos;
+}
+
+/**
+ * ══════════════════════════════════════════════════════════════════════════════════════════
+ * LO QUE YA SE MIRÓ Y NO REPRODUCÍA, para que la corrida siguiente no repita el mismo trabajo.
+ *
+ * `--saltar-guardados` salta lo que está EN LA BASE, y eso deja fuera justo a los que más
+ * estorban: un título que se miró y no dio vídeo no se guarda, así que la tanda siguiente vuelve
+ * a recolectarlo, vuelve a bajarse su página y vuelve a medir sus ficheros. Con un presupuesto de
+ * 18 minutos por tanda —unos treinta títulos— eso significa que las tandas se pasan la vida
+ * midiendo los mismos treinta cadáveres y nunca alcanzan al número treinta y uno. Medido en
+ * archive.org: siete tandas seguidas, «0/N con url directa», cero filas guardadas.
+ *
+ * Se recuerdan en Redis, que es donde el crawl ya escribe (`crawl:latido`), así que no hace falta
+ * ninguna credencial nueva ni ninguna tabla. Sin Redis esto no hace nada y las tandas se
+ * comportan como antes: es una ayuda, no una dependencia.
+ *
+ * CADUCAN A LOS 14 DÍAS. Un fichero puede volver —lo resubieron, el host se recuperó—, así que
+ * esto no es una condena: es no preguntar dos veces la misma semana. Y solo entra lo que se MIRÓ;
+ * lo que se quedó sin mirar por presupuesto no se sabe si reproduce.
+ * ══════════════════════════════════════════════════════════════════════════════════════════
+ */
+const CLAVE_DESCARTES = 'crawl:descartes';
+const DIAS_DESCARTE = 14;
+/** Tope de la lista, para que el blob no crezca sin fin. Se van los más antiguos. */
+const MAX_DESCARTES = 20000;
+
+async function descartesVigentes(): Promise<Set<string>> {
+  const vigentes = new Set<string>();
+  try {
+    const guardado = await CacheStore.get<Record<string, number>>(CLAVE_DESCARTES);
+    const ahora = Date.now();
+    for (const [id, caduca] of Object.entries(guardado || {})) {
+      if (caduca > ahora) vigentes.add(id);
+    }
+  } catch { /* sin memoria de descartes se trabaja igual, solo que repitiendo */ }
+  return vigentes;
+}
+
+async function anotarDescartes(ids: string[]): Promise<void> {
+  if (!ids.length) return;
+  try {
+    const guardado = (await CacheStore.get<Record<string, number>>(CLAVE_DESCARTES)) || {};
+    const ahora = Date.now();
+    const caduca = ahora + DIAS_DESCARTE * 24 * 3600_000;
+    // Se limpian de paso los que ya caducaron: si no, el blob solo crece.
+    const vivos: Array<[string, number]> = Object.entries(guardado).filter(([, c]) => c > ahora);
+    for (const id of ids) vivos.push([id, caduca]);
+
+    // Si sobra, se van los que caducan antes, que son los más viejos.
+    vivos.sort((a, b) => b[1] - a[1]);
+    const mapa: Record<string, number> = {};
+    for (const [id, c] of vivos.slice(0, MAX_DESCARTES)) mapa[id] = c;
+
+    await CacheStore.set(CLAVE_DESCARTES, mapa, (DIAS_DESCARTE + 1) * 24 * 3600);
+    console.log(`   🧠 ${ids.length} títulos mirados sin vídeo: no se repetirán en ${DIAS_DESCARTE} días (${Object.keys(mapa).length} recordados)`);
+  } catch { /* nunca puede tumbar la corrida */ }
 }
 
 /**
@@ -1412,6 +1474,15 @@ async function main() {
     const antes = items.length;
     items = items.filter(it => !yaEstan.has(it.id));
     console.log(`   ${antes - items.length} ya estaban guardados; quedan ${items.length} por trabajar`);
+
+    // Y lo que se miró hace poco y no tenía vídeo, que no está en la base y por eso volvía cada
+    // media hora a comerse el presupuesto de la tanda. Ver `descartesVigentes`.
+    const descartes = await descartesVigentes();
+    if (descartes.size) {
+      const conDescartes = items.length;
+      items = items.filter(it => !descartes.has(it.id));
+      console.log(`   ${conDescartes - items.length} se miraron hace poco y no tenían vídeo; quedan ${items.length}`);
+    }
   }
 
   if (Number.isFinite(limitArg) && limitArg > 0) {
@@ -1628,8 +1699,10 @@ async function main() {
     if (completarSeriesAlVuelo) await completarSeriesDeLaTanda(lote, limiteCompletar);
   };
 
-  const conDirecto = await quedarseConLoQueReproduce(all, guardarTanda);
+  const sinVideo: string[] = [];
+  const conDirecto = await quedarseConLoQueReproduce(all, guardarTanda, sinVideo);
   console.log(`   ${conDirecto.length}/${all.length} títulos tienen url directa permanente y funcional`);
+  await anotarDescartes(sinVideo);
   all.length = 0;
   all.push(...conDirecto);
 
