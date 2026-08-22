@@ -603,6 +603,53 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
 }
 
 /**
+ * RETIRA LOS SERVIDORES QUE SON, POR SU PROPIO NOMBRE, OTRA PELÍCULA.
+ *
+ * Un item de archive.org puede llevar varias obras dentro sin anunciarse como recopilación.
+ * `asterix-el-galo-1967-cine.flipax.es` es el caso que lo destapó: se llama como una sola
+ * película y trae tres, y las seis copias colgaban de la ficha «Astérix El Galo (1967)». Lo que
+ * la app recibía primero era «Asterix En America (1994)».
+ *
+ * El scraper ya no las cuelga (ver `declaraOtroAnio`), pero eso solo arregla lo que se rastree a
+ * partir de ahora, y las filas ya guardadas seguirían entregando la película equivocada hasta que
+ * les tocara turno. Esto es el mismo criterio aplicado A LA SALIDA, que es donde vale desde el
+ * primer despliegue — la misma razón por la que el orden se calcula aquí y no al guardar.
+ *
+ * Es un filtro de PRESENTACIÓN: no toca nada persistido. En la base los servidores siguen, y el
+ * día que se re-rastree el item el scraper hará la limpieza de verdad.
+ *
+ * Se retira SOLO con prueba: el nombre del fichero declara un año y no es el de la ficha. Sin año
+ * en la ficha, o sin año en el nombre, no se descarta nada — no se puede demostrar que sobre.
+ *
+ * Y nunca se devuelve la lista vacía: si el criterio se llevara TODO por delante, es que el año
+ * de la ficha no es de fiar, y quedarse sin nada que reproducir es peor que el riesgo que evita.
+ */
+export function soloDeEstaObra<T extends ServerOption>(servers: T[], anio?: string | number): T[] {
+  const esperado = String(anio || '').trim().slice(0, 4);
+  if (!/^(19|20)\d{2}$/.test(esperado)) return servers;
+
+  const declaraOtro = (s: T): boolean => {
+    for (const candidata of [s.direct_stream, (s as any).embed_url]) {
+      const url = String(candidata || '');
+      if (!url) continue;
+      const dentro = ficheroDentroDeNuestraCache(url) || url;
+      let nombre = dentro;
+      try {
+        nombre = decodeURIComponent(new URL(dentro).pathname);
+      } catch {
+        // Si no se puede leer como URL se mira la cadena tal cual.
+      }
+      const m = /\((19|20)\d{2}\)/.exec(nombre);
+      if (m) return m[0].slice(1, 5) !== esperado;
+    }
+    return false;
+  };
+
+  const deEstaObra = servers.filter(s => !declaraOtro(s));
+  return deEstaObra.length ? deEstaObra : servers;
+}
+
+/**
  * LO ÚNICO QUE SALE HACIA LA APP: vídeo directo, y sin la URL del embed al lado.
  *
  * Son dos recortes, y el segundo es el que faltaba. Ocultar los servidores que solo tienen embed

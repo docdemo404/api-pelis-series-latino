@@ -2,7 +2,7 @@ import { MediaItem, ServerOption, ContentType } from '../types';
 import { supabase, getSupabaseAdmin } from './supabaseService';
 import { RealScraperService } from './realScraperService';
 import { TmdbService } from './tmdbService';
-import { sortServersBySourcePriority, getPrimaryStream, paraElCliente, fichaReproducible, veredictoDisponibilidad, VERIFICADO_VIGENTE_MS } from './streamSorter';
+import { sortServersBySourcePriority, getPrimaryStream, paraElCliente, fichaReproducible, veredictoDisponibilidad, VERIFICADO_VIGENTE_MS, soloDeEstaObra } from './streamSorter';
 import { hostNormalizado } from './hostsConCache';
 import { ficheroDentroDeNuestraCache } from '../utils/externalProxy';
 import { normalizeTitle, slugify, yearFromSlug, searchIndexKey } from '../utils/text';
@@ -2588,7 +2588,11 @@ export class CatalogService {
        * confundir las dos cosas. Ordenar aquí cuesta un `sort` sobre una lista de dos o tres
        * elementos y hace que cualquier regla nueva valga desde el primer despliegue.
        */
-      rest.servers = paraElCliente(sortServersBySourcePriority(rest.servers));
+      // Y antes de nada, fuera lo que por su propio nombre es OTRA película: un item de
+      // archive.org puede traer varias obras dentro. Ver `soloDeEstaObra`.
+      rest.servers = paraElCliente(
+        sortServersBySourcePriority(soloDeEstaObra(rest.servers, rest.release_date)),
+      );
       rest.primary_stream = getPrimaryStream(rest.servers) || null;
     } else if (rest.primary_stream) {
       rest.primary_stream = paraElCliente([rest.primary_stream])[0] || null;
