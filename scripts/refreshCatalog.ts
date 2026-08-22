@@ -954,6 +954,51 @@ function fuenteDeLaUrl(url: string): string {
  * Baja a la página de cada título, saca las urls de fichero, comprueba que entregan vídeo y
  * devuelve SOLO los títulos que se pueden reproducir, ya con sus servidores puestos.
  */
+/**
+ * RESUELVE LOS CAPÍTULOS DE UNA SERIE QUE TRAE SUS PROPIOS ENLACES, uno por uno.
+ *
+ * Es el caso de FuegoCine: no publica página de serie, así que su ficha se arma agrupando los
+ * posts de cada episodio y cada uno guarda su url en `_fuegocine_url`. Sin esto, el crawl
+ * resolvía UN capítulo y colgaba sus servidores de la ficha, donde una serie no los busca nunca.
+ *
+ * Devuelve el árbol en la MISMA forma que `scrapeDetail`, con los servidores en crudo: quien
+ * llama sigue siendo el que decide cuáles reproducen (`urlsBuenasDe`). Repartir esa decisión en
+ * dos sitios es como este proyecto acaba con dos criterios que se desincronizan.
+ *
+ * Dos frenos, y los dos por lo mismo —que lo que tumba al runner es la RÁFAGA de conexiones, no
+ * el total—: de dos en dos, y un tope de capítulos por serie y pasada. Lo que no entre hoy entra
+ * en la siguiente corrida, igual que en el resto de pasadas de este proyecto.
+ */
+const CAPITULOS_POR_SERIE_Y_PASADA = 24;
+
+async function resolverCapitulosPropios(item: MediaItem, limite: number): Promise<any[]> {
+  const temporadas = ((item as any).seasons || []) as any[];
+  let pedidos = 0;
+
+  const salida: any[] = [];
+  for (const t of temporadas) {
+    const capitulos: any[] = [];
+    const eps = (t?.episodes || []) as any[];
+
+    for (let i = 0; i < eps.length; i += 2) {
+      if (Date.now() > limite || pedidos >= CAPITULOS_POR_SERIE_Y_PASADA) break;
+
+      const tanda = eps.slice(i, i + 2);
+      const resueltos = await Promise.all(tanda.map(async (e: any) => {
+        const url = e?._fuegocine_url;
+        if (!url) return { ...e, servers: e?.servers || [] };
+        pedidos++;
+        const det = await RealScraperService.scrapeDetail(url).catch(() => null);
+        return { ...e, servers: (det?.servers || []) as any[] };
+      }));
+      capitulos.push(...resueltos);
+    }
+
+    if (capitulos.length) salida.push({ ...t, episodes: capitulos });
+  }
+  return salida;
+}
+
 async function quedarseConLoQueReproduce(
   items: MediaItem[],
   /**
@@ -1033,8 +1078,35 @@ async function quedarseConLoQueReproduce(
        * la ficha: se reproduce por capítulo, así que mirar solo `servers` la dejaría fuera entera
        * aunque tuviera veinte capítulos buenos.
        */
+      /**
+       * DE DÓNDE SALEN LAS TEMPORADAS: DEL DETALLE, O DEL PROPIO ITEM SI ÉL YA LAS TRAE.
+       *
+       * FuegoCine no tiene página de serie: cada capítulo es un post suelto, y la serie se arma
+       * agrupando los posts. Por eso su ficha llega con `_source_url` apuntando a UN capítulo, y
+       * `scrapeDetail` sobre esa url devuelve lo que hay allí — los servidores de ESE capítulo y
+       * `seasons: 0`. Medido:
+       *
+       *     «Silo»  27 capítulos recolectados
+       *     página que se resuelve: .../silo-3x7.html
+       *     detalle: servers=3  seasons=0
+       *
+       * Con `seasons` vacío, el bucle de abajo no daba una vuelta, `hayCapitulos` era falso y los
+       * servidores del capítulo acababan colgados de la FICHA — que es justo donde una serie no
+       * los tiene (FUENTES.md §4). Resultado medido en la base: 263 películas de FuegoCine y
+       * CERO series, con «Silo», «X-Men '97», «Avatar: La leyenda de Aang» o «Invencible»
+       * esperando fuera con sus capítulos ya enumerados.
+       *
+       * El parser ya dejaba el enlace de cada capítulo en `_fuegocine_url`, y hasta ahora NADIE
+       * lo leía: se escribía y ahí se quedaba. Esto lo usa.
+       */
+      const traeSusCapitulos = ((item as any).seasons || [])
+        .some((t: any) => (t?.episodes || []).some((e: any) => e?._fuegocine_url));
+      const arbol = ((detalle as any).seasons || []).length
+        ? (detalle as any).seasons
+        : (traeSusCapitulos ? await resolverCapitulosPropios(item, limite) : []);
+
       const temporadas: any[] = [];
-      for (const t of ((detalle as any).seasons || [])) {
+      for (const t of (arbol || [])) {
         const capitulos: any[] = [];
         for (const e of (t?.episodes || [])) {
           const suyos = fuente === 'moviedays'
