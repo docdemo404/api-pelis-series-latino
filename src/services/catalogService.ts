@@ -1490,36 +1490,29 @@ export class CatalogService {
     const pagina = Math.max(opts.pagina ?? 1, 1);
     const desde = (pagina - 1) * porPagina;
 
-    let q = supabase
-      .from('media_items')
-      .select('id,title,type,release_date,servers,seasons,poster,has_streams,streams_checked_at', { count: 'exact' })
-      .order('title');
-    if (opts.tipo) q = q.eq('type', opts.tipo);
-    if (opts.q) q = q.ilike('title', `%${opts.q}%`);
+    const filtroFuente = String(opts.fuente || '').toLowerCase();
 
     /**
-     * LA VISIBILIDAD SE FILTRA EN LA CONSULTA, NO DESPUÉS DE PAGINAR.
+     * LA CONSULTA SE CONSTRUYE DE CERO CADA VEZ, y no es manía.
      *
-     * La primera versión filtraba en memoria sobre las filas ya traídas, igual que hace el filtro
-     * de fuente. Y ahí eso no filtra el catálogo: filtra LA PÁGINA. Pedir «solo lo que no se ve» y
-     * tener que recorrer página por página buscando dónde cayó cada una es peor que no tener
-     * filtro, porque parece que funciona.
-     *
-     * Esto sí se puede preguntar en SQL —`has_streams`, `poster` y `streams_checked_at` son
-     * columnas—, así que se pregunta ahí: la paginación y el total salen correctos y «solo lo que
-     * NO se ve» pasa a ser la lista de trabajo pendiente, que era la gracia.
-     *
-     * Las condiciones son las de `soloPublicables`, que es el filtro que aplican los listados de
-     * verdad. Su negación tiene que incluir los NULL a mano: en SQL un `NULL` no es «falso», no es
-     * nada, y una ficha sin comprobar nunca es una ficha que se vea.
+     * El builder de Supabase es *thenable* y MUTABLE: encadenarle otro `.range()` al mismo objeto
+     * y volver a esperarlo no lanza una consulta nueva, reaprovecha la anterior a medio construir.
+     * Como el recorrido por tandas del filtro de fuente pide varios rangos seguidos, reutilizar el
+     * builder devolvería tandas repetidas o vacías —sin error ninguno, que es lo peligroso—.
      */
-    if (opts.visible) {
-      const hayColumna = await this.hasAvailabilityColumn();
-      if (hayColumna) {
+    const hayColumnaDisponibilidad = opts.visible ? await this.hasAvailabilityColumn() : false;
+    const construirConsulta = () => {
+      let c = supabase
+        .from('media_items')
+        .select('id,title,type,release_date,servers,seasons,poster,has_streams,streams_checked_at', { count: 'exact' })
+        .order('title');
+      if (opts.tipo) c = c.eq('type', opts.tipo);
+      if (opts.q) c = c.ilike('title', `%${opts.q}%`);
+      if (opts.visible && hayColumnaDisponibilidad) {
         const desdeCuando = new Date(Date.now() - VERIFICADO_VIGENTE_MS).toISOString();
-        q = opts.visible === 'si'
-          ? this.soloPublicables(q, true)
-          : (q as any).or(
+        c = opts.visible === 'si'
+          ? this.soloPublicables(c, true)
+          : (c as any).or(
               [
                 'has_streams.is.false',
                 'has_streams.is.null',
@@ -1529,10 +1522,59 @@ export class CatalogService {
               ].join(',')
             );
       }
-    }
+      return c;
+    };
 
-    const { data, count, error } = await q.range(desde, desde + porPagina - 1);
-    if (error) return { total: 0, pagina, filas: [] };
+    /**
+     * LA VISIBILIDAD SE FILTRA EN LA CONSULTA, NO DESPUÉS DE PAGINAR (ver `construirConsulta`).
+     *
+     * La primera versión filtraba en memoria sobre las filas ya traídas. Y ahí eso no filtra el
+     * catálogo: filtra LA PÁGINA. Pedir «solo lo que no se ve» y tener que recorrer página por
+     * página buscando dónde cayó cada una es peor que no tener filtro, porque parece que funciona.
+     *
+     * Esto sí se puede preguntar en SQL —`has_streams`, `poster` y `streams_checked_at` son
+     * columnas—, así que se pregunta ahí. Las condiciones son las de `soloPublicables`, y su
+     * negación incluye los NULL a mano: en SQL un `NULL` no es «falso», no es nada, y una ficha
+     * sin comprobar nunca es una ficha que se vea.
+     */
+    /**
+     * CON FILTRO DE FUENTE SE RECORRE EL CATÁLOGO ENTERO; SIN ÉL, SOLO LA PÁGINA.
+     *
+     * La fuente de un enlace no es una columna: sale de mirar cada objeto de `servers` —y, en las
+     * series, de cada capítulo dentro de `seasons`—, así que no se puede preguntar en SQL como se
+     * pregunta la visibilidad. Lo que NO se puede hacer es lo que se hacía: traer una página y
+     * filtrarla en memoria, porque eso no filtra el catálogo, filtra la página. El usuario
+     * acababa buscando a mano en qué página había caído lo que pedía, que es peor que no tener
+     * filtro porque parece que funciona.
+     *
+     * Así que cuando hay filtro de fuente se traen todas las filas que pasan los filtros que SÍ
+     * son de SQL (tipo, título, visibilidad), se decide la fuente de cada una y se pagina sobre el
+     * resultado. El total que sale es el del filtro de verdad.
+     *
+     * Se recorre en tandas de 500 y con tope, que es la diferencia entre una consulta cara y una
+     * que tumba la API: el JSON de `servers` y `seasons` es lo pesado de esta tabla.
+     */
+    const TANDA = 500;
+    const TOPE_ESCANEO = 20000;
+    let data: any[] | null = null;
+    let count: number | null = null;
+
+    if (filtroFuente) {
+      const todas: any[] = [];
+      for (let from = 0; from < TOPE_ESCANEO; from += TANDA) {
+        const { data: trozo, error: errTrozo } = await construirConsulta().range(from, from + TANDA - 1);
+        if (errTrozo) return { total: 0, pagina, filas: [] };
+        if (!trozo?.length) break;
+        todas.push(...trozo);
+        if (trozo.length < TANDA) break;
+      }
+      data = todas;
+    } else {
+      const res = await construirConsulta().range(desde, desde + porPagina - 1);
+      if (res.error) return { total: 0, pagina, filas: [] };
+      data = res.data as any[];
+      count = res.count ?? null;
+    }
 
     /**
      * De qué web salió un enlace.
@@ -1560,7 +1602,6 @@ export class CatalogService {
       return 'tioplus';
     };
 
-    const filtroFuente = String(opts.fuente || '').toLowerCase();
 
     const filas = (data || []).map((r: any) => {
       const deLaFicha: any[] = Array.isArray(r.servers) ? r.servers : [];
@@ -1582,24 +1623,18 @@ export class CatalogService {
       };
     });
 
-    /**
-     * EL FILTRO POR FUENTE SE APLICA AQUÍ Y NO EN POSTGRES, y conviene saber por qué.
-     *
-     * La fuente de un enlace no es una columna: sale de mirar cada objeto del array `servers`
-     * —su `source_id` o su url—. Filtrar eso en la consulta pediría recorrer el JSON en SQL, y
-     * además daría un `count` que no cuadra con lo que se puede paginar.
-     *
-     * El precio es que el total y las páginas siguen siendo los del filtro de tipo y título, así
-     * que una página puede salir con menos filas de las pedidas. Se dice en el panel en vez de
-     * disimularlo: es más honesto que inventar una paginación que no existe.
-     */
-    const visibles = filtroFuente
-      ? filas.filter((f: any) => (f.fuentes as string[]).includes(filtroFuente))
-      : filas;
+    // Y la paginación se hace sobre lo YA filtrado, para que el total y las páginas sean las del
+    // filtro que el usuario ve aplicado y no las de la consulta de debajo.
+    if (filtroFuente) {
+      const coinciden = filas.filter((f: any) => (f.fuentes as string[]).includes(filtroFuente));
+      return {
+        total: coinciden.length,
+        pagina,
+        filas: coinciden.slice(desde, desde + porPagina),
+      };
+    }
 
-
-
-    return { total: count ?? filas.length, pagina, filas: visibles };
+    return { total: count ?? filas.length, pagina, filas };
   }
 
   /**

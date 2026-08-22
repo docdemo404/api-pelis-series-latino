@@ -642,19 +642,17 @@
           (contQ ? '&q=' + encodeURIComponent(contQ) : '');
         const j = await (await fetch(url)).json();
         const filas = j.filas || [];
-        // Con filtro de fuente el total sigue siendo el de tipo+título: la fuente se decide
-        // mirando dentro de cada fila y no se puede contar en la consulta. Se dice, en vez de
-        // enseñar un número que no cuadra con lo que hay debajo.
-        // El de visibilidad SÍ se pregunta en la consulta, así que su total es de verdad. El de
-        // fuente se resuelve mirando dentro de cada fila y no se puede contar en SQL: cuando está
-        // puesto se dice cuántas hay en esta página en vez de un número que no cuadra.
-        document.getElementById('contenidoTotal').textContent = contFuente
-          ? filas.length + ' de esta fuente en esta página'
-          : (j.total || 0).toLocaleString('es-ES') + ' títulos' + (contVisible ? ' con este filtro' : '');
+        // Los dos filtros dan ya un total DE VERDAD, del catálogo entero y no de la página: el de
+        // visibilidad se pregunta en SQL y el de fuente recorre la tabla antes de paginar. Antes
+        // aquí ponía «en esta página», que obligaba a ir página por página buscando dónde había
+        // caído lo filtrado.
+        const conFiltro = contFuente || contVisible;
+        document.getElementById('contenidoTotal').textContent =
+          (j.total || 0).toLocaleString('es-ES') + ' títulos' + (conFiltro ? ' con este filtro' : '');
         document.getElementById('contenidoPagina').textContent = 'Página ' + (j.pagina || 1);
         if (!filas.length) {
           contTabla.innerHTML = contFuente
-            ? '<tr><td colspan="5" class="text-secondary small py-3">Ningún título de esta fuente en esta página. Prueba la siguiente.</td></tr>'
+            ? '<tr><td colspan="5" class="text-secondary small py-3">Ningún título de esta fuente en todo el catálogo.</td></tr>'
             : '<tr><td colspan="5" class="text-secondary small py-3">Sin resultados. Si la base se acaba de vaciar, el crawl todavía la está llenando.</td></tr>';
           return;
         }
