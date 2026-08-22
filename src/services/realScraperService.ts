@@ -2323,7 +2323,23 @@ export class RealScraperService {
       } as any);
     }
 
-    return movieItems;
+    /**
+     * LAS SERIES, DELANTE. Si no, no les llega el turno nunca.
+     *
+     * Se construyen al final —hay que ver el feed entero para agrupar los capítulos— y se
+     * quedaban al final del array. Pero el crawl por tandas recorta a los primeros 300 de lo que
+     * aún no está guardado (`poblar.yml`), y FuegoCine publica más de 3.000 títulos: las 114
+     * series quedaban detrás de ~2.900 películas, o sea a unas diez vueltas de media hora de
+     * distancia. Cada tanda se llevaba solo películas, y de ahí las 263 películas y cero series.
+     *
+     * Poniéndolas primero entran en la siguiente tanda, y en cuanto están guardadas
+     * `--saltar-guardados` las descarta y el recorrido sigue con las películas donde iba. Es un
+     * orden de PRESENTACIÓN de la lista, no una preferencia: no se descarta ni se prioriza nada
+     * dentro del catálogo.
+     */
+    const series = movieItems.filter(i => String(i.id).startsWith('fc-'));
+    const resto = movieItems.filter(i => !String(i.id).startsWith('fc-'));
+    return [...series, ...resto];
   }
 
   /**
@@ -2481,6 +2497,164 @@ export class RealScraperService {
   }
 
   /** Búsqueda en vivo. Misma API y mismos filtros: lo que no entra en el crawl tampoco al buscar. */
+  /**
+   * BUSCA EN ARCHIVE.ORG PARTIENDO DE LO QUE LA GENTE CONOCE, no de lo que alguien acaba de subir.
+   *
+   * El descubrimiento de archive.org era `subject:"Pelicula"` ordenado por `addeddate desc`: o sea,
+   * lo que se subió esta semana Y alguien se molestó en etiquetar en español. Eso explica la forma
+   * del catálogo — entraba la cartelera semanal de un canal y no entraban los clásicos— y no se
+   * arregla filtrando mejor: por ahí los títulos reconocidos NO PASAN, porque quien sube una obra
+   * conocida rara vez le pone la etiqueta.
+   *
+   * Así que se le da la vuelta. El índice lo pone TMDB, ordenado por número de votos, y a
+   * archive.org se le pregunta por cada título concreto. Es el mismo patrón que ya usa moviedays
+   * —TMDB manda, la fuente hace de oráculo— y trae dos cosas gratis:
+   *
+   *   · Cada ficha nace con `tmdb_id` REAL, así que cumple sola la regla de que en la app solo
+   *     salgan películas oficiales. Por el camino de las etiquetas nacían con id sintético.
+   *   · Y el emparejado deja de ser un problema: no hay que adivinar qué obra es esto, se sabe
+   *     antes de preguntar.
+   *
+   * LO QUE NO SE RELAJA ES LA IDENTIDAD. Buscar por título en archive.org devuelve la película, los
+   * documentales sobre el tema y las grabaciones caseras del mismo nombre. El año lo decide todo
+   * (ver la guarda en `scrapeArchiveDetail`), y sin subject que filtre, ese año es lo único que
+   * separa la obra de su ruido. Ya sin él este proyecto se ha llevado el golpe varias veces.
+   *
+   * El tope de concurrencia es bajo a propósito: archive.org es lento y de un tercero, y lo que
+   * hace que te corten es la RÁFAGA, no el total.
+   */
+  static async scrapeArchivePorTitulosConocidos(
+    tipo: ContentType,
+    limit = 40,
+    opts: { desdePagina?: number } = {},
+  ): Promise<MediaItem[]> {
+    const paginas = Math.max(1, Math.ceil(limit / 20));
+    const ids = await TmdbService.discoverIds(tipo, {
+      pages: paginas,
+      desde: opts.desdePagina || 1,
+    }).catch(() => [] as number[]);
+    if (!ids.length) return [];
+
+    const salida: MediaItem[] = [];
+    const vistos = new Set<string>();
+    const LOTE = 3;
+
+    for (let i = 0; i < ids.length && salida.length < limit; i += LOTE) {
+      const tanda = await Promise.allSettled(
+        ids.slice(i, i + LOTE).map(id => this.archiveParaTmdbId(id, tipo)),
+      );
+      for (const r of tanda) {
+        if (r.status !== 'fulfilled' || !r.value) continue;
+        if (vistos.has(r.value.id)) continue;
+        vistos.add(r.value.id);
+        salida.push(r.value);
+        if (salida.length >= limit) break;
+      }
+    }
+    return salida;
+  }
+
+  /** Le pregunta a archive.org por UNA obra de TMDB. `null` si no la tiene o no se puede probar. */
+  private static async archiveParaTmdbId(tmdbId: number, tipo: ContentType): Promise<MediaItem | null> {
+    const ficha = await TmdbService.getTmdbDetails(tmdbId, tipo).catch(() => null);
+    if (!ficha) return null;
+
+    const titulo = String(ficha.title || ficha.name || '').trim();
+    const original = String(ficha.original_title || ficha.original_name || '').trim();
+    const anio = String(ficha.release_date || ficha.first_air_date || '').slice(0, 4);
+    if (!titulo || !/^(19|20)\d{2}$/.test(anio)) return null;
+
+    /**
+     * Se prueba el título en español y el original. En archive.org conviven las dos formas —«El
+     * club de la lucha» y «Fight Club»— y quedarse con una sola deja fuera la mitad del archivo.
+     */
+    const consultas = Array.from(new Set([titulo, original].filter(Boolean)));
+
+    for (const consulta of consultas) {
+      // Se limpian comillas y barras para que el término no pueda cerrar la frase y añadir otra.
+      // Solo las comillas: el término va DENTRO de una frase entrecomillada y es lo único
+      // que podría cerrarla y colar otra cláusula.
+      const termino = consulta.replace(/"/g, ' ').slice(0, 80).trim();
+      if (!termino) continue;
+
+      /**
+       * `advancedsearch.php`, y NO el endpoint `scrape` que usa el resto del fichero.
+       *
+       * Medido, y es un hallazgo incómodo: `scrape` IGNORA la cláusula `title:`. Pedirle
+       * `mediatype:movies AND title:(Titanic)` contesta 200 y devuelve los mismos cien items
+       * genéricos que sin ella —«0011aa Nunc 4 Ap...», «00151»—, idénticos para cualquier título
+       * que se le pregunte. Aquí no serviría de nada.
+       *
+       * `advancedsearch.php` sí busca: la misma consulta da `numFound: 1082` y resultados que
+       * hablan del Titanic. Ordenado por descargas, lo primero que sale es la copia que la gente
+       * ve de verdad, que es exactamente lo que interesa cuando se busca lo reconocido.
+       *
+       * El `year` que devuelve permite descartar BARATO: sin él habría que bajarse la metadata de
+       * cada candidato para enterarse de que es de otra década.
+       */
+      /**
+       * EL IDIOMA VA EN LA CONSULTA, y sin eso esto no encontraba nada.
+       *
+       * De archive.org lo que más se ha subido de un clásico es la copia en INGLÉS, así que
+       * ordenando por descargas los primeros candidatos eran siempre esas — y las tumbaba
+       * después `esEnEspanolLatino`, una por una, hasta agotar el cupo sin llegar nunca a la
+       * copia en español que sí estaba. Medido: «Fight Club (1999)» pasa año, pack y fichero, y
+       * cae en `language: "eng"`.
+       *
+       * Pidiéndolo de entrada, los candidatos ya son los que pueden servir:
+       *
+       *     El club de la lucha   → pelicula-el-club-de-la-lucha-1
+       *     Volver al futuro      → 1985-volver-al-futuro-en-espan   (1985)
+       *     Terminator            → terminator_202403               (1984)
+       *     El resplandor         → el-resplandor-venta-1980-25fps  (1980)
+       *
+       * No sustituye a la guarda: `esEnEspanolLatino` mira la metadata completa al bajarla y
+       * sigue siendo quien decide. Esto solo evita gastar el cupo en lo que va a caer seguro.
+       */
+      const params = new URLSearchParams({
+        q: `mediatype:movies AND language:(spanish OR spa OR castilian) AND title:("${termino}")`,
+        rows: '30',
+        output: 'json',
+      });
+      params.append('fl[]', 'identifier');
+      params.append('fl[]', 'year');
+      params.append('sort[]', 'downloads desc');
+
+      let candidatos: any[] = [];
+      try {
+        const res = await httpClient.get(
+          `${ARCHIVE_BASE}/advancedsearch.php?${params.toString()}`,
+          { timeout: 25000, validateStatus: () => true } as any,
+        );
+        if (res.status >= 400) continue;
+        candidatos = ((res.data as any)?.response?.docs || []).filter(Boolean);
+      } catch {
+        continue;
+      }
+
+      /**
+       * El año del índice descarta, pero su ausencia no. Muchos items no lo publican como campo y
+       * sí lo llevan en el nombre, que es donde lo lee `anioDeArchive` al bajar la metadata.
+       */
+      const plausibles = candidatos.filter(c => {
+        const y = String(c?.year || '').slice(0, 4);
+        return !y || y === anio;
+      });
+
+      for (const c of plausibles.slice(0, 6)) {
+        const identifier = String(c?.identifier || '');
+        if (!identifier) continue;
+        const item = await this.scrapeArchiveDetail(
+          `${ARCHIVE_BASE}/details/${identifier}`,
+          { tmdbId, tipo, titulo, anio },
+        ).catch(() => null);
+        // El primero que pasa TODAS las guardas —año, idioma, fichero de verdad— y ya está.
+        if (item) return item;
+      }
+    }
+    return null;
+  }
+
   static async scrapeArchiveSearch(query: string, limit = 12): Promise<MediaItem[]> {
     const q = query.trim();
     if (!q) return [];
@@ -2538,7 +2712,18 @@ export class RealScraperService {
    * En una serie los servidores NO cuelgan de la ficha sino de cada capítulo, y solo entran los
    * ficheros cuyo NOMBRE declara qué capítulo son. Ver `capituloDeArchive`.
    */
-  static async scrapeArchiveDetail(url: string): Promise<MediaItem | null> {
+  /**
+   * La identidad que YA se sabe cuando se llega a un item desde TMDB y no desde sus etiquetas.
+   *
+   * Sin esto, `scrapeArchiveDetail` exige que el item declare `subject:"Pelicula"` y deduce el
+   * título y el año de su nombre. Eso vale cuando el item se encontró POR esas etiquetas; no vale
+   * cuando se llegó preguntándole a archive.org por una película concreta de TMDB, que es
+   * justamente el caso en que la sube alguien que no etiqueta nada.
+   */
+  static async scrapeArchiveDetail(
+    url: string,
+    identidad?: { tmdbId: number; tipo: ContentType; titulo: string; anio: string },
+  ): Promise<MediaItem | null> {
     const m = /archive\.org\/(?:details|metadata|download)\/([^/?#]+)/i.exec(url || '');
     if (!m) return null;
     const identifier = decodeURIComponent(m[1]);
@@ -2557,8 +2742,11 @@ export class RealScraperService {
     const tituloCrudo = String(md.title || '').trim();
     if (!tituloCrudo) return null;
 
-    const clase = claseDeArchive(md.subject);
+    // La clase la pone TMDB cuando se llegó por ahí; si no, tienen que decirla las etiquetas.
+    const clase = identidad?.tipo ?? claseDeArchive(md.subject);
     if (!clase) return null;
+    // El descarte de packs se queda SIEMPRE: un item con veinte películas dentro sigue siendo
+    // veinte películas aunque TMDB nos haya dicho el nombre de una de ellas.
     if (esPackArchive(tituloCrudo)) return null;
     // El detalle trae la metadata COMPLETA, así que aquí la comprobación de idioma es más fiable
     // que en el listado: se vuelve a hacer y no se da por buena la del listado.
@@ -2567,11 +2755,21 @@ export class RealScraperService {
     const year = anioDeArchive(tituloCrudo, String(md.description || ''));
     if (!year) return null;
 
+    /**
+     * Y SI SE VIENE DE TMDB, EL AÑO TIENE QUE COINCIDIR. Es toda la prueba de identidad.
+     *
+     * Buscar «Titanic» en archive.org devuelve la película, documentales sobre el barco, y
+     * grabaciones caseras de una obra de teatro escolar. El título no distingue ninguna de esas
+     * cosas —FUENTES.md §1 lo prohíbe explícitamente— y el año sí. Se exige que el item DECLARE
+     * un año y que sea el mismo: sin declaración no se puede probar nada, y esto no adivina.
+     */
+    if (identidad && year !== identidad.anio) return null;
+
     // El año va porque el item puede llevar dentro varias películas; ver `declaraOtroAnio`.
     const ficheros = ficherosDeVideoArchive(data?.files || [], year);
     if (!ficheros.length) return null;
 
-    const title = tituloDeArchive(tituloCrudo);
+    const title = identidad?.titulo || tituloDeArchive(tituloCrudo);
 
     const servidorDe = (nombre: string, i: number): ServerOption => {
       const directo = urlDeFicheroArchive(identifier, nombre);
@@ -2589,7 +2787,7 @@ export class RealScraperService {
 
     const base: any = {
       id: `archive-${identifier}`,
-      tmdb_id: 0,
+      tmdb_id: identidad?.tmdbId ?? 0,
       imdb_id: null,
       type: clase,
       title,
@@ -2675,8 +2873,24 @@ export class RealScraperService {
       return dedup([await this.scrapeAllFuegocine(40000).catch(() => [] as MediaItem[])]);
     }
     if (solo === 'archive') {
-      // Su archivo se recorre entero por clase; el filtro de identidad ya deja fuera casi todo.
-      const [pelis, series] = await Promise.all([
+      /**
+       * DOS FORMAS DE ENTRAR, y hacen falta las dos.
+       *
+       * `scrapeArchiveLatest` recorre el archivo por SUS etiquetas y ordenado por fecha de
+       * subida. Eso trae lo que alguien subió hace poco y se molestó en etiquetar en español —
+       * mucho, pero casi nada conocido, porque quien sube un clásico rara vez pone la etiqueta.
+       *
+       * `scrapeArchivePorTitulosConocidos` va al revés: el índice lo pone TMDB por número de
+       * votos y a archive.org se le pregunta por cada título. Es de donde salen los títulos que
+       * la gente busca, y además cada ficha nace con `tmdb_id` REAL en vez de con uno sintético.
+       *
+       * Van DELANTE por lo mismo que las series de FuegoCine: el tope por corrida corta la lista
+       * por donde llegue, y detrás de veinte mil items de etiqueta no les llegaría el turno nunca.
+       * Son pocas y en cuanto están guardadas `--saltar-guardados` las descarta.
+       */
+      const [conocidas, conocidasSerie, pelis, series] = await Promise.all([
+        this.scrapeArchivePorTitulosConocidos('movie', 120).catch(() => [] as MediaItem[]),
+        this.scrapeArchivePorTitulosConocidos('tvseries', 40).catch(() => [] as MediaItem[]),
         this.scrapeArchiveLatest('movie', 20000).catch(() => [] as MediaItem[]),
         this.scrapeArchiveLatest('tvseries', 20000).catch(() => [] as MediaItem[]),
       ]);
@@ -2688,8 +2902,9 @@ export class RealScraperService {
        * corrida llegaba nunca a la primera serie: se pasarían meses de tandas antes de rozarlas.
        * Ordenadas por fecha, cada tanda coge lo más nuevo de las dos clases.
        */
-      return dedup([pelis, series])
+      const porEtiqueta = dedup([pelis, series])
         .sort((a, b) => String((b as any)._archive_added || '').localeCompare(String((a as any)._archive_added || '')));
+      return dedup([conocidas, conocidasSerie, porEtiqueta]);
     }
     /**
      * MOVIEDAYS, cuya pasada a fondo no se parece a la de ninguna otra.
