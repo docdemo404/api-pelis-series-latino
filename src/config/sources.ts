@@ -30,9 +30,28 @@ export const DEFAULT_SOURCES: SourceConfig[] = [
    * primero el cliente cuando un título tiene servidores de varias webs.
    */
   { id: 'archive', name: 'Internet Archive', enabled: true, priority: 2 },
-  { id: 'cinecalidad', name: 'Cinecalidad', enabled: true, priority: 3 },
-  { id: 'tioplus', name: 'TioPlus / PelisPlus Latino', enabled: true, priority: 4 },
-  { id: 'fuegocine', name: 'FuegoCine', enabled: true, priority: 5 },
+  /**
+   * MOVIEDAYS va TERCERA, por delante de las tres webs que se scrapean, y por un motivo que no
+   * tiene que ver con la calidad de su vídeo sino con la de su IDENTIDAD.
+   *
+   * Es la única fuente indexada por `tmdb_id`: no publica un título que haya que emparejar, se le
+   * pregunta por una obra concreta y contesta por esa obra o por ninguna. O sea que es la única
+   * que NO PUEDE cometer el fallo que FUENTES.md documenta como origen de casi todos los destrozos
+   * del catálogo —adoptar la ficha de un homónimo—, y sus servidores son los que con más
+   * seguridad pertenecen a la ficha donde están colgados.
+   *
+   * Va DETRÁS de la fuente propia y de Archive por la razón de siempre: aquellas no dependen de
+   * que nadie siga vivo, y esta es de un tercero.
+   *
+   * Solo se publica su proveedor `vimeus`. El otro (`zonaaps`) acaba contra el muro de Cloudflare
+   * de zonaaps.com, que no deja pasar a ningún datacenter — medido. Está explicado en
+   * `PROVEEDORES_ALCANZABLES` (src/scrapers/moviedays.ts), que es el único sitio que habría que
+   * tocar si algún día se monta el relé en el Worker propio.
+   */
+  { id: 'moviedays', name: 'MovieDays (por TMDB id)', enabled: true, priority: 3 },
+  { id: 'cinecalidad', name: 'Cinecalidad', enabled: true, priority: 4 },
+  { id: 'tioplus', name: 'TioPlus / PelisPlus Latino', enabled: true, priority: 5 },
+  { id: 'fuegocine', name: 'FuegoCine', enabled: true, priority: 6 },
 ];
 
 /**

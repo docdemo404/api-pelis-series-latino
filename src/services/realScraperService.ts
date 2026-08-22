@@ -7,6 +7,18 @@ import { USER_AGENT, httpClient } from '../utils/httpClient';
 import { inspectEmbed, getServerName } from '../scrapers/embedHealth';
 import { nombreConTipo, getPrimaryStream } from './streamSorter';
 import { extractDirect, describeDirect, deferredDirectFields, unwrapRedirector } from '../scrapers/directStream';
+import {
+  esUrlDeMoviedays,
+  parseMoviedaysUrl,
+  moviedaysSourceUrl,
+  pedirMoviedays,
+  servidoresDeMoviedays,
+  fechaDeMoviedays,
+  generosDeMoviedays,
+  tituloDeMoviedays,
+  temporadasDeMoviedays,
+  pedirTemporadasMoviedays,
+} from '../scrapers/moviedays';
 import { yearFromSlug, slugify } from '../utils/text';
 
 const BASE_URL = 'https://tioplus.app';
@@ -669,6 +681,37 @@ export class RealScraperService {
    */
   static async fetchSourceSignals(url: string): Promise<SourceSignals | null> {
     /**
+     * MOVIEDAYS, que es el único caso en el que estas señales no hacen falta para nada.
+     *
+     * Todo lo que hay debajo existe para adivinar a qué obra de TMDB pertenece una página que solo
+     * publica un título. Aquí la respuesta VIENE CON LA PREGUNTA: la `_source_url` lleva el
+     * `tmdb_id` dentro, así que no hay nada que emparejar ni homónimo que pueda ganar.
+     *
+     * Se rellenan igual, y con las cuatro señales completas, porque el contrato es el contrato: el
+     * matcher las usa para CONFIRMAR lo que ya sabe, y un respaldo que confirma es exactamente lo
+     * que FUENTES.md pide. El `poster` de moviedays es de `image.tmdb.org`, o sea la prueba fuerte
+     * del punto 2, y el `original_title` la del punto 3.
+     */
+    if (esUrlDeMoviedays(url)) {
+      const ref = parseMoviedaysUrl(url);
+      if (!ref) return null;
+      const payload = await pedirMoviedays(ref.tmdbId, ref.type, ref.season, ref.episode);
+      // El título de la OBRA, no el del capítulo con el que se sondeó: `embed.php` rotula las
+      // series «Breaking Bad — T1E1: Piloto», y darle eso al matcher es pedirle que empareje una
+      // serie contra el nombre de su primer episodio.
+      const titulo = payload ? tituloDeMoviedays(payload) : '';
+      if (!payload || !titulo) return null;
+      return {
+        title: titulo,
+        year: fechaDeMoviedays(payload).substring(0, 4),
+        originalTitle: String(payload.original_title || '').trim(),
+        imageHint: String(payload.poster || ''),
+        episode: ref.season && ref.episode ? { season: ref.season, episode: ref.episode } : null,
+        type: ref.type,
+      };
+    }
+
+    /**
      * CINECALIDAD, que tiene su propia plantilla y no encaja con los selectores de las otras dos.
      *
      * Da la carátula de `image.tmdb.org` —la prueba fuerte— y el tipo desde la ruta. NO da el año
@@ -914,6 +957,11 @@ export class RealScraperService {
    * Cada token data-server se resuelve a una URL de iframe real (vidhideplus, streamwish, etc).
    */
   static async scrapeDetail(tioplusUrl: string): Promise<MediaItem | null> {
+    // Moviedays no tiene página que scrapear: su ficha es una llamada a `api/embed.php`.
+    if (esUrlDeMoviedays(tioplusUrl)) {
+      return this.scrapeMoviedaysDetail(tioplusUrl);
+    }
+
     if (tioplusUrl.includes('fuegocine.com')) {
       return this.scrapeFuegocineDetail(tioplusUrl);
     }
@@ -1180,8 +1228,39 @@ export class RealScraperService {
     seriesSlug: string,
     season: number,
     episode: number,
-    opts: { sourceUrls?: string[] } = {}
+    opts: { sourceUrls?: string[]; tmdbId?: number } = {}
   ) {
+    /**
+     * EL ID DE TMDB DE LA SERIE, que es lo único que moviedays entiende.
+     *
+     * Se busca en tres sitios y por este orden: el que pasa el catálogo (lo normal, porque la fila
+     * ya lo tiene resuelto), el que lleve dentro una `_source_url` de moviedays, y el propio slug
+     * cuando ES un número o un `md-<id>`. Si no aparece por ninguna vía, moviedays simplemente no
+     * participa en este capítulo — no se inventa nada.
+     */
+    const tmdbSerie =
+      Number(opts.tmdbId) ||
+      (opts.sourceUrls || []).map(u => parseMoviedaysUrl(String(u))?.tmdbId).find(Boolean) ||
+      Number(/^(?:md-)?(\d+)$/.exec(String(seriesSlug))?.[1]) ||
+      0;
+
+    /**
+     * Y SE LE PREGUNTA YA, en paralelo con el scraping de las páginas.
+     *
+     * Es una llamada a una API por id, no un scraping: no hay ruta que adivinar ni rótulo que
+     * comprobar, porque `embed.php` devuelve el capítulo que se le pide o un 404. Por eso entra
+     * por su propia puerta y no como una candidata más — `esDelEpisodio` no tiene nada que
+     * verificar aquí, la identidad viene en la petición.
+     *
+     * Arranca antes del bucle a propósito: su respuesta (2-4 s) se solapa con la primera tanda en
+     * vez de sumarse a ella.
+     */
+    const promesaMoviedays: Promise<ServerOption[]> = tmdbSerie
+      ? pedirMoviedays(tmdbSerie, 'tvseries', season, episode)
+          .then(p => servidoresDeMoviedays(p, `srv_md_${season}x${episode}`))
+          .catch(() => [] as ServerOption[])
+      : Promise.resolve([] as ServerOption[]);
+
     /**
      * La página del episodio se pide, PRIMERO, a partir de la página de origen de la serie.
      *
@@ -1281,7 +1360,14 @@ export class RealScraperService {
     const servidores: ServerOption[] = [];
     const clavesVistas = new Set<string>();
 
-    for (const tanda of tandas) {
+    const anotar = (sv: ServerOption) => {
+      const clave = unwrapRedirector(sv.embed_url);
+      if (!clave || clavesVistas.has(clave)) return;
+      clavesVistas.add(clave);
+      servidores.push(sv);
+    };
+
+    for (const [nTanda, tanda] of tandas.entries()) {
       const settled = await Promise.allSettled(tanda.map(c => this.scrapeDetail(c.url)));
       settled.forEach((r, i) => {
         const d = r.status === 'fulfilled' ? r.value : null;
@@ -1289,24 +1375,45 @@ export class RealScraperService {
         if (!d || !d.servers || d.servers.length === 0) return;
         if (!esDelEpisodio(d.title, season, episode, { exigeRotulo: cand.adivinada })) return;
         if (!detail) detail = d;   // la primera válida da nombre, imagen y sinopsis al capítulo
-        for (const sv of d.servers) {
-          const clave = unwrapRedirector(sv.embed_url);
-          if (!clave || clavesVistas.has(clave)) continue;
-          clavesVistas.add(clave);
-          servidores.push(sv);
-        }
+        for (const sv of d.servers) anotar(sv);
       });
+      // Lo de moviedays se recoge junto a la primera tanda, que es con la que se lanzó.
+      if (nTanda === 0) for (const sv of await promesaMoviedays) anotar(sv);
       // Solo se paga la siguiente tanda si esta no ha dejado nada que el cliente pueda reproducir.
       if (servidores.some(sv => sv.direct_stream)) break;
     }
 
-    if (!detail) return null;
+    /**
+     * QUE NO HAYA `detail` YA NO ES MOTIVO PARA IRSE CON LAS MANOS VACÍAS.
+     *
+     * `detail` es la página de un capítulo, y de ella salían el nombre, la imagen y —sobre todo— el
+     * título con el que después se buscaba el `tmdb_id`. Moviedays no tiene página: contesta por
+     * id, así que puede dar servidores de un capítulo del que ninguna web publique nada. Con la
+     * condición antigua ese capítulo se devolvía como si no existiera, tirando unos servidores que
+     * ya se habían resuelto y pagado.
+     *
+     * El nombre y la imagen no se pierden: el catálogo los rellena desde TMDB
+     * (`deLaFicha` en `getEpisodeStreams`), que es de donde deberían salir de todas formas.
+     */
+    if (!detail && servidores.length === 0) return null;
 
-    const tmdbId = isNaN(Number(seriesSlug))
-      ? await TmdbService.getTmdbId(detail.title || seriesSlug, 'tvseries',
-          detail.release_date ? detail.release_date.substring(0, 4) : undefined,
-          { originalTitle: detail.original_title, imageHint: detail.poster })
-      : Number(seriesSlug);
+    /**
+     * El id ya resuelto MANDA sobre volver a buscarlo por título.
+     *
+     * `getTmdbId` es el emparejado a ciegas que FUENTES.md pide evitar siempre que haya algo mejor,
+     * y aquí muy a menudo lo hay: el catálogo pasa el `tmdb_id` de la serie, que es un dato ya
+     * confirmado. Preguntarlo otra vez por el título del capítulo era gastar una búsqueda para
+     * arriesgarse a un homónimo. Solo se busca cuando no queda otra.
+     */
+    const tmdbId = tmdbSerie
+      ? tmdbSerie
+      : detail
+      ? isNaN(Number(seriesSlug))
+        ? await TmdbService.getTmdbId(detail.title || seriesSlug, 'tvseries',
+            detail.release_date ? detail.release_date.substring(0, 4) : undefined,
+            { originalTitle: detail.original_title, imageHint: detail.poster })
+        : Number(seriesSlug)
+      : 0;
     return {
       id: `${tmdbId}-${season}-${episode}`,
       tmdb_id: tmdbId,
@@ -1431,6 +1538,8 @@ export class RealScraperService {
         finalResults.push(...await this.scrapeCinecalidadSearch(q, limit));
       } else if (src.id === 'archive') {
         finalResults.push(...await this.scrapeArchiveSearch(q, limit));
+      } else if (src.id === 'moviedays') {
+        finalResults.push(...await this.scrapeMoviedaysSearch(q).catch(() => [] as MediaItem[]));
       }
     }
 
@@ -1695,6 +1804,162 @@ export class RealScraperService {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * MOVIEDAYS — la ficha de una obra, pedida por su id de TMDB.
+   *
+   * Es la única fuente cuya ficha llega con `tmdb_id` PUESTO en vez de con un 0 a la espera de que
+   * el matcher adivine. No es un atajo: es que aquí no hay nada que adivinar, y por eso esta fuente
+   * no puede cometer el fallo que FUENTES.md documenta —adoptar la ficha de un homónimo—, ni
+   * siquiera si quisiera.
+   *
+   * De los dos proveedores que agrega moviedays solo se publica `vimeus`; el porqué de tirar el
+   * otro está escrito en `PROVEEDORES_ALCANZABLES` (src/scrapers/moviedays.ts) y se resume en que
+   * termina contra el muro de Cloudflare de zonaaps.com, que no deja pasar a ningún datacenter.
+   */
+  static async scrapeMoviedaysDetail(url: string): Promise<MediaItem | null> {
+    const ref = parseMoviedaysUrl(url);
+    if (!ref) return null;
+
+    const payload = await pedirMoviedays(ref.tmdbId, ref.type, ref.season, ref.episode);
+    if (!payload) return null;
+
+    const title = tituloDeMoviedays(payload);
+    if (!title) return null;
+
+    const servers = await servidoresDeMoviedays(payload);
+    /**
+     * SIN SERVIDORES NO HAY FICHA.
+     *
+     * Las otras fuentes devuelven la ficha aunque venga vacía porque su página existe y ya se ha
+     * pagado el viaje. Aquí no: una ficha de moviedays sin servidores publicables es exactamente
+     * una ficha fantasma —un título anunciado que no reproduce— y esta fuente puede dar de ALTA
+     * títulos nuevos, así que es la que más daño haría. Se descarta en origen.
+     */
+    if (servers.length === 0) return null;
+
+    /**
+     * Y EN LAS SERIES, EL ÁRBOL HECHO DESDE AQUÍ.
+     *
+     * Los `servers` de arriba son los del capítulo con el que se sondeó la serie, y hay dos sitios
+     * del código que los repartirían entre TODOS sus capítulos si la ficha llegara sin temporadas
+     * (ver `temporadasDeMoviedays`). Traerlas puestas es lo que impide que el vídeo del 1x1 acabe
+     * anunciado como el del 3x5.
+     */
+    const sondeo = { season: ref.season || 1, episode: ref.episode || 1 };
+    const seasons =
+      ref.type === 'tvseries'
+        ? temporadasDeMoviedays(await pedirTemporadasMoviedays(ref.tmdbId), servers, sondeo)
+        : [];
+
+    return {
+      // El id lleva el tmdb dentro porque es lo único estable que tiene esta fuente: no hay slug.
+      // Cuando otra fuente ya tenga la misma obra, `mergeIntoExisting` las junta por `tmdb_id`.
+      id: `md-${ref.tmdbId}`,
+      tmdb_id: ref.tmdbId,
+      imdb_id: payload.imdb_id || null,
+      type: ref.type,
+      title,
+      original_title: String(payload.original_title || title),
+      aliases: [],
+      overview: String(payload.overview || ''),
+      rating: Number(payload.vote_average) || 0,
+      release_date: fechaDeMoviedays(payload),
+      genres: generosDeMoviedays(payload),
+      subcategories: ['MovieDays'],
+      poster: payload.poster || null,
+      backdrop: payload.backdrop || null,
+      logo: null,
+      trailer: null,
+      cast: [],
+      dubbing_cast: [],
+      runtime: Number(payload.runtime) || undefined,
+      servers,
+      primary_stream: getPrimaryStream(servers),
+      total_seasons: ref.type === 'tvseries' ? Number(payload.total_seasons) || undefined : undefined,
+      total_episodes: ref.type === 'tvseries' ? Number(payload.total_episodes) || undefined : undefined,
+      seasons: seasons.length ? seasons : undefined,
+      // Sin capítulo: la url que se guarda apunta a la OBRA, y `pedirMoviedays` ya sabe sondear su
+      // 1x1 cuando es una serie. Ver su comentario.
+      _source_url: moviedaysSourceUrl(ref.tmdbId, ref.type),
+    } as MediaItem;
+  }
+
+  /**
+   * MOVIEDAYS — la búsqueda, que tampoco es una búsqueda en su sitio.
+   *
+   * Moviedays tiene un `api/search.php`, pero no busca en SU catálogo: es un proxy del buscador de
+   * TMDB. O sea que preguntarle «¿tienes Matrix?» por ahí devuelve lo que TMDB sabe de Matrix, no
+   * lo que moviedays puede reproducir. Usarlo sería añadir una dependencia a cambio de nada.
+   *
+   * Así que se busca con el TMDB de casa —que además ya sabe desambiguar— y a moviedays se le
+   * pregunta lo único que sabe contestar: si tiene vídeo de estos ids concretos.
+   *
+   * SOLO LOS PRIMEROS CANDIDATOS, y esto es una decisión de latencia, no de cobertura: cada
+   * candidato cuesta una petición de 2-4 s a un tercero, y esta función está en el camino de una
+   * búsqueda que el usuario está esperando. Los cinco primeros de TMDB cubren de sobra lo que
+   * alguien tecleó; ir a por los diez dobla la espera para ganar los resultados que nadie mira.
+   */
+  static async scrapeMoviedaysSearch(query: string, limit = 5): Promise<MediaItem[]> {
+    const q = query.trim();
+    if (!q) return [];
+    const candidatos = await TmdbService.searchTmdbMulti(q).catch(() => []);
+    if (candidatos.length === 0) return [];
+
+    const vistos = await Promise.allSettled(
+      candidatos.slice(0, limit).map(c =>
+        this.scrapeMoviedaysDetail(moviedaysSourceUrl(c.tmdb_id, c.type))
+      )
+    );
+    return vistos
+      .map(r => (r.status === 'fulfilled' ? r.value : null))
+      .filter((it): it is MediaItem => Boolean(it));
+  }
+
+  /**
+   * MOVIEDAYS — el descubrimiento, que va AL REVÉS que el de todas las demás.
+   *
+   * Las otras fuentes se recorren: se pide su índice, se leen los títulos que publican y se
+   * averigua después qué son. Moviedays no tiene índice —`api/search.php` es un proxy del buscador
+   * de TMDB, no su catálogo—, así que la única forma de saber qué tiene es preguntárselo obra por
+   * obra. El índice, por tanto, lo pone TMDB (`discoverIds`) y moviedays hace de oráculo.
+   *
+   * Suena caro y no lo es tanto: `embed.php` tarda 2-4 s y aguanta el paralelismo sin quejarse
+   * (medido a 8 peticiones simultáneas sobre 247 ids, 49 s y ningún bloqueo). Y a cambio no hay una
+   * sola línea de emparejado por título en todo el camino.
+   *
+   * El tope de concurrencia es deliberadamente bajo: esta fuente es de un tercero y no tiene por
+   * qué pagar nuestras pasadas de fondo a ráfagas. Es la lección del crawl de GitHub — lo que hace
+   * que te corten es la RÁFAGA, no el total.
+   */
+  static async scrapeMoviedaysLatest(
+    tipo: ContentType,
+    limit = 40,
+    opts: { desdePagina?: number } = {}
+  ): Promise<MediaItem[]> {
+    // TMDB pagina de 20 en 20, así que se piden las páginas justas para cubrir el límite pedido.
+    const paginas = Math.max(1, Math.ceil(limit / 20));
+    const ids = await TmdbService.discoverIds(tipo, {
+      pages: paginas,
+      desde: opts.desdePagina || 1,
+    }).catch(() => [] as number[]);
+    if (ids.length === 0) return [];
+
+    const items: MediaItem[] = [];
+    const LOTE = 5;
+    for (let i = 0; i < ids.length; i += LOTE) {
+      const tanda = await Promise.allSettled(
+        ids.slice(i, i + LOTE).map(id =>
+          this.scrapeMoviedaysDetail(moviedaysSourceUrl(id, tipo))
+        )
+      );
+      for (const r of tanda) {
+        if (r.status === 'fulfilled' && r.value) items.push(r.value);
+      }
+      if (items.length >= limit) break;
+    }
+    return items.slice(0, limit);
   }
 
   /**
@@ -2286,6 +2551,28 @@ export class RealScraperService {
       ]);
       return dedup([pelis, series]);
     }
+    /**
+     * MOVIEDAYS, cuya pasada a fondo no se parece a la de ninguna otra.
+     *
+     * No hay índice que recorrer: se baja por el catálogo de TMDB ordenado por número de votos y se
+     * le pregunta a moviedays por cada obra. Por eso admite `--desde=N`: una pasada empieza donde
+     * terminó la anterior en vez de repetir siempre las mismas primeras páginas, que es lo que
+     * convierte una fuente sin índice en algo que de verdad crece.
+     *
+     * Películas y series a la vez y en la misma proporción, que es lo que el usuario pidió al
+     * añadirla: la mitad del cupo para cada clase.
+     */
+    if (solo === 'moviedays') {
+      const desdePagina = Number(
+        (process.argv.find(a => a.startsWith('--desde=')) || '').split('=')[1]
+      ) || 1;
+      const [pelis, series] = await Promise.all([
+        this.scrapeMoviedaysLatest('movie', 500, { desdePagina }).catch(() => [] as MediaItem[]),
+        this.scrapeMoviedaysLatest('tvseries', 500, { desdePagina }).catch(() => [] as MediaItem[]),
+      ]);
+      return dedup([pelis, series]);
+    }
+
     if (solo === 'peliculas' || solo === 'series' || solo === 'animes') {
       return dedup([await this.scrapeAllOfType(solo).catch(() => [] as MediaItem[])]);
     }
@@ -2335,6 +2622,31 @@ export class RealScraperService {
       : this.scrapeArchiveLatest(
           type === 'peliculas' ? 'movie' : 'tvseries',
           Math.max(10, Math.floor(limit / 2))
+        ).catch(() => [] as MediaItem[]);
+
+    /**
+     * Y MOVIEDAYS, por la misma puerta que las otras dos y por la misma razón: una fuente que no se
+     * engancha aquí queda escrita y muda — sabe leer una ficha y nadie le pasa nunca una url. Es el
+     * punto 4 de FUENTES.md §6 ter, el que se olvida siempre.
+     *
+     * Los animes se le piden como series, que es lo que son para TMDB. Las otras fuentes devuelven
+     * lista vacía para esa clase porque su archivo no la distingue; aquí no hay archivo que
+     * distinga nada, así que pedirla sería pedir las mismas series dos veces. Se deja fuera.
+     */
+    const deMoviedays = type === 'animes'
+      ? Promise.resolve([] as MediaItem[])
+      : this.scrapeMoviedaysLatest(
+          type === 'peliculas' ? 'movie' : 'tvseries',
+          /**
+           * CON TECHO, y esta fuente es la única que lo necesita.
+           *
+           * Las demás se paginan solas: se les pide su índice y devuelven lo que tengan. Aquí cada
+           * ficha cuesta una petición a un tercero, así que `limit` no es una cota de trabajo sino
+           * un multiplicador — el crawl completo llega con 20.000 y eso serían 20.000 peticiones
+           * en una sola pasada. Doscientas por pasada llenan el cupo reservado (limit/4) de sobra,
+           * y para recorrerla a fondo está `crawlFullCatalog('moviedays')`, que pagina de verdad.
+           */
+          Math.min(200, Math.max(10, Math.floor(limit / 2)))
         ).catch(() => [] as MediaItem[]);
 
     const items: MediaItem[] = [];
@@ -2424,18 +2736,24 @@ export class RealScraperService {
      *
      * Se le reserva un tercio del cupo. Si trae menos, lo que sobre se queda para la otra.
      */
-    const [extra, extraArchive] = await Promise.all([deCinecalidad, deArchive]);
+    const [extra, extraArchive, extraMoviedays] = await Promise.all([deCinecalidad, deArchive, deMoviedays]);
     const vistos = new Set(items.map(x => x.id));
     const nuevos = extra.filter(it => !vistos.has(it.id));
     const nuevosArchive = extraArchive.filter(it => !vistos.has(it.id));
+    const nuevosMoviedays = extraMoviedays.filter(it => !vistos.has(it.id));
     const reservado = Math.min(nuevos.length, Math.max(1, Math.ceil(limit / 3)));
     // Archive tiene su propio sitio reservado, y por la misma razón que Cinecalidad: si solo
     // entrara con el hueco que dejen las otras, TioPlus llenaría el cupo y esta fuente aportaría
     // cero pasada tras pasada. Un cuarto, que es lo que cabe sin ahogar a las demás.
     const reservadoArchive = Math.min(nuevosArchive.length, Math.max(1, Math.ceil(limit / 4)));
-    const cupoTioplus = Math.max(0, limit - reservado - reservadoArchive);
+    // Y moviedays, otro cuarto, por lo mismo. Con una diferencia a su favor que conviene recordar:
+    // lo que trae ya ha demostrado tener un servidor publicable —`scrapeMoviedaysDetail` descarta
+    // la ficha que no lo tenga—, así que su cupo no se gasta nunca en títulos que no reproducen.
+    const reservadoMoviedays = Math.min(nuevosMoviedays.length, Math.max(1, Math.ceil(limit / 4)));
+    const cupoTioplus = Math.max(0, limit - reservado - reservadoArchive - reservadoMoviedays);
     return items.slice(0, cupoTioplus)
       .concat(nuevos.slice(0, reservado))
-      .concat(nuevosArchive.slice(0, reservadoArchive));
+      .concat(nuevosArchive.slice(0, reservadoArchive))
+      .concat(nuevosMoviedays.slice(0, reservadoMoviedays));
   }
 }

@@ -782,6 +782,7 @@ async function guardarFilas(
  * urls que caducan, justo lo contrario de lo que archive.org es.
  */
 function fuenteDeLaUrl(url: string): string {
+  if (/moviedays\.lat/i.test(url)) return 'moviedays';
   if (/archive\.org/i.test(url)) return 'archive';
   if (/cinecalidad/i.test(url)) return 'cinecalidad';
   if (/fuegocine|blogfc|repfuegocinefree/i.test(url)) return 'fuegocine';

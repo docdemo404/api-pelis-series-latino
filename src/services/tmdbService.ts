@@ -1300,6 +1300,55 @@ export class TmdbService {
       return [];
     }
   }
+
+  /**
+   * TMDB COMO ÍNDICE, no solo como fichero de consulta.
+   *
+   * Hasta ahora TMDB solo se usaba para RESPONDER sobre un título que una web ya había publicado:
+   * el crawl descubría, TMDB confirmaba. Moviedays no tiene índice que recorrer —es un oráculo por
+   * id, no un catálogo—, así que para ella el orden se invierte: TMDB dice qué obras existen y
+   * moviedays contesta de cuáles tiene vídeo.
+   *
+   * Se usa `/discover` y no `/popular` a propósito: `popular` devuelve siempre las mismas ~40
+   * fichas y con eso el catálogo dejaría de crecer a la segunda pasada, mientras que `discover`
+   * acepta orden y paginación de verdad, así que el crawl puede seguir bajando por la lista tanto
+   * como se le pida. El orden por votos y no por fecha evita llenar el catálogo de estrenos sin
+   * copia, que es justo lo que ninguna fuente tendrá todavía.
+   *
+   * Devuelve solo ids: la metadata la pone después `enrichMediaItem`, que es quien sabe hacerlo
+   * bien, y pedirla aquí sería pagar dos veces por lo mismo.
+   */
+  static async discoverIds(
+    type: ContentType,
+    opts: { pages?: number; desde?: number; orderBy?: string } = {}
+  ): Promise<number[]> {
+    const endpoint = type === 'tvseries' ? 'tv' : 'movie';
+    const pages = Math.max(1, opts.pages || 1);
+    const primera = Math.max(1, opts.desde || 1);
+    const ids: number[] = [];
+
+    for (let page = primera; page < primera + pages; page++) {
+      try {
+        const res = await axios.get(`https://api.themoviedb.org/3/discover/${endpoint}`, {
+          params: {
+            api_key: API_KEY,
+            language: 'es-MX',
+            sort_by: opts.orderBy || 'vote_count.desc',
+            include_adult: false,
+            page,
+          },
+          timeout: 10000,
+        });
+        const results = res.data?.results || [];
+        // TMDB corta en la página 500; más allá contesta 422 y seguir pidiendo es gastar por nada.
+        if (results.length === 0) break;
+        for (const r of results) if (r?.id) ids.push(Number(r.id));
+      } catch {
+        break;
+      }
+    }
+    return ids;
+  }
 }
 
 

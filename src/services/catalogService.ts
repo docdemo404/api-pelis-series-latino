@@ -214,6 +214,19 @@ export function candidateIdsForUrl(url: string): string[] {
  * de la SERIE "Die Hart"). Devuelve null en las fuentes cuya url no lo declara.
  */
 export function tipoDeLaRuta(url: string): ContentType | null {
+  /**
+   * MOVIEDAYS LO DECLARA EN LA QUERY, no en la ruta: `?type=pelicula|serie|anime`.
+   *
+   * Va la primera porque es la única fuente que lo dice sin margen de duda —es un parámetro que le
+   * pasamos nosotros, no una palabra que aparezca en un slug—, y porque su url contiene la cadena
+   * «pelicula» dentro de la query, así que dejarla caer en los patrones de abajo la haría casar por
+   * el motivo equivocado y una serie volvería como película.
+   */
+  if (/moviedays\.lat\//i.test(url)) {
+    if (/[?&]type=(serie|anime|tv)\b/i.test(url)) return 'tvseries';
+    if (/[?&]type=(pelicula|movie)\b/i.test(url)) return 'movie';
+    return null;
+  }
   if (/\/pelicula\//i.test(url)) return 'movie';
   // Cinecalidad: `/ver-pelicula/` y `/ver-serie/`. Se comprueba ANTES que el patrón genérico de
   // serie para que `/ver-pelicula/` no caiga en él por contener «pelicula».
@@ -2692,7 +2705,9 @@ export class CatalogService {
     const scraped = yaResuelto
       ? null
       : await RealScraperService
-          .scrapeEpisodeDetail(serie.id || id, season, episode, { sourceUrls })
+          // El `tmdb_id` va explícito porque moviedays solo entiende ids: sin él esa fuente no
+          // puede participar en el capítulo, y es la única que resuelve series por API.
+          .scrapeEpisodeDetail(serie.id || id, season, episode, { sourceUrls, tmdbId: serie.tmdb_id })
           .catch(() => null);
 
     const propios = scraped?.servers?.length

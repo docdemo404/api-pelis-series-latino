@@ -402,6 +402,47 @@ Y dos trampas que ya han mordido con las fuentes existentes:
 
 ---
 
+## 6 quater. La excepción: una fuente indexada por `tmdb_id` (MovieDays)
+
+Todo lo anterior existe porque una web publica un **título** y hay que averiguar a qué obra
+corresponde. MovieDays (`moviedays.lat`) rompe esa premisa: **no tiene catálogo**. Es un motor de
+embeds al que se le pregunta por un id de TMDB y contesta con sus servidores para esa obra, o con
+un 404. Así que la identidad no se deduce — viene con la respuesta.
+
+Qué cambia respecto al resto del documento:
+
+| Lo normal | Con MovieDays |
+|---|---|
+| El crawl descubre, TMDB confirma | **TMDB descubre** (`TmdbService.discoverIds`), MovieDays confirma que hay vídeo |
+| `tmdb_id: 0` y que el matcher lo resuelva | el `tmdb_id` llega puesto: no hay emparejado, ni homónimo posible |
+| Las señales de §2.1 sirven para ADIVINAR | sirven solo para CONFIRMAR lo que ya se sabe |
+| Una ficha sin servidores se guarda igual | **una ficha sin servidores no se crea** (`scrapeMoviedaysDetail` devuelve `null`) |
+
+Y tres cosas que hubo que resolver, por si aparece otra fuente parecida:
+
+1. **Solo se publica el proveedor `vimeus`.** El otro que agrega (`zonaaps`) encadena
+   `serve.php → stream.php → zonaaps-player.xyz → zonaaps.com/embed-pro.php` y ahí choca contra el
+   Cloudflare de zonaaps.com, que rechaza a cualquier datacenter. Medido: el dominio entero, su
+   `wp-json` y su sitemap contestan 403 `Cf-Mitigated: challenge`. Está en un solo sitio,
+   `PROVEEDORES_ALCANZABLES` (`src/scrapers/moviedays.ts`), que es lo único que habría que tocar si
+   algún día se monta un relé en el Worker propio.
+2. **Una serie se sondea por su 1x1**, porque `embed.php` contesta 400 a `type=serie` sin capítulo.
+   La respuesta trae la metadata de la serie entera, así que sirve; lo único que hay que corregir
+   es el título, que llega rotulado «Breaking Bad — T1E1: Piloto».
+3. **El árbol de temporadas se trae hecho, y eso NO es opcional.** `ensureSeasons` y
+   `enrichMediaItem` reconstruyen las temporadas de una serie que llega sin ellas pasando
+   `item.servers` como **servidores por defecto de todos los capítulos**. Como la ficha lleva los
+   del 1x1, el vídeo del piloto habría acabado anunciado en los 62 capítulos de Breaking Bad. Las
+   dos reconstrucciones están guardadas tras un `seasons.length === 0`, así que traer el árbol
+   puesto —con los servidores solo en el capítulo al que pertenecen— las desactiva.
+
+Medido el 2026-08-21 con el código de esta API: **29 de 30 películas y 20 de 20 capítulos
+reproducen** (`scripts/dev/diag_moviedays_tasa.ts`). La muestra sale de `discoverIds` ordenado por
+número de votos, así que es lo más popular del catálogo de TMDB — donde la cobertura de cualquier
+fuente es mejor. No es la tasa del catálogo entero.
+
+---
+
 ## 7. Resumen para pegar en la pared
 
 1. El título no identifica nada. El año, la imagen de TMDB, el título original y el dueño de la
