@@ -587,8 +587,16 @@ async function guardarFicha(fila: any): Promise<void> {
          * Una comprobación que no comprueba el camino de entrega no comprueba nada.
          */
         const comoLaVeLaApp = enlaceDirecto(sv) || String(sv.direct_stream);
+        /**
+         * El manifiesto se pide en su ORIGEN, y es la única excepción a la nota de aquí arriba.
+         *
+         * La caché por trozos sirve rangos de un FICHERO; un `.m3u8` es una lista de rutas
+         * relativas, y pedirla envuelta haría que sus trozos se resolvieran contra el dominio del
+         * Worker en vez de contra el suyo. O sea que la comprobación fallaría por culpa del
+         * envoltorio, no del vídeo — y aquí un fallo cuenta como golpe.
+         */
         const arranque = manifiesto
-          ? await manifiestoArranca(comoLaVeLaApp)
+          ? await manifiestoArranca(String(sv.direct_stream))
           : await puedeAbrirse(comoLaVeLaApp);
         cuenta.arranques++;
 
