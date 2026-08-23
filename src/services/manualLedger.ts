@@ -66,6 +66,31 @@ export function esManual(sv: any): boolean {
 }
 
 /**
+ * El fichero que hay dentro de una url de caché, MIRANDO SOLO LA CADENA.
+ *
+ * `ficheroDentroDeNuestraCache` hace esto mismo pero exige la FIRMA, y con razón: allí el
+ * resultado se usa para ir a buscar bytes, así que aceptar cualquier `e=` convertiría la API en un
+ * relé abierto. Aquí no se descarga nada — solo se compara — y depender de la firma tenía un
+ * efecto muy concreto y muy malo: en un proceso SIN las variables del Worker (un runner, un script
+ * local) la url envuelta no se puede desenvolver, así que el mismo fichero parece dos servidores
+ * distintos.
+ *
+ * Y no es teórico: la ficha manual de Shrek acabó con su mp4 DOS veces, con el mismo id de
+ * servidor —una con la url de archive.org y otra con la de la caché—, porque el rescate de turno
+ * comparó las dos formas como cadenas. Medido el 2026-08-23.
+ */
+function ficheroEnvuelto(url: string): string | null {
+  const m = /\/v\?e=([A-Za-z0-9_-]+)/.exec(url);
+  if (!m) return null;
+  try {
+    const dentro = Buffer.from(m[1], 'base64url').toString('utf8');
+    return /^https?:\/\//i.test(dentro) ? dentro : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * La CLAVE de un servidor: la url del fichero, desenvuelta.
  *
  * No se puede comparar `direct_stream` a pelo. Lo que se persiste se fosiliza, y la url que acaba
@@ -76,7 +101,49 @@ export function esManual(sv: any): boolean {
 export function claveDeServidor(sv: any): string {
   const url = String(sv?.direct_stream || sv?.embed_url || '');
   if (!url) return '';
-  return ficheroDentroDeNuestraCache(url) || url;
+  return ficheroDentroDeNuestraCache(url) || ficheroEnvuelto(url) || url;
+}
+
+/**
+ * UNA ENTRADA POR FICHERO, y en su forma de ORIGEN.
+ *
+ * Dos copias del mismo vídeo no son dos respaldos: son el mismo servidor contado dos veces, que
+ * ocupa un puesto en la lista y se gasta un intento de la app cuando falla — falla en los dos.
+ *
+ * Se conserva la primera aparición (el orden de la fuente propia importa: la primera es la que se
+ * reproduce) y se le pone la url del ORIGEN si alguna de sus copias la traía. El origen es la
+ * forma estable; la envuelta es un detalle de cómo se entregó ese día, y guardarla como si fuera
+ * la dirección del vídeo es lo que ata el dato a que el Worker siga existiendo.
+ *
+ * De los campos medidos —el sello, `kbps`, `max_height`— se queda con los de la copia que los
+ * tenga: son mediciones del mismo fichero, y tirarlas obligaría a repetirlas.
+ */
+export function unaPorFichero<T extends Record<string, any>>(servidores: T[]): T[] {
+  const porClave = new Map<string, T>();
+  const orden: string[] = [];
+
+  for (const sv of servidores || []) {
+    const k = claveDeServidor(sv);
+    if (!k) continue;
+    const previo = porClave.get(k);
+    if (!previo) {
+      porClave.set(k, { ...sv });
+      orden.push(k);
+      continue;
+    }
+    // Ya había una copia: se completa con lo que esta traiga y no estuviera.
+    const fundido: any = { ...previo };
+    for (const campo of ['verified_at', 'kbps', 'kbps_necesarios', 'max_height', 'ttfb_ms', 'direct_kind', 'quality', 'language']) {
+      if (fundido[campo] === undefined && sv[campo] !== undefined) fundido[campo] = sv[campo];
+    }
+    porClave.set(k, fundido);
+  }
+
+  // Y la url del origen manda sobre la envuelta, venga de la copia que venga.
+  return orden.map(k => {
+    const sv: any = porClave.get(k);
+    return (sv.direct_stream && ficheroEnvuelto(String(sv.direct_stream)) ? { ...sv, direct_stream: k } : sv) as T;
+  });
 }
 
 const claveDeCapitulo = (season: unknown, episode: unknown) => `${Number(season)}x${Number(episode)}`;
@@ -92,12 +159,14 @@ export function extraerManuales(fila: {
   servers?: any[] | null;
   seasons?: any[] | null;
 }): LedgerManual {
-  const ficha = ((fila?.servers || []) as any[]).filter(esManual);
+  // El libro se guarda ya limpio: si la fila trae el mismo fichero dos veces, en el libro entra
+  // una. Ver `unaPorFichero`.
+  const ficha = unaPorFichero(((fila?.servers || []) as any[]).filter(esManual));
   const capitulos: LedgerManual['capitulos'] = [];
 
   for (const t of (fila?.seasons || []) as any[]) {
     for (const e of (t?.episodes || []) as any[]) {
-      const suyos = ((e?.servers || []) as any[]).filter(esManual);
+      const suyos = unaPorFichero(((e?.servers || []) as any[]).filter(esManual));
       if (!suyos.length) continue;
       capitulos.push({
         season: Number(t?.season_number ?? e?.season_number),
@@ -151,6 +220,25 @@ export interface Fusion {
   seasons: any[];
   /** Cuántas urls faltaban y se han devuelto. Cero significa que la fila estaba bien. */
   recuperados: number;
+  /** Cuántas copias repetidas del mismo fichero se han colapsado. Ver `unaPorFichero`. */
+  duplicados: number;
+}
+
+/** Deja una entrada manual por fichero, sin tocar ni mover a los servidores scrapeados. */
+function sinRepetidos(servidores: any[]): { lista: any[]; claves: Set<string>; duplicados: number } {
+  const lista: any[] = [];
+  const claves = new Set<string>();
+  let duplicados = 0;
+
+  for (const sv of servidores) {
+    if (!esManual(sv)) { lista.push(sv); continue; }
+    const k = claveDeServidor(sv);
+    if (k && claves.has(k)) { duplicados++; continue; }
+    if (k) claves.add(k);
+    lista.push(sv);
+  }
+
+  return { lista, claves, duplicados };
 }
 
 /**
@@ -167,19 +255,25 @@ export function fusionarConLedger(
   fila: { servers?: any[] | null; seasons?: any[] | null },
   ledger: LedgerManual
 ): Fusion {
-  const servers = Array.isArray(fila?.servers) ? [...fila.servers] : [];
+  const original = Array.isArray(fila?.servers) ? fila.servers : [];
   const seasons = Array.isArray(fila?.seasons) ? fila.seasons : [];
   let recuperados = 0;
+  let duplicados = 0;
+
+  // Primero se quitan las copias repetidas del mismo fichero, y de paso salen las claves de lo que
+  // ya hay. Así el libro no re-inyecta algo que estaba ahí con otra forma de url.
+  const limpio = sinRepetidos(original);
+  const servers = limpio.lista;
+  duplicados += limpio.duplicados;
 
   if (ledger.ficha.length) {
-    const presentes = new Set(servers.map(claveDeServidor));
     const faltan = ledger.ficha.filter(sv => {
       const k = claveDeServidor(sv);
-      return k && !presentes.has(k);
+      return k && !limpio.claves.has(k);
     });
     if (faltan.length) {
       recuperados += faltan.length;
-      servers.unshift(...faltan.map(comoVuelve));
+      servers.unshift(...unaPorFichero(faltan).map(comoVuelve));
     }
   }
 
@@ -189,24 +283,29 @@ export function fusionarConLedger(
   }
 
   let seasonsFinales = seasons;
-  if (porCapitulo.size && Array.isArray(seasons) && seasons.length) {
+  if (Array.isArray(seasons) && seasons.length) {
     let tocado = false;
     seasonsFinales = seasons.map((t: any) => {
       const episodios = (t?.episodes || []) as any[];
       let tocadaLaTemporada = false;
       const nuevos = episodios.map((e: any) => {
-        const suyos = porCapitulo.get(claveDeCapitulo(t?.season_number ?? e?.season_number, e?.episode_number));
-        if (!suyos?.length) return e;
+        const suyos = porCapitulo.get(claveDeCapitulo(t?.season_number ?? e?.season_number, e?.episode_number)) || [];
         const actuales = Array.isArray(e?.servers) ? e.servers : [];
-        const presentes = new Set(actuales.map(claveDeServidor));
+        // La limpieza de repetidos va en TODOS los capítulos, tengan o no algo en el libro: un
+        // capítulo puede haber acumulado dos copias del mismo fichero sin que falte nada.
+        const limpioCap = sinRepetidos(actuales);
+        if (limpioCap.duplicados) {
+          duplicados += limpioCap.duplicados;
+          tocadaLaTemporada = true;
+        }
         const faltan = suyos.filter(sv => {
           const k = claveDeServidor(sv);
-          return k && !presentes.has(k);
+          return k && !limpioCap.claves.has(k);
         });
-        if (!faltan.length) return e;
+        if (!faltan.length) return limpioCap.duplicados ? { ...e, servers: limpioCap.lista } : e;
         recuperados += faltan.length;
         tocadaLaTemporada = true;
-        return { ...e, servers: [...faltan.map(comoVuelve), ...actuales] };
+        return { ...e, servers: [...unaPorFichero(faltan).map(comoVuelve), ...limpioCap.lista] };
       });
       if (!tocadaLaTemporada) return t;
       tocado = true;
@@ -215,7 +314,7 @@ export function fusionarConLedger(
     if (!tocado) seasonsFinales = seasons;
   }
 
-  return { servers, seasons: seasonsFinales, recuperados };
+  return { servers, seasons: seasonsFinales, recuperados, duplicados };
 }
 
 /**

@@ -75,17 +75,30 @@ console.log('\n② La fila está bien: el libro no tiene que tocar nada');
 
 console.log('\n③ La url guardada ya venía envuelta en la caché por trozos');
 {
+  const envueltaUrl = `https://worker.example.dev/v?e=${Buffer.from(URL_MANUAL).toString('base64url')}&s=abc`;
   const libro = extraerManuales({ servers: [manual(URL_MANUAL)], seasons: [] });
-  // Lo que se persiste se fosiliza: la fila tiene la forma `/v?e=…`, no la del origen.
-  const envuelta = manual(`https://worker.example.dev/v?e=${Buffer.from(URL_MANUAL).toString('base64url')}&s=abc`);
-  const { servers, recuperados } = fusionarConLedger({ servers: [envuelta], seasons: [] }, libro);
-  const mismaUrl = recuperados === 0 && servers.length === 1;
-  // Sin firma válida no se puede desenvolver, así que el resultado depende del entorno: lo que NO
-  // puede pasar es que se pierda la url. Se acepta cualquiera de los dos, pero nunca cero.
-  comprobar('no se pierde la url (ni duplicada ni perdida)', mismaUrl || servers.length === 2);
+  // Lo que se persiste se fosiliza: la fila tiene la forma `/v?e=…`, no la del origen. Y esto
+  // tiene que funcionar SIN las variables del Worker, que es como corren los scripts.
+  const { servers, recuperados } = fusionarConLedger({ servers: [manual(envueltaUrl)], seasons: [] }, libro);
+  comprobar('se reconoce como la misma url y no se re-inyecta', recuperados === 0 && servers.length === 1);
 }
 
-console.log('\n④ Una serie a la que le pisaron el capítulo');
+console.log('\n④ El mismo fichero guardado DOS veces (lo que le pasó a Shrek)');
+{
+  const envueltaUrl = `https://worker.example.dev/v?e=${Buffer.from(URL_MANUAL).toString('base64url')}&s=abc`;
+  const fila = { servers: [manual(URL_MANUAL, { verified_at: undefined }), manual(envueltaUrl)], seasons: [] };
+
+  const libro = extraerManuales(fila);
+  comprobar('el libro guarda UNA sola entrada', libro.ficha.length === 1);
+  comprobar('y con la url del ORIGEN, que es la estable', String((libro.ficha[0] as any).direct_stream) === URL_MANUAL);
+  comprobar('conservando el sello de la copia que lo tenía', Boolean((libro.ficha[0] as any).verified_at));
+
+  const { servers, recuperados, duplicados } = fusionarConLedger(fila, libro);
+  comprobar('la fila queda con una sola copia', servers.length === 1 && duplicados === 1);
+  comprobar('y no se recupera nada de más', recuperados === 0);
+}
+
+console.log('\n⑤ Una serie a la que le pisaron el capítulo');
 {
   const arbol = [{
     season_number: 1,
@@ -112,7 +125,7 @@ console.log('\n④ Una serie a la que le pisaron el capítulo');
   comprobar('el 1x02 no se toca (nadie le pegó nada)', cap2.servers.length === 1);
 }
 
-console.log('\n⑤ Un capítulo que ya no existe NO se inventa');
+console.log('\n⑥ Un capítulo que ya no existe NO se inventa');
 {
   const libro = leerLedger({
     ficha: [],
@@ -124,7 +137,7 @@ console.log('\n⑤ Un capítulo que ya no existe NO se inventa');
   comprobar('el árbol se queda como estaba', (seasons[0] as any).episodes.length === 1);
 }
 
-console.log('\n⑥ Lecturas defensivas de la columna');
+console.log('\n⑦ Lecturas defensivas de la columna');
 {
   comprobar('null es un libro vacío', ledgerVacio(leerLedger(null)));
   comprobar('basura es un libro vacío', ledgerVacio(leerLedger('{"ficha":3}')));

@@ -3430,7 +3430,7 @@ async function auditarFuentePropia(apply: boolean): Promise<void> {
   const rows = await fetchAllRows(['servers', 'seasons', 'has_streams', 'manual_servers']);
 
   let conManuales = 0, respaldadas = 0, restauradas = 0, urlsRestauradas = 0, huerfanas = 0;
-  let publicadas = 0, sinSello = 0;
+  let publicadas = 0, sinSello = 0, urlsDuplicadas = 0;
 
   for (const row of rows) {
     const enLaFila = extraerManuales(row);
@@ -3440,15 +3440,20 @@ async function auditarFuentePropia(apply: boolean): Promise<void> {
 
     const titulo = String(row.title || row.id).slice(0, 44);
 
-    // 2. ¿Falta algo de lo que el libro dice que hay?
-    const { servers, seasons, recuperados } = ledgerVacio(libro)
-      ? { servers: row.servers || [], seasons: row.seasons || [], recuperados: 0 }
+    // 2. ¿Falta algo de lo que el libro dice que hay? ¿O sobra alguna copia repetida?
+    const { servers, seasons, recuperados, duplicados } = ledgerVacio(libro)
+      ? { servers: row.servers || [], seasons: row.seasons || [], recuperados: 0, duplicados: 0 }
       : fusionarConLedger(row, libro);
+    urlsDuplicadas += duplicados;
 
-    if (recuperados > 0) {
+    if (recuperados > 0 || duplicados > 0) {
       restauradas++;
       urlsRestauradas += recuperados;
-      console.log(`   ♻ ${titulo} · ${recuperados} url(es) perdidas ${apply ? 'restauradas' : 'a restaurar'}`);
+      const que = [
+        recuperados ? `${recuperados} url(es) perdidas` : '',
+        duplicados ? `${duplicados} copia(s) del mismo fichero` : '',
+      ].filter(Boolean).join(' y ');
+      console.log(`   ♻ ${titulo} · ${que} ${apply ? 'arregladas' : 'a arreglar'}`);
       row.servers = servers;
       row.seasons = seasons;
       if (apply) {
@@ -3465,6 +3470,7 @@ async function auditarFuentePropia(apply: boolean): Promise<void> {
      * meterlas crearía un capítulo fantasma. Se dicen, que es lo accionable — casi siempre
      * significa que la serie se renumeró o que el capítulo se pegó con el número equivocado.
      */
+    let huerfanasAqui = 0;
     for (const c of libro.capitulos) {
       const existe = ((row.seasons || []) as any[]).some((t: any) =>
         Number(t?.season_number) === c.season &&
@@ -3472,15 +3478,28 @@ async function auditarFuentePropia(apply: boolean): Promise<void> {
       );
       if (!existe && c.servers.length) {
         huerfanas += c.servers.length;
+        huerfanasAqui += c.servers.length;
         console.log(`   ⚠ ${titulo} · ${c.servers.length} url(es) guardadas para un T${c.season}E${c.episode} que no está en el árbol`);
       }
     }
 
-    // 1. ¿Tiene libro? Si no, se le hace uno con lo que hay ahora en la fila.
+    /**
+     * 1. EL LIBRO, AL DÍA.
+     *
+     * Dos casos: la ficha que aún no tenía ninguno (lo pegado antes de la migración 009), y el
+     * libro que se escribió con copias repetidas dentro —`extraerManuales` ahora las colapsa—.
+     *
+     * Y NO se reescribe si esta ficha tiene urls huérfanas. El libro las guarda para un capítulo
+     * que hoy no está en el árbol, así que no aparecen en la foto de la fila: rehacerlo las
+     * borraría para siempre, que es justo lo contrario de para lo que existe. Antes hay que
+     * arreglar el árbol o volver a pegarlas donde toque.
+     */
     const alDia = extraerManuales(row);
-    if (ledgerVacio(libro) && !ledgerVacio(alDia)) {
+    const teniaLibro = !ledgerVacio(libro);
+    const cambia = todoElLedger(alDia).length !== todoElLedger(libro).length;
+    if (!ledgerVacio(alDia) && (!teniaLibro || (cambia && !huerfanasAqui))) {
       respaldadas++;
-      console.log(`   💾 ${titulo} · ${todoElLedger(alDia).length} url(es) ${apply ? 'respaldadas' : 'a respaldar'}`);
+      console.log(`   💾 ${titulo} · ${todoElLedger(alDia).length} url(es) ${apply ? (teniaLibro ? 'reescritas en el libro' : 'respaldadas') : 'a respaldar'}`);
       if (apply) {
         marcarTocada(row);
         const { error } = await db.from('media_items').update({ manual_servers: alDia }).eq('id', row.id);
@@ -3503,7 +3522,8 @@ async function auditarFuentePropia(apply: boolean): Promise<void> {
     `\n📌 ${conManuales} ficha(s) con urls propias · ${publicadas} publicándose · ${sinSello} sin sello (esperando al verificador)`
   );
   if (respaldadas) console.log(`   💾 ${respaldadas} ficha(s) ${apply ? 'respaldadas' : 'a respaldar'} en el libro`);
-  if (restauradas) console.log(`   ♻ ${urlsRestauradas} url(es) ${apply ? 'devueltas' : 'a devolver'} a ${restauradas} ficha(s)`);
+  if (urlsRestauradas) console.log(`   ♻ ${urlsRestauradas} url(es) ${apply ? 'devueltas' : 'a devolver'} a su ficha`);
+  if (urlsDuplicadas) console.log(`   ♻ ${urlsDuplicadas} copia(s) repetidas del mismo fichero ${apply ? 'retiradas' : 'a retirar'}`);
   if (huerfanas) console.log(`   ⚠ ${huerfanas} url(es) apuntan a un capítulo que ya no existe`);
   if (!conManuales) console.log('   (no hay ninguna url puesta a mano en el catálogo)');
   console.log(apply ? '   ✅ aplicado' : '   (dry-run: repite con --apply)');

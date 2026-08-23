@@ -2263,11 +2263,16 @@ export class CatalogService {
     id: string,
     servers: any[],
     seasons: any[],
-    recuperados: number
+    recuperados: number,
+    duplicados: number
   ): void {
     if (!id || this.ledgerReparado.has(id)) return;
     this.ledgerReparado.add(id);
-    console.warn(`[manual] ${id}: ${recuperados} url(es) de la fuente propia habían desaparecido de la fila; restauradas`);
+    const parte = [
+      recuperados ? `${recuperados} url(es) habían desaparecido de la fila` : '',
+      duplicados ? `${duplicados} copia(s) del mismo fichero sobraban` : '',
+    ].filter(Boolean).join(' y ');
+    console.warn(`[manual] ${id}: ${parte}; arreglado`);
 
     void (async () => {
       try {
@@ -4297,10 +4302,10 @@ export class CatalogService {
      */
     const ledger = leerLedger(dbRow.manual_servers);
     if (!ledgerVacio(ledger)) {
-      const { servers, seasons, recuperados } = fusionarConLedger(dbRow, ledger);
-      if (recuperados > 0) {
+      const { servers, seasons, recuperados, duplicados } = fusionarConLedger(dbRow, ledger);
+      if (recuperados > 0 || duplicados > 0) {
         dbRow = { ...dbRow, servers, seasons };
-        CatalogService.repararManualesPerdidos(sourceId, servers, seasons, recuperados);
+        CatalogService.repararManualesPerdidos(sourceId, servers, seasons, recuperados, duplicados);
       }
     }
 

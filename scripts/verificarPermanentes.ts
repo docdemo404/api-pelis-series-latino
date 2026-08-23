@@ -434,7 +434,7 @@ function permanentesDe(fila: any): Array<{ sv: any; donde: string }> {
  */
 const GOLPES_PARA_RETIRAR = 2;
 
-const cuenta = { miradas: 0, vivas: 0, retiradas: 0, sinVeredicto: 0, fichas: 0, dejanDeAnunciarse: 0, purgados: 0, arranques: 0, noArrancan: 0, primerAviso: 0, arranqueSinVeredicto: 0, restaurados: 0 };
+const cuenta = { miradas: 0, vivas: 0, retiradas: 0, sinVeredicto: 0, fichas: 0, dejanDeAnunciarse: 0, purgados: 0, arranques: 0, noArrancan: 0, primerAviso: 0, arranqueSinVeredicto: 0, restaurados: 0, duplicados: 0 };
 /** Los listados se purgan la PRIMERA vez que algo se retira, no una vez por ficha. */
 let listadosPurgados = false;
 
@@ -546,12 +546,17 @@ async function tieneLibro(): Promise<boolean> {
          */
         const libro = leerLedger(fila.manual_servers);
         if (!ledgerVacio(libro)) {
-          const { servers, seasons, recuperados } = fusionarConLedger(fila, libro);
-          if (recuperados > 0) {
+          const { servers, seasons, recuperados, duplicados } = fusionarConLedger(fila, libro);
+          if (recuperados > 0 || duplicados > 0) {
             fila.servers = servers;
             fila.seasons = seasons;
             cuenta.restaurados += recuperados;
-            console.log(`   ♻ ${String(fila.title).slice(0, 44)} · ${recuperados} url(es) de la fuente propia restauradas`);
+            cuenta.duplicados += duplicados;
+            const que = [
+              recuperados ? `${recuperados} url(es) restauradas` : '',
+              duplicados ? `${duplicados} copia(s) repetidas retiradas` : '',
+            ].filter(Boolean).join(' · ');
+            console.log(`   ♻ ${String(fila.title).slice(0, 44)} · ${que}`);
             await restaurarEnLaFila(fila);
           }
         }
@@ -714,6 +719,7 @@ async function tieneLibro(): Promise<boolean> {
   }
   if (cuenta.purgados) console.log(`   ${cuenta.purgados} servidor(es) borrados por venir de un host que ya no se acepta.`);
   if (cuenta.restaurados) console.log(`   ♻ ${cuenta.restaurados} url(es) de la fuente propia devueltas a su ficha desde el libro.`);
+  if (cuenta.duplicados) console.log(`   ♻ ${cuenta.duplicados} copia(s) repetidas del mismo fichero retiradas.`);
   if (cuenta.dejanDeAnunciarse) console.log(`   ${cuenta.dejanDeAnunciarse} título(s) dejan de anunciarse.`);
   if (!apply) console.log(`\n   (ensayo — con --apply se escribe)`);
 })();
