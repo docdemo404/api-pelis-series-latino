@@ -3137,9 +3137,38 @@ export class CatalogService {
           .scrapeEpisodeDetail(serie.id || id, season, episode, { sourceUrls, tmdbId: serie.tmdb_id })
           .catch(() => null);
 
-    const propios = scraped?.servers?.length
+    /**
+     * LO PUESTO A MANO VA DELANTE, Y ANTES NI SIQUIERA VIAJABA.
+     *
+     * Esta línea elegía: o lo que acaba de scrapear la fuente, o lo guardado. Y en cuanto la fuente
+     * devolvía UN servidor, la lista guardada se tiraba entera — incluida la url que una persona
+     * pegó por el panel. La fuente propia es prioridad 1 en `sources.ts`, pero la prioridad ordena
+     * lo que está EN la lista, y aquí el servidor manual no llegaba a entrar: no es que saliera
+     * segundo, es que no salía.
+     *
+     * Se vio en el 1x01 de «Breaking Bad»: la url manual estaba escrita en la fila y la API
+     * contestaba solo con el servidor de moviedays. No se perdía de la base —
+     * `escribirServidoresDelCapitulo` la rescata al guardar, con este mismo criterio—, así que el
+     * dato estaba ahí y la respuesta no lo enseñaba. Un capítulo cuya ÚNICA url sea la manual
+     * no se recupera nunca: al no publicarse dos servidores, `yaResuelto` es falso, se vuelve a
+     * scrapear en cada apertura y la manual se descarta otra vez.
+     *
+     * Es la misma regla que ya aplican `persistStreams` (películas) y
+     * `escribirServidoresDelCapitulo` (capítulos), ahora también al SERVIR: el scraper no puede
+     * desmentir una url puesta a mano, solo puede no haberla encontrado. Si trae esa misma url, se
+     * queda la manual — llevan el mismo vídeo y la etiqueta de origen importa para lo que venga
+     * después. Y no se salta ninguna comprobación: `revisarServidores`, unas líneas más abajo, la
+     * sondea como a todas y la degrada si hoy no reproduce.
+     */
+    const guardados = (deLaFicha?.servers || []) as ServerOption[];
+    const resueltos = scraped?.servers?.length
       ? scraped.servers
-      : (deLaFicha?.servers || []).filter(s => s && s.embed_url);
+      : guardados.filter(s => s && s.embed_url);
+    const manuales = guardados.filter(esServidorManual);
+    const urlsManuales = new Set(manuales.map(urlDe));
+    const propios = manuales.length
+      ? [...manuales, ...resueltos.filter(s => !urlsManuales.has(urlDe(s)))]
+      : resueltos;
 
     /**
      * ANTES DE ENTREGARLOS: que el de arriba REPRODUZCA.
@@ -4349,7 +4378,7 @@ async function enColaPorFicha<T>(id: string, tarea: () => Promise<T>): Promise<T
  * otros: las urls manuales sobrevivían a `persistStreams` y aun así se las llevaba el crawl. Con
  * una sola función esa clase de fallo deja de ser posible.
  */
-function esServidorManual(sv: any): boolean {
+export function esServidorManual(sv: any): boolean {
   return String(sv?.source_id || '').toLowerCase() === 'manual';
 }
 

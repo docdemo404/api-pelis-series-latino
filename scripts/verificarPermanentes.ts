@@ -52,9 +52,10 @@ import { puedeAbrirse } from '../src/services/arranqueMp4';
 import { enlaceDirecto } from '../src/services/streamSorter';
 import { streamClient } from '../src/utils/httpClient';
 import { CacheStore } from '../src/cache/store';
-import { CatalogService } from '../src/services/catalogService';
+import { CatalogService, esServidorManual } from '../src/services/catalogService';
 import { fichaReproducible } from '../src/services/streamSorter';
 import { esUrlDeFicheroPermanente } from '../src/scrapers/directStream';
+import { bajarManifiesto, segmentoDescargable } from '../src/services/manifestHealth';
 
 const db = getSupabaseAdmin();
 const numero = (bandera: string, porDefecto: number) =>
@@ -259,6 +260,63 @@ async function sigueVivo(url: string): Promise<{ ok: boolean; motivo: string; si
 const INTENTOS = 3;
 
 /**
+ * ¿ESTO ES UN MANIFIESTO Y NO UN FICHERO? Cambia las DOS comprobaciones de esta pasada.
+ *
+ * Todo este barrido está escrito para un fichero: `sigueVivo` pide un trozo del byte 1.000.000 y
+ * `puedeAbrirse` lee las cajas de un mp4. A un `.m3u8` —que es un texto de unos kilobytes— las dos
+ * le contestan mal, y de formas distintas:
+ *
+ *   · el rango de en medio da 416, o peor, un 200 con el manifiesto entero, que aquí se lee como
+ *     «no sabe hacer rangos» y RETIRA el sello;
+ *   · y si llega al arranque, `puedeAbrirse` dice «no es un mp4» y se va sin veredicto, así que el
+ *     sello no se renueva NUNCA.
+ *
+ * Lo segundo es lo grave y es silencioso: `paraElCliente` solo publica lo que lleva sello vigente
+ * —doce horas para un permanente—, así que una url HLS pegada por el panel se ve durante medio día
+ * y desaparece sola, sin que nadie la haya condenado. Y el panel las acepta a propósito: tiene una
+ * rama entera para manifiestos (`manifiestoTraeVideo`), porque un `.m3u8` bueno pesa unos cientos
+ * de bytes y el criterio de «pesa poco, es una página de error» no le sirve.
+ *
+ * Así que a un manifiesto se le pregunta lo suyo: que el texto declare vídeo y que su primer trozo
+ * se pueda bajar. Es la misma comprobación que hace el panel al guardarlo.
+ */
+function esManifiestoHls(sv: any): boolean {
+  const url = String(sv?.direct_stream || '');
+  if (String(sv?.direct_kind || '').toLowerCase() === 'hls') return true;
+  try {
+    return /\.m3u8$/i.test(new URL(url).pathname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * El equivalente de `puedeAbrirse` para un manifiesto: ¿declara vídeo y llegan sus trozos?
+ *
+ * Devuelve el mismo trato de siempre a lo que no se puede concluir: `sinVeredicto` no suma golpe
+ * ni renueva sello. `segmentoDescargable` ya perdona por su cuenta lo que no le dio tiempo a mirar
+ * —no condena por lentitud—, así que un `false` suyo es una negativa medida, no un mal rato.
+ */
+async function manifiestoArranca(
+  url: string
+): Promise<{ ok: boolean; causa: string; detalle: string; sinVeredicto?: boolean }> {
+  const texto = await bajarManifiesto(url, url);
+  if (texto === null) {
+    return { ok: false, causa: 'el manifiesto no llega', detalle: 'sin respuesta utilizable', sinVeredicto: true };
+  }
+  if (!/#EXTM3U/i.test(texto)) {
+    return { ok: false, causa: 'no es un manifiesto', detalle: 'la respuesta no empieza por #EXTM3U' };
+  }
+  if (!/#EXTINF|#EXT-X-STREAM-INF/i.test(texto)) {
+    return { ok: false, causa: 'manifiesto vacío', detalle: 'ni trozos ni calidades' };
+  }
+  const llegan = await segmentoDescargable(texto, url, url);
+  return llegan
+    ? { ok: true, causa: 'arranca', detalle: 'manifiesto con trozos' }
+    : { ok: false, causa: 'sus trozos no llegan', detalle: 'el primero dio error' };
+}
+
+/**
  * ¿Hay caché por trozos delante? Cambia qué se puede perdonar.
  *
  * Con el Worker puesto, un origen que ignora el `Range` deja de ser un problema del cliente: el
@@ -306,6 +364,30 @@ function purgarLoQueYaNoVale(fila: any): number {
     (servidores || []).filter((s: any) => {
       const url = String(s?.direct_stream || s?.embed_url || '');
       if (s?.direct_mode !== 'public' || !url) return true;
+      /**
+       * LO PUESTO A MANO NO SE BORRA POR SU FORMA. NUNCA.
+       *
+       * Esta purga mira el HOST, no el vídeo: quita lo que hoy no habría dejado entrar el crawl.
+       * Para un servidor scrapeado está bien —volverá a entrar solo si el extractor lo consigue—,
+       * pero una url que pegó una persona no la vuelve a descubrir nadie: borrarla es perderla, y
+       * encima cada veinte minutos, que es cada cuánto corre esto.
+       *
+       * Y la lista de `esUrlDeFicheroPermanente` es más estrecha que lo que el panel ACEPTA. El
+       * formulario guarda con `direct_mode: 'public'` cualquier url que entregue vídeo, incluidos
+       * los manifiestos `.m3u8` —tiene una rama entera para ellos, `manifiestoTraeVideo`— y esos no
+       * acaban en `.mp4` ni viven en ninguno de los cuatro hosts de la lista. O sea que el panel
+       * decía «guardada» y este barrido la borraba en la siguiente vuelta.
+       *
+       * Medido el 2026-08-23: la url del 1x01 de «Breaking Bad» se pegó a las 05:50 y a las
+       * 05:58 la corrida de permanentes la borró (`🗑 Breaking Bad · 1 servidor(es) de un host que
+       * ya no se acepta`). En la app eso se ve como que la fuente propia no carga — y no es que
+       * saliera segunda: es que ya no estaba.
+       *
+       * No queda sin vigilar: la comprobación de arranque de más abajo sí la sondea, y si de
+       * verdad no entrega vídeo le quita el SELLO, que es reversible y exige prueba. Retirar por
+       * medición, sí; por la forma de la url, no.
+       */
+      if (esServidorManual(s)) return true;
       if (esUrlDeFicheroPermanente(url)) return true;
 
       const dentro = ficheroDentroDeNuestraCache(String(s?.direct_stream || ''));
@@ -460,7 +542,15 @@ async function guardarFicha(fila: any): Promise<void> {
       }
 
       const { fila, sv, donde } = tarea;
-      const r = await sigueVivo(String(sv.direct_stream));
+      /**
+       * A un manifiesto no se le pide un trozo de en medio: no es un fichero. Se salta la prueba
+       * del rango —que le contestaría mal— y decide su propia comprobación, abajo. Ver
+       * `esManifiestoHls`.
+       */
+      const manifiesto = esManifiestoHls(sv);
+      const r = manifiesto
+        ? { ok: true, motivo: '', sinVeredicto: false }
+        : await sigueVivo(String(sv.direct_stream));
       cuenta.miradas++;
 
       if (r.sinVeredicto) {
@@ -497,7 +587,9 @@ async function guardarFicha(fila: any): Promise<void> {
          * Una comprobación que no comprueba el camino de entrega no comprueba nada.
          */
         const comoLaVeLaApp = enlaceDirecto(sv) || String(sv.direct_stream);
-        const arranque = await puedeAbrirse(comoLaVeLaApp);
+        const arranque = manifiesto
+          ? await manifiestoArranca(comoLaVeLaApp)
+          : await puedeAbrirse(comoLaVeLaApp);
         cuenta.arranques++;
 
         if (arranque.ok) {
