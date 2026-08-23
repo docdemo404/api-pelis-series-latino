@@ -637,6 +637,54 @@ export class CatalogService {
    * columnas de disponibilidad no existen y cualquier consulta que las filtre sería
    * rechazada ENTERA, dejando el home y el discover vacíos. Ante la duda, no se filtra.
    */
+  /**
+   * ¿Existe ya la columna del interruptor manual (migración 010)? Una vez por proceso.
+   *
+   * Mientras no esté, esconder a mano no está disponible y los listados filtran como siempre. Lo
+   * que NO puede pasar es que su ausencia rompa una consulta: PostgREST rechaza la consulta ENTERA
+   * si nombras una columna que no existe, y eso dejaría el home y el buscador vacíos.
+   */
+  private static ocultoColumnProbe: Promise<boolean> | null = null;
+  static hasOcultoColumn(): Promise<boolean> {
+    if (!this.ocultoColumnProbe) {
+      this.ocultoColumnProbe = (async () => {
+        try {
+          const { error } = await supabase.from('media_items').select('oculto_manual').limit(1);
+          return !error;
+        } catch {
+          return false;
+        }
+      })();
+    }
+    return this.ocultoColumnProbe;
+  }
+
+  /**
+   * ESCONDE (o devuelve) UN TÍTULO A MANO. Es la única puerta que escribe `oculto_manual`.
+   *
+   * Y va en los DOS sentidos a propósito, que es la regla de la casa: todo lo que esconde catálogo
+   * tiene que saber devolverlo. Un interruptor de un solo sentido acaba comiéndose el catálogo sin
+   * que nadie sepa por qué.
+   *
+   * No toca `has_streams` ni ningún veredicto: son cosas distintas y mezclarlas es lo que haría que
+   * el siguiente barrido deshiciera la decisión. Aquí solo se dice «no lo quiero ver», y eso ningún
+   * barrido lo recalcula.
+   */
+  static async ocultarManualmente(id: string, oculto: boolean): Promise<{ ok: boolean; error?: string }> {
+    if (!id) return { ok: false, error: 'Falta el id de la ficha' };
+    if (!(await this.hasOcultoColumn())) {
+      return { ok: false, error: 'Falta la migración 010 (oculto_manual): pégala en el SQL Editor de Supabase' };
+    }
+    // `null` en vez de `false` al mostrar: deja la fila como si nunca se hubiera tocado.
+    const escrito = await this.escribirFila({ oculto_manual: oculto ? true : null }, id, 'visibilidad manual');
+    if (!escrito) return { ok: false, error: 'No se pudo escribir (¿permisos de escritura?)' };
+
+    // La ficha Y los listados: el home y las búsquedas llevan los datos copiados dentro.
+    await this.invalidateItem({ id });
+    await this.invalidateListings();
+    return { ok: true };
+  }
+
   private static availabilityColumnProbe: Promise<boolean> | null = null;
   private static hasAvailabilityColumn(): Promise<boolean> {
     if (!this.availabilityColumnProbe) {
@@ -695,9 +743,20 @@ export class CatalogService {
    * que aún faltaban por encadenar. Lo que hacía falta esperar —si la columna existe— se resuelve
    * fuera y se pasa ya resuelto.
    */
-  private static soloPublicables<T>(query: T, hayColumna: boolean): T {
+  private static soloPublicables<T>(query: T, hayColumna: boolean, hayOculto: boolean = false): T {
     if (!hayColumna) return query;
-    const q = query as any;
+    const q0 = query as any;
+    /**
+     * LO QUE EL USUARIO HA ESCONDIDO A MANO NO SALE, DIGA LO QUE DIGA EL RESTO.
+     *
+     * Va aquí, en la consulta, por la misma razón que el `tmdb_id`: una condición en la consulta
+     * no la puede saltar ningún escritor ni ninguna resolución bajo demanda. Y va la PRIMERA
+     * porque es la única que no admite discusión — las demás son medidas, esta es una decisión.
+     *
+     * `not.is.true` cubre los dos casos normales de una columna nueva: `false` y `NULL`. Con un
+     * `.eq(false)` los millares de filas que nunca se han tocado quedarían fuera del catálogo.
+     */
+    const q = hayOculto ? q0.not('oculto_manual', 'is', true) : q0;
     return q
       .eq('has_streams', true)
       .not('poster', 'is', null)
@@ -799,7 +858,7 @@ export class CatalogService {
         .order('updated_at', { ascending: false })
         .limit(limit);
 
-      query = this.soloPublicables(query, await this.hasAvailabilityColumn());
+      query = this.soloPublicables(query, await this.hasAvailabilityColumn(), await this.hasOcultoColumn());
 
       const { data } = await query;
 
@@ -872,7 +931,7 @@ export class CatalogService {
         .not('genres', 'eq', '{}');
 
       // Los carruseles del home no anuncian títulos que ya sabemos que no se reproducen.
-      query = this.soloPublicables(query, await this.hasAvailabilityColumn());
+      query = this.soloPublicables(query, await this.hasAvailabilityColumn(), await this.hasOcultoColumn());
 
       if (spec.type) query = query.eq('type', spec.type);
       if (spec.genres && spec.genres.length > 0) query = query.overlaps('genres', spec.genres);
@@ -919,7 +978,7 @@ export class CatalogService {
         .range(from, from + safeLimit - 1);
 
       // El "ver todo" tampoco debe pasear fichas sin reproducción posible.
-      query = this.soloPublicables(query, await this.hasAvailabilityColumn());
+      query = this.soloPublicables(query, await this.hasAvailabilityColumn(), await this.hasOcultoColumn());
 
       if (type) query = query.eq('type', type);
       if (genre) query = query.contains('genres', [genre]);
@@ -951,7 +1010,7 @@ export class CatalogService {
         .select(this.COLUMNAS_DE_TARJETA)
         .order('updated_at', { ascending: false })
         .limit(200);
-      query = this.soloPublicables(query, await this.hasAvailabilityColumn());
+      query = this.soloPublicables(query, await this.hasAvailabilityColumn(), await this.hasOcultoColumn());
       const { data } = await query;
       const filas = (data || []) as any[];
       if (filas.length >= 30) {
@@ -1800,17 +1859,33 @@ export class CatalogService {
      * builder devolvería tandas repetidas o vacías —sin error ninguno, que es lo peligroso—.
      */
     const hayColumnaDisponibilidad = opts.visible ? await this.hasAvailabilityColumn() : false;
+    // El interruptor manual se PIDE siempre (para pintar el botón en su estado) pero solo se
+    // filtra por él cuando el panel pregunta por lo visible.
+    const hayOculto = await this.hasOcultoColumn();
     const construirConsulta = () => {
       let c = supabase
         .from('media_items')
-        .select('id,title,type,release_date,servers,seasons,poster,has_streams,streams_checked_at', { count: 'exact' })
+        /**
+         * `tmdb_id` NO ESTABA, y sin él el panel mentía en TODAS las filas.
+         *
+         * `razonDeVisibilidad` empieza preguntando si la ficha tiene un tmdb_id positivo, que es lo
+         * que decide si se anuncia (solo salen películas oficiales). Como la columna no se pedía,
+         * ese campo llegaba `undefined` para todo el mundo y la respuesta era siempre la misma:
+         * «no aparece · sin ficha de TMDB». O sea que el panel marcaba en rojo el catálogo entero,
+         * incluidos los títulos que se están viendo ahora mismo en la app.
+         */
+        .select(
+          'id,tmdb_id,title,type,release_date,servers,seasons,poster,has_streams,streams_checked_at' +
+          (hayOculto ? ',oculto_manual' : ''),
+          { count: 'exact' }
+        )
         .order('title');
       if (opts.tipo) c = c.eq('type', opts.tipo);
       if (opts.q) c = c.ilike('title', `%${opts.q}%`);
       if (opts.visible && hayColumnaDisponibilidad) {
         const desdeCuando = new Date(Date.now() - VERIFICADO_VIGENTE_MS).toISOString();
         c = opts.visible === 'si'
-          ? this.soloPublicables(c, true)
+          ? this.soloPublicables(c, true, hayOculto)
           : (c as any).or(
               [
                 'has_streams.is.false',
@@ -1818,6 +1893,7 @@ export class CatalogService {
                 'poster.is.null',
                 'streams_checked_at.is.null',
                 `streams_checked_at.lte.${desdeCuando}`,
+                ...(hayOculto ? ['oculto_manual.is.true'] : []),
               ].join(',')
             );
       }
@@ -1902,22 +1978,75 @@ export class CatalogService {
     };
 
 
+    /**
+     * EL ORDEN DE ESTA TABLA TIENE QUE SER EL QUE SE ENTREGA. Si no, no informa: engaña.
+     *
+     * La tabla rotula la primera url «principal» y las demás «respaldo», y las ordenaba poniendo
+     * SIEMPRE por delante las de la ficha. Sobre una serie eso es exactamente al revés de la
+     * realidad, y el usuario lo reportó dos veces el mismo día:
+     *
+     *   · «puse la url de Breaking Bad y no está como primera» — su url, que es prioridad 1 en
+     *     todo el sistema, salía debajo de una de moviedays;
+     *   · «los capítulos igual aparecen como respaldo» — y en una serie los capítulos son LO
+     *     ÚNICO que se reproduce.
+     *
+     * Los servidores de nivel ficha de una serie NO se entregan nunca (`fichaReproducible`): salen
+     * de scrapear la portada, que trae cargado un capítulo suelto. Ponerlos de «principal» era
+     * anunciar como lo que se reproduce justo lo que no se reproduce jamás.
+     *
+     * Así que: lo puesto a mano primero —es la prioridad 1—, después los capítulos si es una serie,
+     * y al final lo que no se entrega. Y cada enlace viaja diciendo DE DÓNDE cuelga, para que el
+     * panel pueda rotularlo por su capítulo en vez de por su puesto en una lista.
+     */
     const filas = (data || []).map((r: any) => {
-      const deLaFicha: any[] = Array.isArray(r.servers) ? r.servers : [];
-      const deCapitulos: any[] = (Array.isArray(r.seasons) ? r.seasons : [])
-        .flatMap((t: any) => Array.isArray(t?.episodes) ? t.episodes : [])
-        .flatMap((e: any) => Array.isArray(e?.servers) ? e.servers : []);
-      // Ya vienen ordenadas de mejor a peor por el crawl; aquí no se reordena nada.
-      const publicables = [...deLaFicha, ...deCapitulos].filter(sv => sv?.direct_stream);
+      const esSerie = r.type === 'tvseries';
+
+      const deLaFicha = (Array.isArray(r.servers) ? r.servers : [])
+        .filter((sv: any) => sv?.direct_stream)
+        .map((sv: any) => ({ sv, donde: 'ficha', deCapitulo: false }));
+
+      const deCapitulos = (Array.isArray(r.seasons) ? r.seasons : [])
+        .flatMap((t: any) => (Array.isArray(t?.episodes) ? t.episodes : []).map((e: any) => ({ t, e })))
+        .flatMap(({ t, e }: any) => (Array.isArray(e?.servers) ? e.servers : [])
+          .filter((sv: any) => sv?.direct_stream)
+          .map((sv: any) => ({
+            sv,
+            donde: `T${t?.season_number ?? e?.season_number}E${e?.episode_number}`,
+            deCapitulo: true,
+          })));
+
+      // En una serie manda el capítulo; en una película, la ficha. Y lo propio, delante de todo.
+      const enOrden = esSerie ? [...deCapitulos, ...deLaFicha] : [...deLaFicha, ...deCapitulos];
+      const publicables = [
+        ...enOrden.filter(x => esServidorManual(x.sv)),
+        ...enOrden.filter(x => !esServidorManual(x.sv)),
+      ];
+
       return {
         id: r.id,
         titulo: r.title,
-        tipo: r.type === 'tvseries' ? 'Serie' : 'Película',
+        tipo: esSerie ? 'Serie' : 'Película',
         anio: String(r.release_date || '').slice(0, 4),
-        fuentes: Array.from(new Set(publicables.map(fuenteDe))),
-        urls: publicables.map(sv => sv.direct_stream),
+        fuentes: Array.from(new Set(publicables.map(x => fuenteDe(x.sv)))),
+        urls: publicables.map(x => x.sv.direct_stream),
+        /**
+         * Lo mismo pero con contexto, que es lo que el panel necesita para no rotular por
+         * posición. `urls` se queda por compatibilidad: es lo que pinta la versión anterior de la
+         * página mientras el navegador tenga el html viejo en caché.
+         */
+        enlaces: publicables.map(x => ({
+          url: x.sv.direct_stream,
+          fuente: fuenteDe(x.sv),
+          donde: x.donde,
+          propia: esServidorManual(x.sv),
+          /** Un servidor de nivel ficha de una SERIE no se entrega jamás. */
+          se_entrega: esSerie ? x.deCapitulo : true,
+        })),
         // Cuántas de esas urls son de capítulos: en una serie el vídeo vive ahí.
-        de_capitulos: deCapitulos.filter(sv => sv?.direct_stream).length,
+        de_capitulos: deCapitulos.length,
+        propias: publicables.filter(x => esServidorManual(x.sv)).length,
+        /** Para pintar el interruptor en su estado. `null` = nunca se tocó. */
+        oculto_manual: r.oculto_manual === true,
         ...razonDeVisibilidad(r),
       };
     });
@@ -3995,6 +4124,8 @@ export class CatalogService {
      * buscador—. Una regla que se aplica en cuatro sitios de cinco no es una regla.
      */
     const hayColumna = await this.hasAvailabilityColumn();
+    // El buscador es el quinto sitio de la regla, y ya se coló una vez por no aplicarla entera.
+    const hayOculto = await this.hasOcultoColumn();
 
     try {
       let query1 = supabase
@@ -4002,7 +4133,7 @@ export class CatalogService {
         .select('*')
         .ilike('title_normalized', `${nq}%`)
         .limit(limit);
-      query1 = this.soloPublicables(query1, hayColumna);
+      query1 = this.soloPublicables(query1, hayColumna, hayOculto);
       const { data, error } = await query1;
       // Si la columna existe (sin error), confiar en su resultado aunque venga vacío.
       if (!error) return (data || []).map(this.mapDbItemToMediaItem);
@@ -4014,7 +4145,7 @@ export class CatalogService {
         .select('*')
         .ilike('title', `${nq}%`)
         .limit(limit);
-      query2 = this.soloPublicables(query2, hayColumna);
+      query2 = this.soloPublicables(query2, hayColumna, hayOculto);
       const { data } = await query2;
       return (data || []).map(this.mapDbItemToMediaItem);
     } catch {}
@@ -4374,6 +4505,16 @@ export class CatalogService {
  * el barrido, y «sin carátula» manda a la metadata.
  */
 function razonDeVisibilidad(r: any): { en_la_app: boolean; motivo: string | null } {
+  /**
+   * LO ESCONDIDO A MANO VA PRIMERO, porque es lo único que no es una medición.
+   *
+   * Si el usuario lo apagó, el motivo es ese y no «sus enlaces no han demostrado que
+   * reproduzcan» — decirle lo segundo sobre algo que apagó él mismo lo mandaría a arreglar un
+   * problema que no existe.
+   */
+  if (r?.oculto_manual === true) {
+    return { en_la_app: false, motivo: 'lo escondiste tú desde el panel' };
+  }
   if (!(Number(r?.tmdb_id) > 0)) {
     return {
       en_la_app: false,

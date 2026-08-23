@@ -297,8 +297,11 @@
         <div class="card main-card p-4 p-md-5 mb-4">
           <h3 class="brand-title fw-bold mb-2">🗂️ Contenido y sus URLs directas</h3>
           <p class="text-secondary mb-3">
-            Una fila por título con TODAS sus urls directas verificadas. La primera es la que se
-            entrega para reproducir; las siguientes son el respaldo que la app usa si esa falla.
+            Una fila por título con TODAS sus urls directas. En una <strong>película</strong> la
+            primera es la que se entrega y las siguientes son el respaldo; en una
+            <strong>serie</strong> cada capítulo tiene la suya, y por eso van rotuladas
+            <code>T1E1</code>. Lo que pusiste tú va marcado <span class="text-warning">★ propia</span>
+            y siempre se intenta primero.
           </p>
           <div class="d-flex flex-wrap gap-2 align-items-center mb-3">
             <div class="btn-group" role="group">
@@ -798,6 +801,107 @@
       : '<span class="badge bg-danger-subtle text-danger-emphasis border border-danger-subtle" style="font-size:.65rem" title="' +
         String(f.motivo || '').replace(/"/g, '&quot;') + '">no aparece</span>';
 
+    /**
+     * EL INTERRUPTOR DE «NO LO QUIERO EN LA APP».
+     *
+     * Es una decisión, no una medición: por eso no toca `has_streams` —que lo recalcula cada
+     * barrido— sino su propia columna, y por eso el botón dice lo que va a HACER y no el estado
+     * en el que está, que es lo que se confunde al leer rápido.
+     */
+    const botonOcultar = (f) => f.oculto_manual
+      ? '<button class="btn btn-sm btn-outline-warning py-0 px-2 ms-1 btn-visibilidad" data-id="' +
+          String(f.id).replace(/"/g, '&quot;') + '" data-oculto="0" style="font-size:.65rem" ' +
+          'title="Ahora mismo está escondido a mano. Púlsalo para devolverlo al catálogo.">mostrar</button>'
+      : '<button class="btn btn-sm btn-outline-secondary py-0 px-2 ms-1 btn-visibilidad" data-id="' +
+          String(f.id).replace(/"/g, '&quot;') + '" data-oculto="1" style="font-size:.65rem" ' +
+          'title="Lo saca de la app aunque reproduzca. Ningún barrido lo va a deshacer.">ocultar</button>';
+
+    /**
+     * Un clic cambia la visibilidad y recarga la tabla. Se delega en el contenedor porque las
+     * filas se repintan enteras en cada carga, y un listener por botón se perdería con ellas.
+     */
+    document.addEventListener('click', async (ev) => {
+      const btn = ev.target.closest && ev.target.closest('.btn-visibilidad');
+      if (!btn) return;
+      const oculto = btn.dataset.oculto === '1';
+      const antes = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = '…';
+      try {
+        const r = await fetch('/api/v1/panel/visibilidad', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: btn.dataset.id, oculto: oculto }),
+        });
+        const j = await r.json();
+        if (!r.ok || j.status !== 'success') {
+          alert('No se pudo cambiar: ' + ((j.error && j.error.message) || 'error desconocido'));
+          btn.disabled = false; btn.textContent = antes;
+          return;
+        }
+        cargarContenido();
+      } catch (e) {
+        alert('No se pudo cambiar la visibilidad.');
+        btn.disabled = false; btn.textContent = antes;
+      }
+    });
+
+    /**
+     * LAS URLS, ROTULADAS POR LO QUE SON Y NO POR EL PUESTO QUE OCUPAN.
+     *
+     * Decía «principal» a la primera y «respaldo» a todas las demás. En una película eso es
+     * verdad; en una serie es falso de dos maneras a la vez, y las dos se reportaron:
+     *
+     *   · una serie no tiene UNA url que se reproduzca: tiene una por capítulo, así que llamar
+     *     «respaldo» al T1E2 es rotular como reserva el único vídeo que ese capítulo tiene;
+     *   · y la que salía de «principal» era la de la ficha, que en una serie NO SE ENTREGA nunca
+     *     —sale de scrapear la portada, que trae cargado un capítulo suelto—.
+     *
+     * Ahora cada enlace dice de dónde cuelga (`T1E1`), si lo pusiste tú (`propia`, que es
+     * prioridad 1 en todo el sistema) y si de verdad se entrega. Lo que no se entrega se ve
+     * apagado, con el porqué al pasar por encima, en vez de disfrazado de principal.
+     */
+    function celdaDeUrls(f) {
+      const enlaces = f.enlaces || (f.urls || []).map((u, i) => ({
+        url: u, donde: 'ficha', propia: false, se_entrega: true, primera: i === 0,
+      }));
+      if (!enlaces.length) return '<span class="text-secondary">sin urls</span>';
+
+      const esSerie = f.tipo === 'Serie';
+      let yaHuboPrincipal = false;
+
+      return enlaces.map(function (l) {
+        let etiqueta, clase = 'text-secondary', titulo = '';
+        if (l.propia) {
+          etiqueta = '★ propia';
+          clase = 'text-warning';
+          titulo = 'La pusiste tú desde este panel: es la primera que se intenta.';
+        } else if (!l.se_entrega) {
+          etiqueta = 'no se usa';
+          clase = 'text-secondary opacity-50';
+          titulo = 'Servidor de la portada de la serie. En una serie se reproducen los capítulos, así que este no se entrega nunca.';
+        } else if (esSerie) {
+          etiqueta = l.donde;
+          titulo = 'Es lo que se reproduce en ese capítulo.';
+        } else if (!yaHuboPrincipal) {
+          etiqueta = 'principal';
+          yaHuboPrincipal = true;
+        } else {
+          etiqueta = 'respaldo';
+        }
+
+        return '<div class="fila-url d-flex gap-2 align-items-baseline"' +
+            (titulo ? ' title="' + titulo.replace(/"/g, '&quot;') + '"' : '') + '>' +
+            '<span class="' + clase + '" style="min-width:64px">' + etiqueta + '</span>' +
+            '<a href="' + l.url + '" target="_blank" rel="noopener" class="text-break' +
+              (l.se_entrega ? '' : ' opacity-50') + '" style="color:#93c5fd">' + l.url + '</a>' +
+          '</div>';
+      }).join('') +
+      (esSerie && f.de_capitulos
+        ? '<div class="text-secondary">' + f.de_capitulos + ' url(s) en capítulos — es lo que la app reproduce</div>'
+        : '');
+    }
+
     let contFuente = '';
     let contVisible = '';
 
@@ -827,19 +931,11 @@
         }
         contTabla.innerHTML = filas.map(f =>
           '<tr>' +
-            '<td class="fw-semibold" data-t="Titulo">' + f.titulo + ' ' + insignia(f) + '</td>' +
+            '<td class="fw-semibold" data-t="Titulo">' + f.titulo + ' ' + insignia(f) + botonOcultar(f) + '</td>' +
             '<td class="text-secondary small" data-t="Tipo">' + f.tipo + '</td>' +
             '<td class="text-secondary small" data-t="Anio">' + (f.anio || '—') + '</td>' +
             '<td class="small" data-t="Fuente">' + (f.fuentes || []).map(x => '<span class="' + colorFuente(x) + '">' + x + '</span>').join(', ') + '</td>' +
-            '<td class="small" data-t="URLs">' +
-              (f.urls || []).map((u, i) =>
-                '<div class="fila-url d-flex gap-2 align-items-baseline">' +
-                  '<span class="text-secondary" style="min-width:64px">' + (i === 0 ? 'principal' : 'respaldo') + '</span>' +
-                  '<a href="' + u + '" target="_blank" rel="noopener" class="text-break" style="color:#93c5fd">' + u + '</a>' +
-                '</div>'
-              ).join('') +
-              (f.de_capitulos ? '<div class="text-secondary">' + f.de_capitulos + ' de capítulos</div>' : '') +
-            '</td>' +
+            '<td class="small" data-t="URLs">' + celdaDeUrls(f) + '</td>' +
           '</tr>'
         ).join('');
       } catch (e) {

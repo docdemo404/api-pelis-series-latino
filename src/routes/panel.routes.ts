@@ -111,6 +111,31 @@ router.get('/api/v1/panel/contenido', async (req: Request, res: Response, next: 
 });
 
 /**
+ * ESCONDER (o devolver) UN TÍTULO A MANO.
+ *
+ * La visibilidad la venía decidiendo entera la máquina, y no había forma de decir «este no lo
+ * quiero en la app». Poner `has_streams` a false a mano no valía: el siguiente barrido que
+ * encontrara un enlace bueno lo volvía a anunciar, porque esa columna es un veredicto calculado.
+ *
+ * Por eso vive en su propia columna (migración 010) y solo se escribe desde aquí. Y va en los dos
+ * sentidos: todo lo que esconde catálogo tiene que saber devolverlo.
+ */
+router.post('/api/v1/panel/visibilidad', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const id = String(b.id || '').trim();
+    const oculto = b.oculto === true || String(b.oculto) === 'true';
+    if (!id) return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'Se requiere el id de la ficha');
+
+    const r = await CatalogService.ocultarManualmente(id, oculto);
+    if (!r.ok) return sendErrorResponse(res, 500, 'WRITE_FAILED', r.error || 'No se pudo cambiar la visibilidad');
+    res.json({ status: 'success', id, oculto });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
  * Los capítulos de una serie, según TMDB, para que el panel pueda pedir una url POR CAPÍTULO.
  * Sin esto, la fuente propia solo servía para películas: en una serie el vídeo vive en cada
  * episodio, y una lista suelta de urls no dice a cuál pertenece cada una.
