@@ -10,6 +10,13 @@ import { httpClient } from '../utils/httpClient';
 import { CacheStore } from '../cache/store';
 import { unwrapRedirector, canonicalArchiveOrg } from '../scrapers/directStream';
 import { revisarServidores, aplicarVeredictosRecordados } from './playbackHealth';
+import {
+  LedgerManual,
+  extraerManuales,
+  fusionarConLedger,
+  leerLedger,
+  ledgerVacio,
+} from './manualLedger';
 
 // TTL del caché de catálogo/búsqueda. Con Redis (KV_REST_API_* / UPSTASH_*) las entradas
 // se comparten entre lambdas y sobreviven cold starts; sin Redis degrada a memoria local.
@@ -1325,6 +1332,8 @@ export class CatalogService {
         return { ok: false, aceptadas: [], rechazadas: [], error: 'No hay ninguna ficha guardada que editar' };
       }
       const quitadas = await this.podarManualesNoListados(guardado.id, listadoParaPodar);
+      // El libro retrata lo que queda: vaciar por el formulario también tiene que vaciarlo a él.
+      await this.guardarLedgerManual(guardado.id);
       return { ok: true, id: guardado.id, titulo: guardado.titulo, aceptadas: [], rechazadas: [], quitadas };
     }
 
@@ -1506,6 +1515,10 @@ export class CatalogService {
         ? await this.podarManualesNoListados(String(yaEstaba.id), listadoParaPodar)
         : 0;
 
+      // Y se sella el libro con lo que ha quedado: a partir de aquí, ningún escritor del catálogo
+      // puede hacer desaparecer estas urls. Ver `manualLedger.ts`.
+      await this.guardarLedgerManual(String(yaEstaba.id));
+
       await this.invalidateItem({ id: yaEstaba.id });
       await this.invalidateListings();
       return {
@@ -1552,6 +1565,8 @@ export class CatalogService {
     const quitadas = opts.reemplazar
       ? await this.podarManualesNoListados(id, listadoParaPodar)
       : 0;
+
+    await this.guardarLedgerManual(id);
 
     await this.invalidateItem({ id });
     await this.invalidateListings();
@@ -2174,6 +2189,101 @@ export class CatalogService {
   }
 
   /**
+   * ¿EXISTE YA LA COLUMNA DEL LIBRO (migración 009)? Se pregunta UNA vez por proceso.
+   *
+   * Mientras no esté, todo esto se degrada a no hacer nada: ni se escribe el libro ni se restaura
+   * de él, y el catálogo funciona exactamente como antes. Preguntar una vez evita además llenar
+   * los logs con el mismo error de PostgREST en cada petición.
+   */
+  private static ledgerColumnProbe: Promise<boolean> | null = null;
+  private static hasManualLedgerColumn(): Promise<boolean> {
+    if (!this.ledgerColumnProbe) {
+      this.ledgerColumnProbe = (async () => {
+        try {
+          const { error } = await supabase.from('media_items').select('manual_servers').limit(1);
+          if (error) console.warn('[manual] falta la migración 009 (manual_servers): el libro está apagado');
+          return !error;
+        } catch {
+          return false;
+        }
+      })();
+    }
+    return this.ledgerColumnProbe;
+  }
+
+  /**
+   * GUARDA EL LIBRO: la foto de lo que el panel acaba de dejar en la fila.
+   *
+   * Se llama después de CADA operación del panel —añadir, editar, podar— y solo desde ahí. Que el
+   * libro sea una foto de la fila es lo que hace que borrar siga siendo trivial: lo que el
+   * formulario quitó ya no está en la fila, así que tampoco entra en la foto siguiente.
+   *
+   * Lee la fila de vuelta a propósito, en vez de fiarse de lo que se creía haber escrito: si un
+   * `upsert` fusionó, si RLS bloqueó la escritura o si otra petición metió algo por medio, el libro
+   * tiene que retratar lo que HAY, no lo que se pretendía.
+   */
+  static async guardarLedgerManual(rowId: string): Promise<LedgerManual | null> {
+    if (!rowId || !(await this.hasManualLedgerColumn())) return null;
+    try {
+      const { data } = await getSupabaseAdmin()
+        .from('media_items')
+        .select('servers,seasons')
+        .eq('id', rowId)
+        .maybeSingle();
+      if (!data) return null;
+
+      const ledger = extraerManuales(data as any);
+      // Sin nada puesto a mano se guarda `null` y no un libro vacío: así el índice parcial solo
+      // lleva las filas que de verdad tienen algo que proteger.
+      const valor = ledgerVacio(ledger) ? null : ledger;
+      await this.escribirFila({ manual_servers: valor }, rowId, 'libro de la fuente propia');
+      return ledger;
+    } catch (e) {
+      console.warn(`[manual] no se pudo guardar el libro de ${rowId}: ${e instanceof Error ? e.message : e}`);
+      return null;
+    }
+  }
+
+  /**
+   * DEVUELVE A LA BASE LO QUE SE RESTAURÓ AL LEER. En segundo plano y una vez por ficha.
+   *
+   * La respuesta ya sale correcta sin esto —la restauración ocurre en la lectura—, así que aquí no
+   * hay nadie esperando. Lo que arregla es lo que NO pasa por la lectura: los barridos y las
+   * reparaciones leen filas crudas, y de ahí sale `has_streams`.
+   *
+   * `verLedgerReparado` evita que veinte filas de un listado disparen veinte escrituras de la misma
+   * ficha en la misma lambda. No es un caché de corrección: si la fila se vuelve a pisar, otra
+   * instancia (o esta, tras reciclarse) la repara igual.
+   *
+   * NO se toca `has_streams`. Lo restaurado vuelve sin sello y por tanto sin derecho a anunciarse
+   * todavía; quien lo devuelve al catálogo es el verificador, cuando demuestre que entrega vídeo.
+   */
+  private static readonly ledgerReparado = new Set<string>();
+  private static repararManualesPerdidos(
+    id: string,
+    servers: any[],
+    seasons: any[],
+    recuperados: number
+  ): void {
+    if (!id || this.ledgerReparado.has(id)) return;
+    this.ledgerReparado.add(id);
+    console.warn(`[manual] ${id}: ${recuperados} url(es) de la fuente propia habían desaparecido de la fila; restauradas`);
+
+    void (async () => {
+      try {
+        if (!(await this.hasManualLedgerColumn())) return;
+        const update: Record<string, unknown> = { servers };
+        // `seasons` solo si hay árbol: escribir `[]` dejaría a una serie sin capítulos.
+        if (Array.isArray(seasons) && seasons.length) update.seasons = seasons;
+        await this.escribirFila(update, id, 'restauración de la fuente propia');
+        await this.invalidateItem({ id });
+      } catch {
+        // Reparar es un extra: la respuesta de esta petición ya salió con sus urls.
+      }
+    })();
+  }
+
+  /**
    * ESCRIBE EL VEREDICTO, Y SI ES EL QUE ESCONDE LA FICHA, ESPERA A QUE LLEGUE.
    *
    * `persistStreams` iba siempre lanzado y olvidado, y sobre Vercel eso significa muchas veces
@@ -2422,16 +2532,31 @@ export class CatalogService {
   ): Promise<{ ficha: ServerOption[]; porCapitulo: Map<string, ServerOption[]> }> {
     const vacio = { ficha: [] as ServerOption[], porCapitulo: new Map<string, ServerOption[]>() };
     try {
+      /**
+       * SE PREGUNTA A LA FILA **Y AL LIBRO**, y el libro es el que de verdad protege.
+       *
+       * Mirando solo la fila, este rescate depende de que lo manual siga ahí — o sea, de que
+       * ningún escritor anterior se lo haya llevado. Es exactamente la suposición que ha fallado
+       * cuatro veces. Con el libro delante, una url que se perdió en una escritura anterior vuelve
+       * a entrar aquí igual, y la ficha se guarda completa.
+       *
+       * La columna puede no existir todavía (migración 009): entonces esto es lo de siempre.
+       */
+      const conLibro = await this.hasManualLedgerColumn();
       const { data } = await getSupabaseAdmin()
         .from('media_items')
-        .select('servers,seasons')
+        .select(conLibro ? 'servers,seasons,manual_servers' : 'servers,seasons')
         .eq('id', id)
         .maybeSingle();
       if (!data) return vacio;
+
+      const ledger = leerLedger((data as any).manual_servers);
+      const fusionada = ledgerVacio(ledger) ? (data as any) : fusionarConLedger(data as any, ledger);
+
       const esManual = (sv: any) => String(sv?.source_id || '').toLowerCase() === 'manual';
-      const ficha = (((data.servers as any[]) || []) as ServerOption[]).filter(esManual);
+      const ficha = (((fusionada.servers as any[]) || []) as ServerOption[]).filter(esManual);
       const porCapitulo = new Map<string, ServerOption[]>();
-      for (const t of ((data.seasons as any[]) || [])) {
+      for (const t of ((fusionada.seasons as any[]) || [])) {
         for (const e of (t?.episodes || [])) {
           const suyos = ((e?.servers || []) as ServerOption[]).filter(esManual);
           if (suyos.length) porCapitulo.set(`${t?.season_number}x${e?.episode_number}`, suyos);
@@ -4142,6 +4267,21 @@ export class CatalogService {
     return Array.from(grouped.values()).slice(0, maxResults);
   }
 
+  /**
+   * AQUÍ SE RESTAURA LO PUESTO A MANO, Y ES EL ÚNICO SITIO DONDE HACE FALTA HACERLO.
+   *
+   * Toda fila de la base que se convierte en ficha pasa por aquí —listados, búsqueda, detalle,
+   * enlaces, capítulos: doce llamadas—, así que devolver aquí lo que el libro tiene y la fila ha
+   * perdido cubre el sistema entero sin tocar a ningún escritor. Ver `manualLedger.ts` para el
+   * porqué de que esto no viva en cada `UPDATE`.
+   *
+   * Si la fila estaba bien, esto no hace nada: `fusionarConLedger` devuelve las mismas listas.
+   *
+   * Cuando SÍ faltaba algo se repara también la base, en segundo plano. No es un lujo: los
+   * barridos y las reparaciones leen la fila cruda —no pasan por aquí— y de ahí sale `has_streams`,
+   * así que una ficha cuyo único vídeo es manual se escondería sola hasta que alguien la abriera.
+   * Reparando al leer, la primera lectura la devuelve a su sitio para todos los demás.
+   */
   private static mapDbItemToMediaItem(dbRow: any): MediaItem {
     // El id de la fila ES el slug de la fuente (tioplus/fuegocine): el ÚNICO valor con el que
     // getById puede volver a resolver el detalle y los servidores. Derivarlo del título
@@ -4149,6 +4289,20 @@ export class CatalogService {
     // un id que no existía en ninguna fuente y el detalle respondía 404.
     const sourceId = String(dbRow.id || '').trim();
     const titleSlug = slugify(dbRow.slug || dbRow.title || '');
+
+    /**
+     * OJO: este método se pasa SUELTO (`data.map(this.mapDbItemToMediaItem)`), así que aquí dentro
+     * no hay `this`. Por eso se llama a la clase por su nombre y todo lo demás son funciones de
+     * módulo.
+     */
+    const ledger = leerLedger(dbRow.manual_servers);
+    if (!ledgerVacio(ledger)) {
+      const { servers, seasons, recuperados } = fusionarConLedger(dbRow, ledger);
+      if (recuperados > 0) {
+        dbRow = { ...dbRow, servers, seasons };
+        CatalogService.repararManualesPerdidos(sourceId, servers, seasons, recuperados);
+      }
+    }
 
     return {
       id: sourceId || titleSlug || String(dbRow.tmdb_id || ''),

@@ -56,6 +56,7 @@ import { CatalogService, esServidorManual } from '../src/services/catalogService
 import { fichaReproducible } from '../src/services/streamSorter';
 import { esUrlDeFicheroPermanente } from '../src/scrapers/directStream';
 import { bajarManifiesto, segmentoDescargable } from '../src/services/manifestHealth';
+import { leerLedger, ledgerVacio, fusionarConLedger } from '../src/services/manualLedger';
 
 const db = getSupabaseAdmin();
 const numero = (bandera: string, porDefecto: number) =>
@@ -433,7 +434,7 @@ function permanentesDe(fila: any): Array<{ sv: any; donde: string }> {
  */
 const GOLPES_PARA_RETIRAR = 2;
 
-const cuenta = { miradas: 0, vivas: 0, retiradas: 0, sinVeredicto: 0, fichas: 0, dejanDeAnunciarse: 0, purgados: 0, arranques: 0, noArrancan: 0, primerAviso: 0, arranqueSinVeredicto: 0 };
+const cuenta = { miradas: 0, vivas: 0, retiradas: 0, sinVeredicto: 0, fichas: 0, dejanDeAnunciarse: 0, purgados: 0, arranques: 0, noArrancan: 0, primerAviso: 0, arranqueSinVeredicto: 0, restaurados: 0 };
 /** Los listados se purgan la PRIMERA vez que algo se retira, no una vez por ficha. */
 let listadosPurgados = false;
 
@@ -474,12 +475,40 @@ async function guardarFicha(fila: any): Promise<void> {
   }
 }
 
+/**
+ * Devuelve a la fila las urls de la fuente propia que el libro dice que faltaban.
+ *
+ * Escribe SOLO `servers` y `seasons`, y no toca `has_streams` a propósito: lo restaurado vuelve
+ * sin sello, así que un veredicto calculado aquí diría «no se puede ver» sobre una url que esta
+ * misma corrida está a punto de comprobar. Que lo decida `guardarFicha` cuando haya medido.
+ */
+async function restaurarEnLaFila(fila: any): Promise<void> {
+  if (!apply) return;
+  const update: Record<string, unknown> = { servers: fila.servers || [] };
+  // Un árbol vacío no es «esta serie no tiene capítulos»: es que aquí no se sabe nada de ellos.
+  if (Array.isArray(fila.seasons) && fila.seasons.length) update.seasons = fila.seasons;
+
+  const { error } = await db.from('media_items').update(update).eq('id', fila.id);
+  if (error) { console.warn(`   ⚠ ${fila.id}: ${error.message}`); return; }
+  const claves = CatalogService.cacheKeysFor({ id: fila.id, type: fila.type } as any);
+  await CacheStore.del(...claves).catch(() => {});
+}
+
+/** ¿Está la migración 009? Sin ella no hay libro que consultar y todo sigue como antes. */
+async function tieneLibro(): Promise<boolean> {
+  const { error } = await db.from('media_items').select('manual_servers').limit(1);
+  if (error) console.log('   (sin migración 009: el libro de la fuente propia está apagado)');
+  return !error;
+}
+
 (async () => {
   const fin = Date.now() + minutosTope * 60_000;
   const seAcaba = () => Date.now() > fin - MARGEN_PARA_ESCRIBIR_MS;
   const reparto = deCuantas > 1 ? ` · parte ${parte + 1}/${deCuantas}` : '';
   console.log(`🔍 Repasando urls permanentes${apply ? '' : ' (ENSAYO: no escribe)'} · ${CONC} a la vez${reparto}
 `);
+
+  const hayLibro = await tieneLibro();
 
   type Tarea = { fila: any; sv: any; donde: string };
   const cola: Tarea[] = [];
@@ -496,7 +525,7 @@ async function guardarFicha(fila: any): Promise<void> {
       if (seAcaba()) break;
       const { data, error } = await db
         .from('media_items')
-        .select('id,title,type,servers,seasons,has_streams')
+        .select(`id,title,type,servers,seasons,has_streams${hayLibro ? ',manual_servers' : ''}`)
         // Lo más viejo primero: cada corrida ataca lo que está más cerca de caducar.
         .order('streams_checked_at', { ascending: true, nullsFirst: true })
         .range(desde, desde + PAGINA - 1);
@@ -505,6 +534,27 @@ async function guardarFicha(fila: any): Promise<void> {
 
       for (const fila of data as any[]) {
         if (!meToca(String(fila.id))) continue;
+
+        /**
+         * ANTES DE NADA, QUE LA FILA TENGA LO SUYO. Esta pasada es la red que cubre lo que la API
+         * no ve: la restauración desde el libro vive en la lectura de una ficha, y una ficha que
+         * nadie abre no se lee nunca. Aquí pasan TODAS, cada pocas horas.
+         *
+         * Y llega en el mejor momento posible: lo restaurado vuelve sin sello —a propósito, ver
+         * `manualLedger.ts`— y este es justo el barrido que sella. O sea que una url que alguien
+         * pisó vuelve, se comprueba y se vuelve a anunciar en la misma corrida.
+         */
+        const libro = leerLedger(fila.manual_servers);
+        if (!ledgerVacio(libro)) {
+          const { servers, seasons, recuperados } = fusionarConLedger(fila, libro);
+          if (recuperados > 0) {
+            fila.servers = servers;
+            fila.seasons = seasons;
+            cuenta.restaurados += recuperados;
+            console.log(`   ♻ ${String(fila.title).slice(0, 44)} · ${recuperados} url(es) de la fuente propia restauradas`);
+            await restaurarEnLaFila(fila);
+          }
+        }
 
         // Primero fuera lo que hoy no entraría; luego ya se comprueba lo que quede.
         const quitados = purgarLoQueYaNoVale(fila);
@@ -663,6 +713,7 @@ async function guardarFicha(fila: any): Promise<void> {
     );
   }
   if (cuenta.purgados) console.log(`   ${cuenta.purgados} servidor(es) borrados por venir de un host que ya no se acepta.`);
+  if (cuenta.restaurados) console.log(`   ♻ ${cuenta.restaurados} url(es) de la fuente propia devueltas a su ficha desde el libro.`);
   if (cuenta.dejanDeAnunciarse) console.log(`   ${cuenta.dejanDeAnunciarse} título(s) dejan de anunciarse.`);
   if (!apply) console.log(`\n   (ensayo — con --apply se escribe)`);
 })();

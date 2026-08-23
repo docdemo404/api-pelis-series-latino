@@ -516,6 +516,51 @@ completa y dice cuántos de sus supervivientes no están en la base;
 
 ---
 
+## 6 sexies. La FUENTE PROPIA no es una fuente más (2026-08-23)
+
+Las urls que se pegan por el panel (`source_id: 'manual'`) son el único dato del catálogo que
+**nadie regenera**. Un servidor de TioPlus que se pierde vuelve en la siguiente pasada; una url
+puesta a mano, no — y encima se pierde en silencio, porque nadie comprueba si sigue ahí hasta que
+le da a Reproducir.
+
+Durante meses vivió dentro de `servers` y `seasons`, o sea en la misma celda que lo que sí se
+regenera. Y esas dos columnas **se reemplazan enteras** en cada escritura, así que cada escritor
+tenía que acordarse de rescatarla antes de guardar. Se olvidó cuatro veces, cada una por una puerta
+distinta, y el usuario lo reportó las cuatro con la misma frase: *«los datos de la fuente propia no
+persisten»*.
+
+| Quién se la llevó | Cómo |
+|---|---|
+| `persistStreams` | reemplazaba `servers` con lo que acababa de resolver el rastreo |
+| el crawl (`refreshCatalog`) | reemplazaba la fila entera |
+| `escribirServidoresDelCapitulo` | reemplazaba los servidores del capítulo |
+| `verificarPermanentes` | los **borraba** si su url no tenía forma de fichero permanente (un `.m3u8` no la tiene, y el panel los acepta) |
+
+Los cuatro arreglos eran la misma regla copiada en un sitio más, y eso ya sabemos cómo acaba. Ahora
+hay una **columna aparte, `manual_servers`** (migración 009), que escribe **solo el panel**:
+
+- **Al escribir no hay que acordarse de nada.** Crawl, barridos, reparaciones y un `UPDATE` a mano
+  pueden seguir haciendo lo que hacían.
+- **La garantía está en el LEER**, que es un único sitio: `mapDbItemToMediaItem`. Lo que el libro
+  tiene y la fila ha perdido vuelve a su sitio, y de paso se repara la fila en segundo plano
+  (los barridos leen filas crudas, y de ahí sale `has_streams`).
+- `verificarPermanentes` hace lo mismo en cada vuelta, para las fichas que nadie abre.
+- **Lo restaurado vuelve SIN sello.** Si volviera sellado, esto resucitaría enlaces que se
+  retiraron con prueba. Recuperar la dirección es gratis; volver a anunciarla cuesta una
+  comprobación, como todo aquí.
+
+```bash
+npm run repair:catalog -- --manuales            # ¿está en pie todo lo que se pegó a mano?
+npm run repair:catalog -- --manuales --apply    # respalda las que no tenían libro y restaura lo perdido
+npx ts-node -T scripts/dev/test_manual_ledger.ts   # el banco de pruebas del libro
+```
+
+> Y la regla que se deriva, por si aparece otro dato así: **lo que nadie puede regenerar no comparte
+> celda con lo que se regenera solo.** Si hay que acordarse de rescatarlo al escribir, se perderá —
+> no por descuido, sino porque la regla vive en quien escribe en vez de vivir en el dato.
+
+---
+
 ## 7. Resumen para pegar en la pared
 
 1. El título no identifica nada. El año, la imagen de TMDB, el título original y el dueño de la
@@ -542,7 +587,10 @@ completa y dice cuántos de sus supervivientes no están en la base;
     ocultando: estás borrando. Comprueba a dónde va lo que devuelve la función antes de tocarla.
 17. **Todo lo que esconde catálogo tiene que saber devolverlo.** Un modo de un solo sentido va
     comiéndose el catálogo corrida a corrida y no se nota hasta que es tarde.
-18. **Una pasada en verde no es una pasada que aporte.** Si una fuente lleva días sin traer nada,
+18. **Lo que nadie regenera no comparte celda con lo que se regenera solo.** Una url puesta a mano
+    vive en su propia columna (§6 sexies): si para no perderla hay que acordarse de rescatarla en
+    cada escritura, se perderá.
+19. **Una pasada en verde no es una pasada que aporte.** Si una fuente lleva días sin traer nada,
     mira POR DÓNDE EMPIEZA su recorrido y QUÉ RECUERDA entre corridas: casi siempre está dando
     vueltas a la misma cabecera. Y mide las etiquetas enteras antes de concluir que una fuente «no
     tiene» algo (§6 quinquies).

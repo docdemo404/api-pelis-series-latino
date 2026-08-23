@@ -78,6 +78,7 @@ import { sinVideoDirecto, comprobarEmbed } from '../src/services/playbackHealth'
 import { hasVolatileToken } from '../src/scrapers/directStream';
 import { directEndpointUrl } from '../src/scrapers/directStream';
 import { nombreConTipo, paraElCliente, fichaReproducible, veredictoDisponibilidad } from '../src/services/streamSorter';
+import { extraerManuales, fusionarConLedger, leerLedger, ledgerVacio, todoElLedger, esManual } from '../src/services/manualLedger';
 import { MediaItem, ContentType } from '../src/types';
 
 const db = getSupabaseAdmin();
@@ -3398,6 +3399,117 @@ async function checkDeliveryByHost(apply: boolean): Promise<void> {
   await purgarCacheDeTocadas(apply);
 }
 
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * LA FUENTE PROPIA, DE UN VISTAZO (`--manuales`)
+ *
+ * Tres trabajos en uno, porque las tres preguntas son la misma: **¿sigue en pie lo que pegué?**
+ *
+ *   1. RESPALDA lo que aún no tiene libro. Las urls pegadas antes de la migración 009 viven solo
+ *      dentro de `servers`/`seasons`, o sea sin red: la primera escritura que pase por encima se
+ *      las lleva. Con el libro escrito, ya no.
+ *   2. RESTAURA lo que el libro tiene y la fila ha perdido. Es la misma operación que hace la API
+ *      al leer una ficha, aquí sobre el catálogo entero y sin esperar a que nadie la abra.
+ *   3. INFORMA de en qué estado está cada url: publicada, sin sello (existe pero todavía no se ha
+ *      demostrado que reproduzca) o huérfana (el capítulo al que pertenecía ya no está en el
+ *      árbol). Sin esto, «no se ve mi url» obliga a mirar la base a mano.
+ *
+ * En dry-run no escribe nada: dice lo que haría. Es lo que hay que correr cuando algo de la fuente
+ * propia no aparezca, ANTES de volver a pegar nada.
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ */
+async function auditarFuentePropia(apply: boolean): Promise<void> {
+  console.log(`📌 Repasando la fuente propia${apply ? '' : ' (dry-run)'}...`);
+
+  if (!(await hasColumn('manual_servers'))) {
+    console.log('   ✗ falta la migración 009 (manual_servers). Pégala en el SQL Editor de Supabase:');
+    console.log('     src/db/migrations/009_manual_servers.sql');
+    return;
+  }
+
+  const rows = await fetchAllRows(['servers', 'seasons', 'has_streams', 'manual_servers']);
+
+  let conManuales = 0, respaldadas = 0, restauradas = 0, urlsRestauradas = 0, huerfanas = 0;
+  let publicadas = 0, sinSello = 0;
+
+  for (const row of rows) {
+    const enLaFila = extraerManuales(row);
+    const libro = leerLedger(row.manual_servers);
+    if (ledgerVacio(enLaFila) && ledgerVacio(libro)) continue;
+    conManuales++;
+
+    const titulo = String(row.title || row.id).slice(0, 44);
+
+    // 2. ¿Falta algo de lo que el libro dice que hay?
+    const { servers, seasons, recuperados } = ledgerVacio(libro)
+      ? { servers: row.servers || [], seasons: row.seasons || [], recuperados: 0 }
+      : fusionarConLedger(row, libro);
+
+    if (recuperados > 0) {
+      restauradas++;
+      urlsRestauradas += recuperados;
+      console.log(`   ♻ ${titulo} · ${recuperados} url(es) perdidas ${apply ? 'restauradas' : 'a restaurar'}`);
+      row.servers = servers;
+      row.seasons = seasons;
+      if (apply) {
+        marcarTocada(row);
+        const update: Record<string, unknown> = { servers };
+        if (Array.isArray(seasons) && seasons.length) update.seasons = seasons;
+        const { error } = await db.from('media_items').update(update).eq('id', row.id);
+        if (error) console.warn(`     ⚠ ${row.id}: ${error.message}`);
+      }
+    }
+
+    /**
+     * Y las que el libro guarda para un capítulo que ya no existe en el árbol. No se inventan:
+     * meterlas crearía un capítulo fantasma. Se dicen, que es lo accionable — casi siempre
+     * significa que la serie se renumeró o que el capítulo se pegó con el número equivocado.
+     */
+    for (const c of libro.capitulos) {
+      const existe = ((row.seasons || []) as any[]).some((t: any) =>
+        Number(t?.season_number) === c.season &&
+        ((t?.episodes || []) as any[]).some((e: any) => Number(e?.episode_number) === c.episode)
+      );
+      if (!existe && c.servers.length) {
+        huerfanas += c.servers.length;
+        console.log(`   ⚠ ${titulo} · ${c.servers.length} url(es) guardadas para un T${c.season}E${c.episode} que no está en el árbol`);
+      }
+    }
+
+    // 1. ¿Tiene libro? Si no, se le hace uno con lo que hay ahora en la fila.
+    const alDia = extraerManuales(row);
+    if (ledgerVacio(libro) && !ledgerVacio(alDia)) {
+      respaldadas++;
+      console.log(`   💾 ${titulo} · ${todoElLedger(alDia).length} url(es) ${apply ? 'respaldadas' : 'a respaldar'}`);
+      if (apply) {
+        marcarTocada(row);
+        const { error } = await db.from('media_items').update({ manual_servers: alDia }).eq('id', row.id);
+        if (error) console.warn(`     ⚠ ${row.id}: ${error.message}`);
+      }
+    }
+
+    // 3. En qué estado queda cada url.
+    const deLaFicha = ((row.servers || []) as any[]).filter(esManual);
+    const deCapitulos = ((row.seasons || []) as any[])
+      .flatMap((t: any) => (t?.episodes || []))
+      .flatMap((e: any) => ((e?.servers || []) as any[]).filter(esManual));
+    const todas = [...deLaFicha, ...deCapitulos];
+    const vivas = paraElCliente(todas).length;
+    publicadas += vivas;
+    sinSello += todas.length - vivas;
+  }
+
+  console.log(
+    `\n📌 ${conManuales} ficha(s) con urls propias · ${publicadas} publicándose · ${sinSello} sin sello (esperando al verificador)`
+  );
+  if (respaldadas) console.log(`   💾 ${respaldadas} ficha(s) ${apply ? 'respaldadas' : 'a respaldar'} en el libro`);
+  if (restauradas) console.log(`   ♻ ${urlsRestauradas} url(es) ${apply ? 'devueltas' : 'a devolver'} a ${restauradas} ficha(s)`);
+  if (huerfanas) console.log(`   ⚠ ${huerfanas} url(es) apuntan a un capítulo que ya no existe`);
+  if (!conManuales) console.log('   (no hay ninguna url puesta a mano en el catálogo)');
+  console.log(apply ? '   ✅ aplicado' : '   (dry-run: repite con --apply)');
+  await purgarCacheDeTocadas(apply);
+}
+
 async function main() {
   const apply = process.argv.includes('--apply');
   // Elimina las filas duplicadas cuya versión correcta ya existe en el catálogo.
@@ -3501,6 +3613,11 @@ async function main() {
 
   if (process.argv.includes('--episodios-prestados')) {
     await purgeBorrowedEpisodeServers(apply);
+    return;
+  }
+
+  if (process.argv.includes('--manuales')) {
+    await auditarFuentePropia(apply);
     return;
   }
 
