@@ -193,6 +193,42 @@ npm run rotular:capitulos -- --dry                # ¿queda algún capítulo rot
 
 ---
 
+## 4 ter. Un `tmdb_id` sintético no choca con nada (2026-08-24)
+
+`mergeIntoExisting` impide que la misma obra entre dos veces… **cuando las dos tienen ficha de
+TMDB**: se entera por el UNIQUE `(tmdb_id, type)`. Una ficha que se queda sin identidad recibe un
+`tmdb_id` sintético negativo, y un sintético no choca con nadie: la fila se escribe como si fuera
+una obra nueva.
+
+Pasó con «Stranger Things» y «La casa del dragón». Las dos estaban ya fundidas en su ficha de
+moviedays —`md-66732` y `md-94997` listaban la página de FuegoCine entre sus fuentes— y aun así
+una corrida en la que la identificación por fotograma no salió adelante volvió a crearlas como
+`fc-stranger-things` y `fc-la-casa-del-drag-n`. No se anuncian (sin `tmdb_id` positivo no hay
+ficha, ver `veredictoDisponibilidad`), así que el catálogo cargaba con dos fichas escondidas y sus
+enlaces dentro sin que se notara desde la app.
+
+**La llave es la PÁGINA, nunca el título.** Antes de escribir una ficha sin identidad, el crawl
+mira si alguna de sus urls ya figura en `source_urls` de otra ficha (`duenosDeLasPaginas`): si es
+su fuente, es su obra, y lo que trae se vuelca en la que ya está con el mismo `volcarFilaEn` que
+usa el choque de `tmdb_id`. Se miran TODAS sus páginas y no solo la de la ficha: una serie de
+FuegoCine toma como página propia la del último capítulo publicado, que cambia cada estreno.
+
+Medido sobre las 126 series que publica FuegoCine hoy: la guarda devuelve **7** a su ficha.
+
+```bash
+npx tsx scripts/dev/diag_guarda_pagina_duena.ts   # ¿a cuántas reconocería la guarda?
+npm run repair:catalog -- --fuse                  # duplicados sintéticos que ya están guardados
+npm run repair:catalog -- --fuse --apply          # …fundidos y borrados
+```
+
+> **Y si funde borrando, que vuelque TODO.** `--fuse` volcaba la página de origen y los alias, y
+> acto seguido borraba la fila — con sus capítulos dentro. «La casa del dragón» de FuegoCine tenía
+> 14 enlaces de capítulo. Ahora llama a `fuseRowInto`, que es la que ya sabía volcar capítulos
+> (`fusionarTemporadas`), servidores y `has_streams`. La lección se repite: **el volcado completo
+> se escribió una vez y este modo se había quedado con la versión de antes.** Llama, no copies.
+
+---
+
 ## 5. Los SERVIDORES de tu fuente: extraer el vídeo y no ofrecer lo que está muerto
 
 Todo lo anterior va de que la ficha sea la correcta. Esto va de que lo que hay dentro **reproduzca**.

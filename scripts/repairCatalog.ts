@@ -545,47 +545,37 @@ async function fuseSyntheticDuplicates(apply: boolean, limitArg?: number): Promi
         continue;
       }
 
-      // b) DUPLICADO confirmado. Lo único que esta copia aporta es su página de origen
-      //    (sus servidores) y su nombre regional: ambos se vuelcan en la ficha canónica
-      //    ANTES de borrarla, o se perderían.
-      const currentUrls: string[] = twin.source_urls || [];
-      const mergedUrls = Array.from(
-        new Set([...currentUrls, twin.source_url, row.source_url].filter(Boolean) as string[])
-      );
-      const currentAliases: string[] = twin.aliases || [];
-      const mergedAliases = Array.from(
-        new Set([...currentAliases, ...(row.aliases || []), row.title].filter(Boolean) as string[])
-      );
-
-      const patch: Record<string, unknown> = {};
-      if (mergedUrls.length > currentUrls.length) patch.source_urls = mergedUrls;
-      if (mergedAliases.length > currentAliases.length) {
-        patch.aliases = mergedAliases;
-        patch.title_normalized = searchIndexKey(twin.title, twin.original_title, mergedAliases);
-      }
+      /**
+       * b) DUPLICADO CONFIRMADO. Lo funde `fuseRowInto`, no una copia de su código.
+       *
+       * Aquí se volcaban a mano solo la página de origen y los alias, y acto seguido la fila se
+       * BORRABA. O sea que un duplicado con capítulos resueltos se llevaba sus enlaces a la
+       * basura: «La casa del dragón» de FuegoCine tenía 14 enlaces de capítulo, y esta pasada
+       * los habría borrado sin decir nada. `fuseRowInto` —la que usan `--verify` y `--dedupe`—
+       * ya vuelca ADEMÁS los capítulos (con `fusionarTemporadas`, que no reemplaza nunca), los
+       * servidores de ficha y `has_streams`, y trae de propina la reja del año.
+       *
+       * Es la clase de fallo que se evita llamando en vez de copiando: el volcado completo se
+       * escribió una vez, y este modo se había quedado con la versión de antes.
+       */
+      const resultado = await fuseRowInto(row, twin, [...(row.aliases || []), row.title], {
+        apply,
+        withMultiSource,
+        sourceYear: String(rowYear || ''),
+      });
 
       console.log(
-        `   ⇄ ${row.id}\n     "${row.title}" se funde en ${twin.id} = "${twin.title}" (tmdb ${match.id})` +
-        `\n       fuentes: ${currentUrls.length} → ${mergedUrls.length} · alias: ${currentAliases.length} → ${mergedAliases.length}`
+        `   ⇄ ${row.id}` +
+        `\n     "${row.title}" se funde en ${twin.id} = "${twin.title}" (tmdb ${match.id})` +
+        `\n       fuentes: ${resultado.urls[0]} → ${resultado.urls[1]}` +
+        ` · alias: ${resultado.aliases[0]} → ${resultado.aliases[1]}` +
+        `\n       capítulos con vídeo: ${resultado.capitulos[0]} → ${resultado.capitulos[1]}` +
+        (resultado.rechazada ? `\n       RECHAZADA: ${resultado.rechazada}` : '')
       );
 
-      if (apply) {
-        if (Object.keys(patch).length > 0) {
-          marcarTocada(twin);
-          const { error } = await db.from('media_items').update(patch).eq('id', twin.id);
-          if (error) {
-            console.warn(`     ⚠ no se pudo enriquecer la ficha canónica: ${error.message} (no se borra el duplicado)`);
-            skipped++;
-            continue;
-          }
-        }
-        marcarTocada(row);
-        const { error: delError } = await db.from('media_items').delete().eq('id', row.id);
-        if (delError) {
-          console.warn(`     ⚠ no se pudo borrar el duplicado: ${delError.message}`);
-          skipped++;
-          continue;
-        }
+      if (!resultado.ok) {
+        skipped++;
+        continue;
       }
       fused++;
     }

@@ -165,11 +165,10 @@ async function mergeIntoExisting(
   const tmdbId = row.tmdb_id as number;
   if (!tmdbId) return false;
 
-  const columns =
-    'id,title,original_title,aliases,release_date,poster,backdrop,logo,overview,runtime,director,source_url,trailer' +
-    // Lo que la ficha absorbida APORTA de verdad: sus capítulos y sus enlaces (ver el final).
-    ',seasons,servers,has_streams' +
-    (opts.withMultiSource ? ',source_urls' : '');
+  // Incluye `seasons` y `servers`: es lo que la ficha absorbida APORTA de verdad (ver `volcarFilaEn`).
+  const columns = opts.withMultiSource
+    ? COLUMNAS_DE_LA_QUE_RECIBE
+    : COLUMNAS_DE_LA_QUE_RECIBE.replace(',source_urls', '');
 
   // El tipo forma parte de la identidad de la ficha: TMDB numera películas y series por
   // separado y el mismo número designa títulos distintos (movie 108291 "Road Dogz" frente a
@@ -185,6 +184,28 @@ async function mergeIntoExisting(
   const existing: any = data && data[0];
   if (!existing) return false;
 
+  return volcarFilaEn(existing, row, opts);
+}
+
+/** Las columnas de la ficha que RECIBE. Se leen juntas porque `volcarFilaEn` las mira todas. */
+const COLUMNAS_DE_LA_QUE_RECIBE =
+  'id,tmdb_id,type,title,original_title,aliases,release_date,poster,backdrop,logo,overview,' +
+  'runtime,director,source_url,trailer,seasons,servers,has_streams,source_urls';
+
+/**
+ * VUELCA UNA FILA ENTRANTE DENTRO DE LA FICHA QUE YA EXISTE.
+ *
+ * Es el cuerpo que `mergeIntoExisting` tenía dentro, sacado aparte porque hay DOS formas de
+ * descubrir que la entrante es la misma obra —el choque de `tmdb_id` y el de la PÁGINA, ver
+ * `duenosDeLasPaginas`— y las dos tienen que volcar exactamente lo mismo. Copiarlo habría sido
+ * el camino más corto a que una de las dos se olvidara de los capítulos, que es el campo que en
+ * este proyecto ya ha desaparecido tres veces.
+ */
+async function volcarFilaEn(
+  existing: any,
+  row: Record<string, unknown>,
+  opts: { withNormalized: boolean; withMultiSource: boolean }
+): Promise<boolean> {
   // SEGUNDA LLAVE ANTES DE FUNDIR: que las dos se estrenaran a la vez.
   //
   // El tmdb_id no lo pone la fuente, lo DEDUCE el matcher, y cuando se equivoca esta función
@@ -202,7 +223,7 @@ async function mergeIntoExisting(
   if (incomingYear && existingYear && Math.abs(incomingYear - existingYear) > 1) {
     console.warn(
       `   ⚠ no se funde "${row.title}" (${incomingYear}) en "${existing.title}" (${existingYear}):` +
-      ` comparten tmdb ${tmdbId} pero no son de la misma época`
+      ` se habían tomado por la misma obra pero no son de la misma época`
     );
     return false;
   }
@@ -300,6 +321,48 @@ async function mergeIntoExisting(
 
   const { error } = await db.from('media_items').update(patch).eq('id', existing.id);
   return !error;
+}
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * ¿ESTA PÁGINA YA ES LA FUENTE DE UNA FICHA DEL CATÁLOGO?
+ *
+ * Una ficha que se queda SIN identidad en TMDB entra con un `tmdb_id` sintético, y un sintético
+ * no choca con nada: `mergeIntoExisting` nunca se entera y la fila se escribe como una obra
+ * nueva. Si la obra ya estaba —traída por otra fuente— el catálogo acaba con DOS fichas de lo
+ * mismo, la buena y una escondida (sin `tmdb_id` positivo no se anuncia) con sus enlaces dentro.
+ *
+ * Pasó con «Stranger Things» y «La casa del dragón» el 2026-08-24: las dos estaban ya fundidas
+ * en su ficha de moviedays —`md-66732` y `md-94997` listaban la página de FuegoCine entre sus
+ * fuentes— y aun así una corrida en la que la identificación por fotograma no salió adelante
+ * (basta que FuegoCine tarde o que TMDB corte) volvió a crearlas como `fc-stranger-things` y
+ * `fc-la-casa-del-drag-n`.
+ *
+ * La página es la llave. No es el título —eso está prohibido en esta casa (`FUENTES.md` §3)— es
+ * que ESA MISMA URL ya figura en `source_urls` de una ficha: si es su fuente, es su obra. Cuesta
+ * una consulta por cada 40 fallbacks y se paga solo en el camino en que ya se ha renunciado a
+ * TMDB.
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ */
+async function duenosDeLasPaginas(paginas: string[]): Promise<Map<string, any>> {
+  const duenos = new Map<string, any>();
+  const limpias = Array.from(new Set(paginas.filter(Boolean)));
+  if (!limpias.length) return duenos;
+
+  const TANDA = 40;
+  for (let i = 0; i < limpias.length; i += TANDA) {
+    const lote = limpias.slice(i, i + TANDA);
+    const { data, error } = await db
+      .from('media_items')
+      .select(COLUMNAS_DE_LA_QUE_RECIBE)
+      .overlaps('source_urls', lote);
+    // Sin la columna `source_urls` (migración 005) no hay nada que preguntar: se sigue como antes.
+    if (error) return duenos;
+    for (const fila of (data as any[]) || []) {
+      for (const u of (fila.source_urls || [])) if (lote.includes(u)) duenos.set(u, fila);
+    }
+  }
+  return duenos;
 }
 
 /**
@@ -1862,6 +1925,35 @@ async function main() {
   const byFallback = new Map<string, MediaItem>();
   let droppedDupes = 0;
   let sinIdentidad = 0;
+
+  /**
+   * Antes de escribir una sola ficha sin identidad, se mira si su página ya es de otra. Va aquí y
+   * no dentro del bucle para preguntarlo de 40 en 40 en vez de una vez por título.
+   */
+  const paginaDe = (it: MediaItem) => String((it as any)._tioplus_url || it._source_url || '');
+  /**
+   * TODAS sus páginas, no solo la de la ficha. Una serie de FuegoCine toma como página propia la
+   * del capítulo que el feed devuelve primero —el último publicado—, así que ESA cambia en cuanto
+   * la serie estrena un capítulo, y con ella cambiaría la única url por la que se la reconoce.
+   * Sus 40 páginas de capítulo, en cambio, no se mueven: basta con que UNA figure como fuente de
+   * una ficha para saber que la obra ya está.
+   */
+  const PAGINAS_POR_FALLBACK = 40;
+  const paginasDe = (it: MediaItem) => [
+    paginaDe(it),
+    ...RealScraperService.paginasDeCapitulos((it as any).seasons, null).slice(0, PAGINAS_POR_FALLBACK),
+  ].filter(Boolean);
+
+  const duenos = await duenosDeLasPaginas(fallbacks.flatMap(paginasDe)).catch(() => new Map<string, any>());
+  const banderasDeFusion = {
+    withNormalized: await hasColumn('title_normalized'),
+    withMultiSource: await hasColumn('source_urls'),
+  };
+  // `source_url` va aparte: `volcarFilaEn` lo lee de la fila entrante, y si la columna no existe
+  // el parche que lo llevara dentro haría fallar el update entero.
+  const conPaginaDeOrigen = await hasColumn('source_url');
+  let devueltasASuFicha = 0;
+
   for (const item of fallbacks) {
     /**
      * ══════════════════════════════════════════════════════════════════════════════════════
@@ -1890,6 +1982,32 @@ async function main() {
       sinIdentidad++;
       continue;
     }
+    /**
+     * SU PÁGINA YA ES LA FUENTE DE OTRA FICHA: es la misma obra y NO se crea una segunda fila.
+     * Lo que trae —sus capítulos, sus enlaces y sus alias— se vuelca en la que ya está, con el
+     * mismo `volcarFilaEn` que usa el choque de `tmdb_id`; descartarla a secas tiraría los
+     * enlaces que esta corrida acaba de comprobar.
+     */
+    const dueno = paginasDe(item).map(u => duenos.get(u)).find(Boolean);
+    if (dueno) {
+      const fila = toRow(
+        item,
+        banderasDeFusion.withNormalized,
+        false,
+        conPaginaDeOrigen,
+        banderasDeFusion.withMultiSource
+      );
+      const volcada = await volcarFilaEn(dueno, fila, banderasDeFusion).catch(() => false);
+      if (volcada) {
+        devueltasASuFicha++;
+        continue;
+      }
+      // Si el volcado falla NO se escribe una segunda ficha de la misma obra: se descarta, que
+      // es lo que hacía el catálogo antes de que existiera la fusión.
+      droppedDupes++;
+      continue;
+    }
+
     const k = key(item);
     if (!canonicalTitle(item.title)) continue;
     if (covered.has(k)) {
@@ -1913,7 +2031,8 @@ async function main() {
     `duplicados descartados: ${droppedDupes} | sin póster: ${withoutPoster} | ` +
     `páginas absorbidas de otra fuente: ${absorbidas}` +
     (noFundidasPorAno ? ` | no fundidas por el año: ${noFundidasPorAno}` : '') +
-    (sinIdentidad ? ` | archive.org sin identidad en TMDB (fuera): ${sinIdentidad}` : '')
+    (sinIdentidad ? ` | archive.org sin identidad en TMDB (fuera): ${sinIdentidad}` : '') +
+    (devueltasASuFicha ? ` | devueltas a la ficha dueña de su página: ${devueltasASuFicha}` : '')
   );
   console.log(`   Cobertura de metadata: ${all.length}/${all.length} (100%) — ${(byTmdb.size / (all.length || 1) * 100).toFixed(1)}% desde TMDB`);
 
