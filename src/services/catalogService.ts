@@ -2,7 +2,7 @@ import { MediaItem, ServerOption, ContentType } from '../types';
 import { supabase, getSupabaseAdmin } from './supabaseService';
 import { RealScraperService } from './realScraperService';
 import { TmdbService } from './tmdbService';
-import { sortServersBySourcePriority, getPrimaryStream, paraElCliente, fichaReproducible, veredictoDisponibilidad, VERIFICADO_VIGENTE_MS, soloDeEstaObra } from './streamSorter';
+import { sortServersBySourcePriority, getPrimaryStream, paraElCliente, descartesDelCliente, fichaReproducible, veredictoDisponibilidad, VERIFICADO_VIGENTE_MS, soloDeEstaObra } from './streamSorter';
 import { hostNormalizado } from './hostsConCache';
 import { ficheroDentroDeNuestraCache } from '../utils/externalProxy';
 import { normalizeTitle, slugify, yearFromSlug, searchIndexKey } from '../utils/text';
@@ -34,6 +34,13 @@ import {
  * (`aplicarVeredictosRecordados`). Caché largo con veredicto fresco encima.
  */
 const CACHE_TTL_SECONDS = 60 * 60;
+/**
+ * Lo que vive una respuesta a la que le faltan servidores por sello caducado.
+ *
+ * Un minuto: lo justo para que una ráfaga de peticiones no vuelva a resolver el capítulo entera,
+ * sin llegar a sobrevivir a la vuelta del barrido que va a devolver lo que falta.
+ */
+const CACHE_TTL_SIN_SELLO_SECONDS = 60;
 
 // La METADATA (sinopsis, pósters, reparto…) apenas cambia: se cachea mucho más tiempo que
 // los enlaces, que sí caducan. Es lo que permite que la ficha emergente abra al instante.
@@ -3302,6 +3309,11 @@ export class CatalogService {
         servers: vivos,
         primary_stream: vivos.length > 0 ? getPrimaryStream(vivos) : undefined,
         streams: {
+          // Se rehacen los dos que cambian y se CONSERVAN los demás: reconstruir el bloque entero
+          // aquí borraba `sin_video_directo` y `sin_sello_vigente`, así que la misma respuesta
+          // tenía una forma distinta según viniera del caché o del origen — y justo esos dos son
+          // los que dicen por qué la lista viene corta.
+          ...(cacheado.streams || {}),
           status: vivos.length > 0 ? 'ready' : 'unavailable',
           descartados_por_no_reproducir:
             (cacheado.streams?.descartados_por_no_reproducir || 0) + ((cacheado.servers || []).length - vivos.length)
@@ -3472,8 +3484,11 @@ export class CatalogService {
     // Y de los vivos, solo lo que la app puede reproducir: vídeo directo. Un capítulo cuyos
     // servidores son todos embed no está `pending` —no es que falte buscarlo—, está
     // `unavailable`: se encontró y no hay nada que este cliente pueda abrir.
-    const servers = paraElCliente(vivos);
-    const sinVideoDirecto = vivos.length - servers.length;
+    //
+    // Se piden los dos motivos por separado —y no la resta— porque uno de ellos decide cuánto
+    // puede vivir esta respuesta en el caché. Ver `descartesDelCliente` y el `CacheStore.set` de
+    // más abajo.
+    const { publicables: servers, sinSelloVigente, sinVideoDirecto } = descartesDelCliente(vivos);
 
     const resultado = {
       id: `${serie.tmdb_id || serie.id}-${season}-${episode}`,
@@ -3497,14 +3512,40 @@ export class CatalogService {
       streams: {
         status: servers.length > 0 ? 'ready' : (todos.length > 0 ? 'unavailable' : 'pending'),
         descartados_por_no_reproducir: descartados,
-        sin_video_directo: sinVideoDirecto
+        sin_video_directo: sinVideoDirecto,
+        /**
+         * Retirados por sello caducado, aparte de los anteriores.
+         *
+         * Iban sumados en `sin_video_directo`, y eso mandaba el diagnóstico al sitio equivocado: se
+         * lee «no trae vídeo» sobre un fichero que se descarga sin problema. Son dos cosas
+         * distintas y una de ellas se arregla sola.
+         */
+        sin_sello_vigente: sinSelloVigente
       }
     };
 
     // Solo se cachea lo que aporta algo. Un `pending` —no se encontró la página— se deja sin
     // cachear para que el siguiente intento vuelva a probar.
     if (todos.length > 0) {
-      await CacheStore.set(cacheKey, resultado, CACHE_TTL_SECONDS);
+      /**
+       * UNA RESPUESTA ENCOGIDA POR EL RELOJ NO SE GUARDA UNA HORA.
+       *
+       * Aquí se congelaba durante `CACHE_TTL_SECONDS` cualquier respuesta, incluida la que dejó
+       * fuera servidores por tener el sello caducado. Y ese recorte deja de ser verdad en cuanto
+       * `verificarPermanentes` da su siguiente vuelta —minutos—, así que el caché seguía sirviendo
+       * una lista corta mucho después de que el origen ya tuviera la larga.
+       *
+       * Medido en el 1x01 de «Breaking Bad» el 2026-08-24: a las 06:19 la respuesta se calculó sin
+       * la url puesta a mano porque su sello no estaba vigente, el barrido la selló a las 06:39, y
+       * a las 07:08 la API seguía contestando sin ella. Desde fuera es exactamente el fallo que se
+       * reportó —«el panel dice otra cosa»— y no había nada roto en la prioridad: la respuesta
+       * buena existía y no llegaba.
+       *
+       * No se toca el filtro: sin sello no se publica, que es la regla de la casa. Lo que se
+       * acorta es cuánto se recuerda un «no» que el barrido va a desmentir enseguida.
+       */
+      const ttl = sinSelloVigente > 0 ? CACHE_TTL_SIN_SELLO_SECONDS : CACHE_TTL_SECONDS;
+      await CacheStore.set(cacheKey, resultado, ttl);
       /**
        * Y se GUARDA. Solo cuando se ha resuelto de verdad: si esto salió de lo ya guardado,
        * reescribirlo renovaría el sello sin haber comprobado nada, y el sello es justo lo que

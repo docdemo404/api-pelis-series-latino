@@ -701,6 +701,52 @@ export function paraElCliente<T extends ServerOption>(servers: T[] | undefined |
 }
 
 /**
+ * LO MISMO QUE `paraElCliente`, PERO DICIENDO POR QUÉ SE QUEDÓ FUERA CADA UNO.
+ *
+ * `paraElCliente` recorta por dos motivos que no se parecen en nada, y quien lo llama solo veía la
+ * resta. El detalle del episodio publicaba esa resta entera como `sin_video_directo`, así que un
+ * servidor retirado por tener el sello caducado se anunciaba como «no trae vídeo directo». Se vio
+ * en el 1x01 de «Breaking Bad»: la respuesta decía `sin_video_directo: 1` y el que faltaba era la
+ * url puesta a mano, un `.m3u8` de gumlet que se descarga perfectamente. Lo único que le pasaba es
+ * que el barrido aún no había vuelto a sellarlo.
+ *
+ * Y la diferencia importa porque los dos motivos CADUCAN de forma distinta:
+ *
+ *   · SIN SELLO VIGENTE — es una afirmación sobre el reloj, no sobre el contenido. Deja de ser
+ *     verdad en cuanto `verificarPermanentes` dé su siguiente vuelta, que son minutos.
+ *   · SIN VÍDEO DIRECTO — es una afirmación sobre el servidor: es un embed y no hay nada que este
+ *     cliente pueda abrir. No cambia hasta que alguien lo vuelva a extraer.
+ *
+ * Quien cachea una respuesta necesita saber cuál de los dos la está encogiendo: guardar una hora un
+ * recorte del primer tipo congela una respuesta que ya es falsa. Ver `getEpisode`.
+ *
+ * No hay un segundo criterio: el reparto se calcula CONTRA `paraElCliente`, así que no puede
+ * desincronizarse de él.
+ */
+export interface DescartesDelCliente<T> {
+  /** Lo que sí se entrega. Idéntico a `paraElCliente(servers)`. */
+  publicables: T[];
+  /** Tienen vídeo directo y no están muertos: les caducó la prueba. Vuelven solos. */
+  sinSelloVigente: number;
+  /** Solo traen embed. No vuelven sin reextraer. */
+  sinVideoDirecto: number;
+}
+
+export function descartesDelCliente<T extends ServerOption>(
+  servers: T[] | undefined | null
+): DescartesDelCliente<T> {
+  const vivos = (servers || []).filter(s => s && s.status !== 'offline');
+  const conVideo = vivos.filter(s => Boolean(s?.direct_stream));
+  const publicables = paraElCliente(servers);
+  return {
+    publicables,
+    // Los que traen vídeo y no salen: solo pueden haber caído por el sello.
+    sinSelloVigente: conVideo.length - publicables.length,
+    sinVideoDirecto: vivos.length - conVideo.length,
+  };
+}
+
+/**
  * ¿Esta ficha tiene algo que el cliente pueda reproducir?
  *
  * ÚNICA FUENTE DE VERDAD DE `has_streams`. No es una comodidad: es la respuesta a que ese valor se
