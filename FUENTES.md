@@ -143,11 +143,11 @@ Están todas comentadas en el código, pero conviene conocerlas antes de escribi
 
 ---
 
-## 4 bis. Los CUATRO caminos por los que una ficha acaba con metadata ajena
+## 4 bis. Los CINCO caminos por los que una ficha acaba con metadata ajena
 
 Durante mucho tiempo aquí solo estaba tapado UNO: fusionar dos fichas porque sus títulos
 coinciden. Esa puerta sigue cerrada y la auditoría la vigila. Pero el usuario no compra "no
-fusionar", compra que la ficha sea la correcta — y a eso se llega por más caminos. Estos cuatro
+fusionar", compra que la ficha sea la correcta — y a eso se llega por más caminos. Estos cinco
 salieron de casos reportados, uno a uno, después de haber dado el problema por resuelto:
 
 | Camino | Qué pasó | Qué lo tapa ahora |
@@ -155,9 +155,10 @@ salieron de casos reportados, uno a uno, después de haber dado el problema por 
 | **El año tapa un desmentido** | La página decía `data-original-title="Bunker"` y `data-year="2025"`. El candidato de TMDB se llamaba "Sin salida" y era de 2024. Un año de diferencia bastaba para marcar `verified`, y con eso se adoptó el póster, la sinopsis y el título de **otra película**. El vídeo era el correcto: lo que estaba mal era la ficha entera. | El año ya **no puede** respaldar cuando la fuente publica un original que no se parece a ninguno de los nombres del candidato (`originalContradice`). |
 | **El hash se tira por el nombre del host** | `tmdbImagePath` solo reconocía `image.tmdb.org`, y FuegoCine enlaza desde `www.themoviedb.org` — misma ruta `/t/p/<tamaño>/<hash>`, otro servidor. La prueba de identidad más fuerte que existe se descartaba por eso. | Se aceptan los dos hosts. |
 | **La imagen se busca en un solo sitio** | Se leía solo de `ul.post-details[data-backdrop]`. Las páginas de EPISODIO no tienen esa lista: su imagen vive en `link[rel=image_src]` y en un `div[data-backdrop]` suelto. Y como esas páginas son el origen de las series agrupadas, "Invencible" se quedó sin año, sin sinopsis y con un tmdb_id sintético. | Se busca en cuatro sitios, y si el hash es el **fotograma del episodio** (`4x8`) también confirma: una petición, solo cuando no hay nada más. |
+| **Los CAPÍTULOS no pasaban por TMDB** | La ficha sí y sus capítulos no. `enrichMediaItem` solo le pedía las temporadas a TMDB cuando el ítem llegaba **sin ninguna**, y una serie de FuegoCine llega siempre con las suyas —se arma agrupando los posts de sus capítulos—, así que su árbol entraba tal cual: «INVENCIBLE 1x1» por título, «Ver INVENCIBLE 1x1 en FuegoCine con audio Latino» por sinopsis y sin fotograma. Eran **1.318 capítulos en 80 series**, todas ellas con `tmdb_id` correcto y `metadata_source='tmdb'`. | `rotularEpisodiosConTmdb`: el nombre, la sinopsis, el fotograma y la fecha los pone TMDB; la fuente pone los enlaces y su `_fuegocine_url`. Corre dentro de `enrichMediaItem`, y `npm run rotular:capitulos` pone al día lo ya guardado. |
 | **TMDB sin texto en español** | "Max Is Missing" tenía póster, título y tmdb_id de TMDB y de sinopsis "Ver Max ha desaparecido online gratis en HD con audio Latino". TMDB la tiene vacía en es-MX y es-ES, y ahí se rendía el código. La ficha **parecía completa**. Eran 174. | Se buscan las traducciones (español primero, luego inglés) sin peticiones extra, y `--sinopsis` recupera las viejas. |
 
-**La lección que hay detrás de las cuatro**: cada una era un dato que estaba EN LA PÁGINA o EN
+**La lección que hay detrás de las cinco**: cada una era un dato que estaba EN LA PÁGINA o EN
 TMDB y que no se llegaba a mirar. Ninguna fue un fallo de lógica de emparejamiento — fue no ir a
 buscar lo que ya estaba ahí. Cuando dudes entre "el matcher se equivocó" y "no le dimos lo que
 necesitaba", mira primero lo segundo.
@@ -169,7 +170,15 @@ npm run check:catalog -- --fallar-si-hay-cruces   # PASO 3, 4 y 5; sale en rojo 
 npx ts-node --transpile-only scripts/dev/probe_original_contradice.ts   # ¿alguien contradice a su fuente?
 npm run repair:catalog -- --verify --apply        # re-lee la página de cada ficha y re-resuelve
 npm run repair:catalog -- --sinopsis --apply      # rellena lo que TMDB sí tiene
+npm run rotular:capitulos -- --dry                # ¿queda algún capítulo rotulado por la web?
 ```
+
+> **Y una regla que se deriva de la quinta: NINGUNA fuente escribe una sinopsis.** Los scrapers
+> rellenaban el hueco con una plantilla de SEO —«Ver X online gratis en HD con audio Latino»— y eso
+> no es metadata incompleta, es publicidad, y se comporta peor que el vacío: `enrichMediaItem` solo
+> pone la sinopsis de TMDB *si no había ninguna* y `isMetadataComplete` da la ficha por buena en
+> cuanto el campo pasa de 20 caracteres, así que la plantilla se quedaba puesta para siempre y la
+> ficha no volvía a preguntar. Si TMDB no tiene texto, el campo va **vacío**.
 
 > **PASO 5 no usa umbrales, y es lo que lo hace utilizable a diario.** Busca fichas a las que les
 > falta algo, le PREGUNTA a TMDB si él lo tiene, y solo cuenta las que sí. Una película cuya

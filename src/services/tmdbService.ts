@@ -6,6 +6,13 @@ import { USER_AGENT } from '../utils/httpClient';
 import { canonicalTitle, normalizeTitle, dedupeTitles, yearFromSlug } from '../utils/text';
 
 const API_KEY = '99b8bc99e85e79fabd52b64513c9780d';
+
+/**
+ * La plantilla de SEO con la que las webs rellenan la sinopsis («Ver X online gratis en FuegoCine
+ * con audio Latino»). No es metadata: es publicidad de la fuente, y publicada ocupa el sitio de la
+ * sinopsis de verdad — ver `rotuladoPorLaWeb` y `rotularEpisodiosConTmdb`.
+ */
+const PUBLICIDAD_DE_LA_WEB = /fuegocine|online gratis|tioplus|cinecalidad/i;
 const UA = USER_AGENT;
 
 // Regiones hispanohablantes: de aquí salen los títulos ALTERNATIVOS que de verdad busca la
@@ -1117,43 +1124,160 @@ export class TmdbService {
   }
 
   /**
-   * Obtiene la estructura completa de temporadas y episodios desde la API oficial de TMDB
+   * Las temporadas que pide TMDB, EN CRUDO y solo las que se le piden.
+   *
+   * Se pide por número de temporada y no «de la 1 a la N» porque quien ya tiene un árbol de
+   * capítulos (FuegoCine publica dos o tres temporadas de una serie que tiene ocho) solo necesita
+   * rotular las suyas, y cada temporada de más es una petición de más en un crawl que ya se
+   * cancela por ráfagas de conexiones.
    */
-  static async getTmdbSeasons(tmdbId: number, numSeasons: number, posterUrl: string | null, defaultServers: any[] = []): Promise<any[]> {
-    const seasonNumbers = Array.from({ length: Math.min(numSeasons, 15) }, (_, i) => i + 1);
-
-    const seasonPromises = seasonNumbers.map(sNum =>
+  private static async temporadasCrudas(tmdbId: number, numeros: number[]): Promise<Map<number, any>> {
+    const pedidos = Array.from(new Set(numeros.filter(n => Number.isFinite(n) && n >= 0))).slice(0, 15);
+    const results = await Promise.all(pedidos.map(sNum =>
       axios.get(`https://api.themoviedb.org/3/tv/${tmdbId}/season/${sNum}`, {
         params: { api_key: API_KEY, language: 'es-MX' },
         timeout: 2500
       }).catch(() => null)
-    );
+    ));
 
-    const results = await Promise.all(seasonPromises);
-    const seasons: any[] = [];
-
-    results.forEach((res, index) => {
-      const sNum = seasonNumbers[index];
-      if (res && res.data && res.data.episodes) {
-        const eps = res.data.episodes;
-        seasons.push({
-          season_number: sNum,
-          name: res.data.name || `Temporada ${sNum}`,
-          episodes_count: eps.length,
-          poster: res.data.poster_path ? `https://image.tmdb.org/t/p/w500${res.data.poster_path}` : (posterUrl || null),
-          episodes: eps.map((e: any) => ({
-            episode_number: e.episode_number,
-            name: e.name || `Episodio ${e.episode_number}`,
-            overview: e.overview || `Episodio ${e.episode_number} de la serie. Disponible en HD con audio Español Latino.`,
-            still_path: e.still_path ? `https://image.tmdb.org/t/p/w500${e.still_path}` : (posterUrl || null),
-            air_date: e.air_date || '',
-            servers: defaultServers || []
-          }))
-        });
-      }
+    const porNumero = new Map<number, any>();
+    results.forEach((res, i) => {
+      if (res?.data?.episodes) porNumero.set(pedidos[i], res.data);
     });
+    return porNumero;
+  }
+
+  /**
+   * Obtiene la estructura completa de temporadas y episodios desde la API oficial de TMDB
+   */
+  static async getTmdbSeasons(tmdbId: number, numSeasons: number, posterUrl: string | null, defaultServers: any[] = []): Promise<any[]> {
+    const seasonNumbers = Array.from({ length: Math.min(numSeasons, 15) }, (_, i) => i + 1);
+    const crudas = await this.temporadasCrudas(tmdbId, seasonNumbers);
+
+    const seasons: any[] = [];
+    for (const sNum of seasonNumbers) {
+      const data = crudas.get(sNum);
+      if (!data) continue;
+      const eps = data.episodes;
+      seasons.push({
+        season_number: sNum,
+        name: data.name || `Temporada ${sNum}`,
+        episodes_count: eps.length,
+        poster: data.poster_path ? `https://image.tmdb.org/t/p/w500${data.poster_path}` : (posterUrl || null),
+        episodes: eps.map((e: any) => ({
+          episode_number: e.episode_number,
+          name: e.name || `Episodio ${e.episode_number}`,
+          overview: e.overview || '',
+          still_path: e.still_path ? `https://image.tmdb.org/t/p/w500${e.still_path}` : (posterUrl || null),
+          air_date: e.air_date || '',
+          servers: defaultServers || []
+        }))
+      });
+    }
 
     return seasons;
+  }
+
+  /**
+   * ¿Este árbol de capítulos lo rotuló la web en vez de TMDB?
+   *
+   * Se pregunta ANTES de pedir nada para no gastar una petición por temporada en las series que ya
+   * están bien —las de moviedays llegan sin árbol y se construyen desde TMDB—, y para que llamar a
+   * `rotularEpisodiosConTmdb` sea gratis en el caso normal. Las tres señales son las que se midieron
+   * sobre lo guardado: el nombre del post en vez del título del capítulo («Bridgerton 1x3»), la
+   * plantilla de SEO de la web como sinopsis, y el capítulo que TMDB no ha tocado nunca — sin
+   * fotograma Y sin fecha de emisión, que es como llegan los de FuegoCine.
+   */
+  private static rotuladoPorLaWeb(seasons: any[]): boolean {
+    for (const t of seasons) {
+      for (const e of (t?.episodes || [])) {
+        if (/\d{1,2}\s*x\s*\d{1,3}/i.test(String(e?.name || ''))) return true;
+        if (PUBLICIDAD_DE_LA_WEB.test(String(e?.overview || ''))) return true;
+        if (!e?.still_path && !e?.air_date) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * ══════════════════════════════════════════════════════════════════════════════════════════
+   * LOS CAPÍTULOS TAMBIÉN SE ROTULAN CON TMDB. La fuente pone los ENLACES; el nombre, la
+   * sinopsis, el fotograma y la fecha los pone TMDB, igual que en la ficha.
+   *
+   * `enrichMediaItem` solo pedía las temporadas a TMDB cuando el ítem llegaba SIN ninguna. Una
+   * serie de FuegoCine llega siempre con las suyas —se arma agrupando los posts de sus capítulos—
+   * así que su árbol entraba al catálogo tal cual y se guardaba: la ficha con metadata de TMDB y
+   * los capítulos rotulados por la web. Medido sobre lo guardado: 618 capítulos anunciando «Ver
+   * INVENCIBLE 1x1 en FuegoCine con audio Latino», 638 llamados «Bridgerton 1x3» en vez de por su
+   * título, y el 48 % sin fotograma. Es exactamente lo que se ve en la app al abrir una serie.
+   *
+   * Aquí se PISA lo que publicó la web, no se rellena solo el hueco: el rótulo de la fuente no es
+   * metadata incompleta, es publicidad suya, y mientras estuviera puesto TMDB no tenía por dónde
+   * entrar. Lo que NO se toca es lo que la fuente sí aporta: los servidores y sus campos internos
+   * (`_fuegocine_url`, que es de donde salen los enlaces de cada capítulo y la prueba de quién es
+   * la serie — ver `paginasDeCapitulos`).
+   *
+   * Un capítulo que TMDB no conoce se queda como está: perderlo sería peor que enseñarlo con el
+   * nombre de la web, y una temporada que TMDB no publica tampoco se descarta.
+   * ══════════════════════════════════════════════════════════════════════════════════════════
+   */
+  static async rotularEpisodiosConTmdb(
+    tmdbId: number,
+    seasons: any[] | null | undefined,
+    posterUrl: string | null
+  ): Promise<any[]> {
+    const previas = Array.isArray(seasons) ? seasons : [];
+    if (previas.length === 0) return previas;
+    if (!this.rotuladoPorLaWeb(previas)) return previas;
+
+    const numeros = previas.map(t => Number(t?.season_number)).filter(n => Number.isFinite(n));
+
+    /**
+     * Sin ficha de TMDB no hay con qué rotular, pero sí hay algo que hacer: quitar la publicidad
+     * de la web. Una ficha sin identidad no se anuncia (`veredictoDisponibilidad`), y aun así su
+     * texto se ve desde el panel y volvería a viajar el día que el matcher la reconozca.
+     */
+    const crudas = tmdbId > 0 && numeros.length
+      ? await this.temporadasCrudas(tmdbId, numeros).catch(() => new Map<number, any>())
+      : new Map<number, any>();
+
+    /**
+     * Un capítulo que TMDB no publica se queda con el nombre de la web —es el único que tiene—
+     * pero NO con su publicidad por sinopsis. Pasa de verdad, y no solo capítulo a capítulo: TMDB
+     * contesta 404 a la temporada 2 de «Solo Leveling» y a la de «Kaiju No. 8», que FuegoCine sí
+     * numera como 2xN. Esos 17 capítulos no tienen con qué rotularse; lo que sí se puede es no
+     * publicar el anuncio de la web como si fuera su sinopsis.
+     */
+    const sinPublicidad = (e: any) =>
+      PUBLICIDAD_DE_LA_WEB.test(String(e?.overview || '')) ? { ...e, overview: '' } : e;
+
+    return previas.map(t => {
+      const data = crudas.get(Number(t?.season_number));
+      if (!data) return { ...t, episodes: (t?.episodes || []).map(sinPublicidad) };
+
+      const porNumero = new Map<number, any>(
+        (data.episodes || []).map((e: any) => [Number(e.episode_number), e])
+      );
+
+      return {
+        ...t,
+        name: data.name || t?.name || `Temporada ${t?.season_number}`,
+        poster: data.poster_path ? `https://image.tmdb.org/t/p/w500${data.poster_path}` : (t?.poster || posterUrl || null),
+        episodes: (t?.episodes || []).map((e: any) => {
+          const oficial = porNumero.get(Number(e?.episode_number));
+          if (!oficial) return sinPublicidad(e);
+          return {
+            ...e,
+            name: oficial.name || e?.name || `Episodio ${e?.episode_number}`,
+            overview: oficial.overview || '',
+            still_path: oficial.still_path
+              ? `https://image.tmdb.org/t/p/w500${oficial.still_path}`
+              : (e?.still_path || null),
+            air_date: oficial.air_date || e?.air_date || ''
+          };
+        })
+      };
+    });
   }
 
   /**
@@ -1174,7 +1298,10 @@ export class TmdbService {
       tmdb_id: id,
       original_title: item.original_title || item.title,
       aliases: item.aliases && item.aliases.length ? item.aliases : [item.title],
-      overview: item.overview || `Ver ${item.title} online en HD con audio Latino.`,
+      // Ni aquí se inventa una sinopsis. Esta ficha se quedó SIN identidad en TMDB; taparlo con
+      // «Ver X online en HD con audio Latino» solo consigue que `isMetadataComplete` la dé por
+      // completa y que no se vuelva a intentar nunca.
+      overview: item.overview || '',
       // Los dos campos NO son intercambiables y rellenar uno con el otro era la causa de
       // que la API sirviera capturas apaisadas en `poster` (y pósters verticales en
       // `backdrop`). Cada uno vale lo que traiga la fuente, o null: una imagen ausente es
@@ -1280,8 +1407,18 @@ export class TmdbService {
 
       // Mapear temporadas y episodios si es una serie de TV
       let seasons = item.seasons || [];
+      const posterOficial = tmdbData.poster_path ? `https://image.tmdb.org/t/p/w500${tmdbData.poster_path}` : item.poster;
       if (!opts.skipSeasons && isTv && (!seasons || seasons.length === 0) && tmdbData.number_of_seasons > 0) {
-        seasons = await this.getTmdbSeasons(tmdbData.id, tmdbData.number_of_seasons, tmdbData.poster_path ? `https://image.tmdb.org/t/p/w500${tmdbData.poster_path}` : item.poster, item.servers || []);
+        seasons = await this.getTmdbSeasons(tmdbData.id, tmdbData.number_of_seasons, posterOficial, item.servers || []);
+      } else if (isTv && seasons.length > 0) {
+        /**
+         * La serie llega CON su árbol de capítulos (solo FuegoCine los trae así). `skipSeasons`
+         * no exime de esto: lo que ahorra es CONSTRUIR un árbol que no existe —quince peticiones
+         * a ciegas—, no publicar los rótulos de la web. Aquí se piden únicamente las temporadas
+         * que la fuente ya trajo, y si no se hiciera en el crawl la fila se guardaría mal rotulada
+         * y nadie volvería a mirarla.
+         */
+        seasons = await this.rotularEpisodiosConTmdb(tmdbData.id, seasons, posterOficial).catch(() => seasons);
       }
 
       const canonicalId = (item.id && isNaN(Number(item.id))) ? item.id : String(tmdbData.id);

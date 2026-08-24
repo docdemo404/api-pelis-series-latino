@@ -1020,6 +1020,24 @@ async function conservarLoQueYaEstaba(rows: Array<Record<string, any>>): Promise
     const previasConManuales = previa.seasons.map((t: any) => ({ ...t, episodes: [...(t?.episodes || [])] }));
     row.seasons = fusionarTemporadas(previasConManuales, Array.isArray(row.seasons) ? row.seasons : []);
   }
+
+  /**
+   * Y LOS CAPÍTULOS QUE SE QUEDAN, ROTULADOS POR TMDB.
+   *
+   * `enrichMediaItem` ya rotula lo que ENTRA, pero la fusión de arriba conserva lo que había —«la
+   * metadata que ya estaba no se pisa», que es lo que impide que un crawl parcial borre capítulos—
+   * así que las filas guardadas antes de esta regla se quedarían con el rótulo de la web para
+   * siempre: nadie las vuelve a mirar. Aquí se arreglan solas al pasar el crawl por ellas.
+   *
+   * No cuesta peticiones en el caso normal: `rotularEpisodiosConTmdb` mira primero si el árbol
+   * huele a rotulado por la web y, si no, devuelve el mismo objeto sin preguntar nada.
+   */
+  for (const row of rows) {
+    const tmdbId = Number(row.tmdb_id);
+    if (!(tmdbId > 0) || !Array.isArray(row.seasons) || !row.seasons.length) continue;
+    row.seasons = await TmdbService.rotularEpisodiosConTmdb(tmdbId, row.seasons, row.poster || null)
+      .catch(() => row.seasons);
+  }
 }
 
 async function guardarFilas(

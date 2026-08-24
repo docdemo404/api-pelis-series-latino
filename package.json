@@ -11,6 +11,7 @@
     "verify:catalog": "ts-node scripts/refreshCatalog.ts --verify-only",
     "direct:catalog": "ts-node scripts/refreshCatalog.ts --direct-only",
     "repair:catalog": "ts-node scripts/repairCatalog.ts",
+    "rotular:capitulos": "ts-node scripts/rotularCapitulos.ts",
     "check:catalog": "ts-node scripts/checkCatalog.ts",
     "check:sources": "ts-node scripts/checkSources.ts"
   },
