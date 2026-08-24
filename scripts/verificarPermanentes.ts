@@ -55,7 +55,7 @@ import { CacheStore } from '../src/cache/store';
 import { CatalogService, esServidorManual } from '../src/services/catalogService';
 import { fichaReproducible } from '../src/services/streamSorter';
 import { esUrlDeFicheroPermanente } from '../src/scrapers/directStream';
-import { bajarManifiesto, segmentoDescargable } from '../src/services/manifestHealth';
+import { esManifiestoHls, manifiestoArranca } from '../src/services/permanentHealth';
 import { leerLedger, ledgerVacio, fusionarConLedger } from '../src/services/manualLedger';
 
 const db = getSupabaseAdmin();
@@ -261,61 +261,13 @@ async function sigueVivo(url: string): Promise<{ ok: boolean; motivo: string; si
 const INTENTOS = 3;
 
 /**
- * ¿ESTO ES UN MANIFIESTO Y NO UN FICHERO? Cambia las DOS comprobaciones de esta pasada.
+ * Las dos comprobaciones de un fichero permanente viven en `src/services/permanentHealth.ts`.
  *
- * Todo este barrido está escrito para un fichero: `sigueVivo` pide un trozo del byte 1.000.000 y
- * `puedeAbrirse` lee las cajas de un mp4. A un `.m3u8` —que es un texto de unos kilobytes— las dos
- * le contestan mal, y de formas distintas:
- *
- *   · el rango de en medio da 416, o peor, un 200 con el manifiesto entero, que aquí se lee como
- *     «no sabe hacer rangos» y RETIRA el sello;
- *   · y si llega al arranque, `puedeAbrirse` dice «no es un mp4» y se va sin veredicto, así que el
- *     sello no se renueva NUNCA.
- *
- * Lo segundo es lo grave y es silencioso: `paraElCliente` solo publica lo que lleva sello vigente
- * —doce horas para un permanente—, así que una url HLS pegada por el panel se ve durante medio día
- * y desaparece sola, sin que nadie la haya condenado. Y el panel las acepta a propósito: tiene una
- * rama entera para manifiestos (`manifiestoTraeVideo`), porque un `.m3u8` bueno pesa unos cientos
- * de bytes y el criterio de «pesa poco, es una página de error» no le sirve.
- *
- * Así que a un manifiesto se le pregunta lo suyo: que el texto declare vídeo y que su primer trozo
- * se pueda bajar. Es la misma comprobación que hace el panel al guardarlo.
+ * Estaban aquí, y aquí no las podía llamar el que SIRVE. Ese era justo el agujero: entre vuelta
+ * y vuelta de este barrido, una url puesta a mano se quedaba sin sello y dejaba de publicarse,
+ * aunque se descargara perfectamente. Ahora `revisarServidores` hace la misma pregunta con la
+ * misma función, así que las dos respuestas no pueden separarse.
  */
-function esManifiestoHls(sv: any): boolean {
-  const url = String(sv?.direct_stream || '');
-  if (String(sv?.direct_kind || '').toLowerCase() === 'hls') return true;
-  try {
-    return /\.m3u8$/i.test(new URL(url).pathname);
-  } catch {
-    return false;
-  }
-}
-
-/**
- * El equivalente de `puedeAbrirse` para un manifiesto: ¿declara vídeo y llegan sus trozos?
- *
- * Devuelve el mismo trato de siempre a lo que no se puede concluir: `sinVeredicto` no suma golpe
- * ni renueva sello. `segmentoDescargable` ya perdona por su cuenta lo que no le dio tiempo a mirar
- * —no condena por lentitud—, así que un `false` suyo es una negativa medida, no un mal rato.
- */
-async function manifiestoArranca(
-  url: string
-): Promise<{ ok: boolean; causa: string; detalle: string; sinVeredicto?: boolean }> {
-  const texto = await bajarManifiesto(url, url);
-  if (texto === null) {
-    return { ok: false, causa: 'el manifiesto no llega', detalle: 'sin respuesta utilizable', sinVeredicto: true };
-  }
-  if (!/#EXTM3U/i.test(texto)) {
-    return { ok: false, causa: 'no es un manifiesto', detalle: 'la respuesta no empieza por #EXTM3U' };
-  }
-  if (!/#EXTINF|#EXT-X-STREAM-INF/i.test(texto)) {
-    return { ok: false, causa: 'manifiesto vacío', detalle: 'ni trozos ni calidades' };
-  }
-  const llegan = await segmentoDescargable(texto, url, url);
-  return llegan
-    ? { ok: true, causa: 'arranca', detalle: 'manifiesto con trozos' }
-    : { ok: false, causa: 'sus trozos no llegan', detalle: 'el primero dio error' };
-}
 
 /**
  * ¿Hay caché por trozos delante? Cambia qué se puede perdonar.

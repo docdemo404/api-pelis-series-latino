@@ -273,7 +273,12 @@ function costeDeEntrega(s: ServerOption): number {
  */
 const VIGENCIA_PERMANENTE_MS = 12 * 60 * 60 * 1000;
 
-function verificadoVigente(s: ServerOption): boolean {
+/**
+ * Se exporta porque `revisarServidores` necesita saber a QUIÉN le falta la prueba antes de gastar
+ * una sonda en conseguirla. Copiar la comparación allí era volver a tener dos criterios sobre lo
+ * mismo, y de eso este proyecto ya se ha llevado cinco golpes.
+ */
+export function verificadoVigente(s: ServerOption): boolean {
   if (!s?.verified_at) return false;
   const t = Date.parse(s.verified_at);
   if (!Number.isFinite(t)) return false;

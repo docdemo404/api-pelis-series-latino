@@ -24,6 +24,8 @@ import {
   sondearDestino,
   MotivoMuerte,
 } from './manifestHealth';
+import { permanenteArranca } from './permanentHealth';
+import { verificadoVigente } from './streamSorter';
 
 /**
  * ───────────────────────────────────────────────────────────────────────────────────────────
@@ -469,7 +471,56 @@ export async function revisarServidores(
      * sola (ver `verificadoVigente`). Lo único que puede pasarles es que RETIREN el fichero, y de
      * eso se encarga el barrido, que sí sabe pedirle un trozo a un mp4.
      */
-    if (esFicheroPermanente(servidor)) continue;
+    if (esFicheroPermanente(servidor)) {
+      /**
+       * PERO SIN SELLO NO SE PUBLICA, ASÍ QUE SALTARLO ERA CONDENARLO EN SILENCIO.
+       *
+       * Saltarlo evita el error de arriba, y hasta aquí bien. Lo que no se vio es la otra mitad:
+       * `paraElCliente` exige `verified_at` vigente, y si el que sirve nunca mira estos ficheros,
+       * el único que puede sellarlos es el barrido. O sea que su visibilidad dependía por completo
+       * de cuándo pasara `verificarPermanentes`, y entre vuelta y vuelta desaparecían.
+       *
+       * A quien más le duele es a la fuente propia, que es justo la que no se puede volver a
+       * descubrir: reportado el 2026-08-24 con el 1x01 de «Breaking Bad», donde la url pegada por
+       * el panel estaba en la fila, era la primera del orden, y el capítulo se servía igualmente
+       * con el servidor de moviedays. Y se realimentaba, porque con menos de dos servidores
+       * publicables `getEpisode` vuelve a rastrear y a reescribir el capítulo en cada apertura:
+       * dos aperturas seguidas movieron el sello del otro servidor y dejaron el manual sin él.
+       *
+       * Así que se le hace la pregunta que SÍ le corresponde a un fichero —el manifiesto y su
+       * primer trozo, o el índice del mp4— y con eso se le sella. Es la misma comprobación que usa
+       * el barrido, llamada, no copiada (ver `permanenteArranca`). Coste medido sobre la url del
+       * caso: 914 ms el manifiesto y 583 ms el trozo, dentro del presupuesto de la petición.
+       *
+       * Solo cuando le FALTA la prueba: al que ya la tiene no se le gasta una sonda. Y un `false`
+       * no condena a nadie —se le deja exactamente como estaba, que es lo que hacía antes—: aquí
+       * solo se puede ganar sello, nunca perderlo. Retirar sigue siendo cosa del barrido, que es
+       * quien puede permitirse insistir tres veces antes de dar a un host por incapaz.
+       */
+      if (verificadoVigente(servidor)) continue;
+      const queda = limite - Date.now();
+      if (sondeados >= maximo || queda < MINIMO_PARA_SONDEAR_MS) continue;
+
+      sondeados++;
+      // `conTopeSimple` y no `conTope`: el respaldo de este camino no es «vivo desconocido», es
+      // «no se pudo concluir», que aquí significa simplemente no sellar.
+      const arranque = await conTopeSimple(
+        permanenteArranca(servidor),
+        queda,
+        { ok: false, causa: 'sin veredicto', detalle: 'se acabó el presupuesto', sinVeredicto: true }
+      );
+      if (arranque.ok) {
+        salida[i] = {
+          ...servidor,
+          status: 'online',
+          verified_at: new Date().toISOString(),
+          last_checked: new Date().toISOString(),
+        };
+        demostrados++;
+        if (hastaElPrimeroUtil && demostrados >= objetivoSellados) break;
+      }
+      continue;
+    }
 
     let veredicto = veredictoRecordado(servidor.embed_url);
     let sinVideo = false;
