@@ -20,7 +20,7 @@ import {
   pedirTemporadasMoviedays,
   sondaDeServidoresMoviedays,
 } from '../scrapers/moviedays';
-import { yearFromSlug, slugify } from '../utils/text';
+import { yearFromSlug, slugify, canonicalTitle } from '../utils/text';
 
 const BASE_URL = 'https://tioplus.app';
 /** Cinecalidad publica en varios dominios con la misma plantilla; `.am` es el que responde hoy. */
@@ -636,6 +636,19 @@ export function tituloDeArchive(crudo: string): string {
   t = t.replace(/\([^)]*\)/g, ' ');
 
   /**
+   * LA COLA DE IDIOMA Y SUBTÍTULOS SE LLEVA TODO LO QUE VENGA DETRÁS.
+   *
+   * archive.org corta los títulos largos, así que la coletilla llega a medias y no hay forma de
+   * enumerarla: «Hallam Foe Inglés + Subtítulos En», «Lust, Caution Mandarín + Subtítulos En»,
+   * «The Concubine Coreano + Subtítulos En». Lo que sí es constante es dónde EMPIEZA —el idioma
+   * seguido de «+ Subtítulos»—, y desde ahí no queda nada del nombre de la obra.
+   *
+   * Se recorta desde la palabra que abre la cola, no solo la palabra: quitar «Subtítulos» y dejar
+   * «Hallam Foe Inglés En» no arregla nada, y era el estado en el que estaban cuatro fichas.
+   */
+  t = t.replace(/\s*\b(ingl[eé]s|mandar[ií]n|coreano|japon[eé]s|franc[eé]s|italiano|alem[aá]n|portugu[eé]s|ruso|chino|hindi|tailand[eé]s|sueco|dan[eé]s|noruego|polaco|turco|[aá]rabe|hebreo|griego|checo|h[uú]ngaro|finland[eé]s|holand[eé]s|neerland[eé]s|catal[aá]n|vasco|gallego|coreana|original)?\s*[+·|-]*\s*\b(subt[ií]tulos?|subs)\b.*$/i, ' ');
+
+  /**
    * Coletillas de idioma, formato y fuente. Se quitan de DONDE ESTÉN, no solo del final: aparecen
    * también en medio («Volver Al Futuro en español latino [1080p] remasterizada»).
    */
@@ -648,7 +661,13 @@ export function tituloDeArchive(crudo: string): string {
     /\bsubtitulad[ao]s?\b/gi,
     /\bv\.?o\.?s\.?[ae]?\b/gi,
     /\b(dual|remasterizad[ao]|completa|pel[ií]cula\s+completa)\b/gi,
-    /\b(1080p|720p|480p|360p|4k|hd|full\s*hd|dvdrip|brrip|bluray|blu-ray|web-?dl|hdtv)\b/gi,
+    /**
+     * El doblaje REGIONAL, que es una coletilla más: «Vecinos Invasores Mexicano» no es una
+     * película distinta de «Vecinos invasores», es la misma con el doblaje de México. Sin esto
+     * el matcher no daba con ella y la ficha entraba sin identidad.
+     */
+    /\b(mexicano|mexicana|latinoamericano|latinoamericana|sudamericano|sudamericana)\b/gi,
+    /\b(1080p|720p|480p|360p|4k|hd|full\s*hd|dvdrip|brrip|bluray|blu-ray|web-?dl|hdtv|vhs|dvd|betamax|cinta)\b/gi,
     /\bmp4\b/gi,
   ];
   for (const re of COLETILLAS) t = t.replace(re, ' ');
@@ -659,6 +678,72 @@ export function tituloDeArchive(crudo: string): string {
 
   // Si la limpieza se lo comió entero, vale más el original que una cadena vacía.
   return t || String(crudo || '').trim();
+}
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════
+ * EL IDENTIFICADOR DICE MEJOR QUÉ OBRA ES QUE EL TÍTULO QUE ESCRIBIÓ QUIEN SUBIÓ EL FICHERO.
+ *
+ * El título de archive.org es texto libre y llega con todo lo que a esa persona le pareció útil,
+ * a menudo cortado a media coletilla. El identificador —`hallam-foe-2007`, `lust-caution_2007`,
+ * `vecinos-invasores-2006-espanol-mexicano`— es el slug del propio archivo: mismo nombre, sin
+ * el ruido, y con el año dentro las más de las veces.
+ *
+ * Medido sobre las 12 fichas de archive.org que se habían quedado sin identidad en TMDB: por el
+ * título mostrado se recuperaban CERO; por el identificador, ocho, todas respaldadas.
+ *
+ * Tres clases de basura numérica se descartan aquí, y cada una tiene su forma:
+ *   · el año (`2007`)               → se devuelve aparte, no se tira;
+ *   · el sufijo de subida (`202508`) → seis dígitos o más, nunca es un año;
+ *   · el número de catálogo (`0059`) → empieza por cero y va delante del nombre.
+ *
+ * El «40» de `0059-40-pistolas` NO es ninguna de las tres y se queda: un número sin cero
+ * delante forma parte del título tantas veces como no.
+ * ═══════════════════════════════════════════════════════════════════════════════════════
+ */
+/**
+ * EL OTRO NOMBRE DE LA OBRA, EL QUE QUIEN SUBE ESCRIBE EN LA DESCRIPCIÓN.
+ *
+ * En archive.org es costumbre abrir la descripción con el nombre de verdad y el año antes de
+ * enlazar la sinopsis: «Cuarenta pistolas (1957) Sinopsis: filmaffinity…», mientras el título
+ * mostrado dice «40 Pistolas» y el identificador `0059-40-pistolas`. TMDB registra la película
+ * como «Dragones de la violencia» y conoce «Cuarenta pistolas» como nombre alternativo, así que
+ * ese es el único de los tres con el que se la encuentra.
+ *
+ * Se exige que el paréntesis contenga EXACTAMENTE el año y que esté al principio: así una sinopsis
+ * que empieza «Durante la II Guerra Mundial (1939-1945)…» no se confunde con un título. Lo que
+ * salga de aquí es un CANDIDATO más para el matcher, no una identidad: si TMDB no lo reconoce, no
+ * pasa nada.
+ */
+export function nombreDeLaDescripcion(descripcion: string): string {
+  const texto = String(descripcion || '').replace(/<[^>]*>/g, ' ').replace(/&[a-z]+;/gi, ' ').trim();
+  const m = /^\s*(.{2,80}?)\s*\((?:19|20)\d{2}\)/.exec(texto);
+  if (!m) return '';
+  const limpio = tituloDeArchive(m[1]);
+  // Una línea que solo trae puntuación o una palabra suelta no es un título.
+  return /[a-záéíóúñ]/i.test(limpio) ? limpio : '';
+}
+
+export function identidadDeArchive(identifier: string): { titulo: string; year: string } {
+  const tokens = String(identifier || '').split(/[-_\s]+/).filter(Boolean);
+  let year = '';
+  const palabras: string[] = [];
+
+  for (const tk of tokens) {
+    if (/^(19|20)\d{2}$/.test(tk)) { if (!year) year = tk; continue; }
+    if (/^\d{6,}$/.test(tk)) continue;
+    if (/^0\d+$/.test(tk) && palabras.length === 0) continue;
+    palabras.push(tk);
+  }
+
+  /**
+   * El identificador viene todo en minúsculas y ese nombre puede acabar EN LA FICHA: `pickDisplayTitle`
+   * se queda con el de la fuente cuando el de TMDB está en otro alfabeto (tmdb 4588 se titula «色‧戒»
+   * hasta en es-MX). Se pone en mayúscula la primera letra y ya está — al matcher le da igual la caja,
+   * y capitalizar cada palabra convertiría «la gorra 2» en algo que no se escribe así en español.
+   */
+  const limpio = tituloDeArchive(palabras.join(' '));
+  return { titulo: limpio ? limpio.charAt(0).toUpperCase() + limpio.slice(1) : '', year };
 }
 
 /**
@@ -2456,13 +2541,34 @@ export class RealScraperService {
       if (esPackArchive(tituloCrudo)) continue;
       if (!esEnEspanolLatino(it)) continue;
 
-      const year = anioDeArchive(tituloCrudo, String(it?.description || ''));
+      /**
+      /**
+       * EL NOMBRE DE LA OBRA, EN LAS TRES FORMAS EN QUE ESTA FUENTE LO PUBLICA.
+       *
+       * El que se MUESTRA sale del título, que es el único con acentos y puntuación —«Corazón
+       * africano», «Guapo, truhan y peligroso»—; el identificador viene en minúsculas y pelado, y
+       * tomarlo como título (que fue el primer intento) salía peor: `tron-1982-doblaje-caratula-vhs`
+       * da «Tron vhs» donde el mostrado da «Tron».
+       *
+       * Los otros dos nombres se quedan en `aliases`, que alimenta `title_normalized` y con eso la
+       * búsqueda. NO van en `original_title`: ese campo no es un cajón de nombres alternativos,
+       * es el título en el idioma original, y el matcher lo usa para VERIFICAR al candidato
+       * (`bestOriginalMatch`). Metiendo ahí «Cuarenta pistolas», el candidato correcto —tmdb 14837,
+       * original «Forty Guns»— salía sin respaldar y se perdía un match que por otro camino sí se
+       * consigue. Los nombres alternativos se prueban de uno en uno y como título, que es lo que
+       * hace la escalera de `repair:catalog --fuse`.
+       *
+       * El año sí se completa con el del identificador cuando el título y la descripción callan:
+       * ahí no hay ambigüedad que valga, o es un año o no lo es.
+       */
+      const delIdentificador = identidadDeArchive(identifier);
+      const year = anioDeArchive(tituloCrudo, String(it?.description || '')) || delIdentificador.year;
       if (!year) continue;
 
-      // El título se limpia de lo que la subida le añade —el año, las coletillas entre
-      // corchetes—, porque lo que se le pasa al matcher tiene que ser el nombre de la obra.
-      const title = tituloDeArchive(tituloCrudo);
+      const title = tituloDeArchive(tituloCrudo) || delIdentificador.titulo;
       if (!title) continue;
+
+      const deLaDescripcion = nombreDeLaDescripcion(String(it?.description || ''));
 
       vistos.add(identifier);
       salida.push({
@@ -2472,7 +2578,7 @@ export class RealScraperService {
         type: clase,
         title,
         original_title: title,
-        aliases: [title],
+        aliases: Array.from(new Set([title, deLaDescripcion, delIdentificador.titulo].filter(Boolean))),
         overview: '',
         rating: 0,
         release_date: year,
@@ -2858,7 +2964,8 @@ export class RealScraperService {
     const ficheros = ficherosDeVideoArchive(data?.files || [], year);
     if (!ficheros.length) return null;
 
-    const title = identidad?.titulo || tituloDeArchive(tituloCrudo);
+    // Sin identidad de TMDB manda el identificador, que es más limpio que el título mostrado.
+    const title = identidad?.titulo || identidadDeArchive(identifier).titulo || tituloDeArchive(tituloCrudo);
 
     const servidorDe = (nombre: string, i: number): ServerOption => {
       const directo = urlDeFicheroArchive(identifier, nombre);

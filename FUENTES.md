@@ -229,6 +229,51 @@ npm run repair:catalog -- --fuse --apply          # …fundidos y borrados
 
 ---
 
+## 4 quater. En archive.org el nombre de la obra está en tres sitios, y ninguno es fiable solo
+
+Las 12 fichas que se quedaron sin identidad en TMDB eran TODAS de archive.org, y ninguna por
+ambigüedad: por ruido en el nombre. Aquí el título no es un campo de catálogo — lo escribe quien
+sube el fichero, y archive.org lo corta si es largo:
+
+| Dónde vive el nombre | Qué da | Cuándo es el bueno |
+|---|---|---|
+| **El título mostrado** | `Hallam Foe Inglés + Subtítulos En`, `Tron (1982) [Doblaje + Carátula VHS]` | Casi siempre: es el único con acentos y puntuación («Corazón africano», «Guapo, truhan y peligroso»). Basta con limpiarlo bien. |
+| **El identificador** | `hallam-foe-2007`, `el-venerable_202508` | Cuando el mostrado trae texto que no es el nombre («Película El Venerable RCTV»). Trae además el año, y a menudo uno mejor que el de la descripción. |
+| **La descripción** | «Cuarenta pistolas (1957) Sinopsis: …» | Cuando TMDB registra la obra con otro nombre: `0059-40-pistolas` no se encuentra por «40 Pistolas» y sí por «Cuarenta pistolas», que es el alias con que TMDB conoce a «Dragones de la violencia». |
+
+El reparto de trabajo es este, y no al revés:
+
+* **El crawl limpia el nombre mostrado** (`tituloDeArchive`) y usa el identificador solo para
+  completar el año y para sumar alias. Tomar el identificador COMO título, que fue el primer
+  intento, sale peor: `tron-1982-doblaje-caratula-vhs` da «Tron vhs» donde el mostrado da «Tron».
+  Con la limpieza al día identifica 7 de las 12.
+* **`repair:catalog --fuse` prueba los tres nombres**, de uno en uno y como título, parando en el
+  primero RESPALDADO (`nombresParaReintentar`). Recupera 9 de las 12 — las dos que el crawl no
+  alcanza y una que era un duplicado de otra fila.
+
+> **`original_title` NO es un cajón de nombres alternativos.** Fue el segundo intento y hay que
+> saber por qué no vale: `resolveTmdb` lo busca como consulta aparte, sí, pero además lo usa para
+> VERIFICAR al candidato (`bestOriginalMatch`). Metiendo ahí «Cuarenta pistolas», el candidato
+> correcto —tmdb 14837, cuyo original es «Forty Guns»— salía sin respaldar, y se perdía un match
+> que por la escalera sí se consigue. Los nombres alternativos se prueban de uno en uno y como
+> título; los que sobran van a `aliases`, que es lo que alimenta la búsqueda.
+
+Lo que no se identifica, se borra — es la regla de esta fuente, ahora también para lo que ya
+estaba guardado:
+
+```bash
+npm run repair:catalog -- --fuse --apply                  # 1º: intentar identificarlas
+npm run repair:catalog -- --purgar-sin-identidad          # 2º: ver qué no se pudo
+npm run repair:catalog -- --purgar-sin-identidad --apply  # …y borrarlo
+```
+
+De las 3 que cayeron el 2026-08-24, dos no eran películas (la cartelera semanal de un canal, un
+documental de Animal Planet) y la tercera sí lo era —«El Escuadrón De Las Abejas Intrépidas»
+(1944) es *The Fighting Seabees*— pero TMDB no registra ese título en español y ningún matcher
+puede llegar a ella. Ese es el precio de la regla, y se paga a sabiendas.
+
+---
+
 ## 5. Los SERVIDORES de tu fuente: extraer el vídeo y no ofrecer lo que está muerto
 
 Todo lo anterior va de que la ficha sea la correcta. Esto va de que lo que hay dentro **reproduzca**.

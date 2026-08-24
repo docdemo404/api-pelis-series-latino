@@ -11,6 +11,10 @@
  *   npm run repair:catalog -- --apply --dedupe    # además elimina duplicados rotos
  *   npm run repair:catalog -- --fuse              # informa de duplicados ENTRE FUENTES
  *   npm run repair:catalog -- --fuse --apply      # los funde bajo su ficha oficial de TMDB
+ *   npm run repair:catalog -- --purgar-sin-identidad
+ *                                                 # fichas de archive.org que TMDB no reconoce
+ *   npm run repair:catalog -- --purgar-sin-identidad --apply
+ *                                                 # …y las borra (pásalo SIEMPRE después de --fuse)
  *   npm run repair:catalog -- --posters           # informa de poster/backdrop cruzados
  *   npm run repair:catalog -- --posters --apply   # los corrige con las imágenes de TMDB
  *   npm run repair:catalog -- --unfuse            # informa de fusiones erróneas
@@ -63,8 +67,9 @@
  */
 import 'dotenv/config';
 import * as fs from 'fs';
+import axios from 'axios';
 import { TmdbService, tmdbImagePath, OTRO_ALFABETO, similarity as tmdbSimilarity } from '../src/services/tmdbService';
-import { RealScraperService, SourceSignals } from '../src/services/realScraperService';
+import { RealScraperService, SourceSignals, identidadDeArchive, nombreDeLaDescripcion } from '../src/services/realScraperService';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
 import { canonicalTitle, normalizeTitle, searchIndexKey, dedupeTitles, sourceTitleFromSlug, slugify } from '../src/utils/text';
 // La puerta de identidad de las fuentes vive en catalogService: el script y la API tienen que
@@ -447,6 +452,65 @@ async function fetchSyntheticRows(): Promise<any[]> {
  *
  * Solo se borra con un match casi exacto: un parecido moderado no basta para fundir fichas.
  */
+/**
+ * CON QUÉ NOMBRE SE LE PREGUNTA A TMDB POR UNA FICHA QUE SE QUEDÓ SIN IDENTIDAD.
+ *
+ * Con el título guardado a secas se recuperaban CERO de las doce fichas de archive.org que
+ * estaban así, y no por ambigüedad: el título de archive.org lo escribe quien sube el fichero y
+ * llega con la coletilla del doblaje pegada y a menudo cortada —«Hallam Foe Inglés + Subtítulos
+ * En»—. El identificador del archivo (`hallam-foe-2007`) es el mismo nombre sin el ruido, y con
+ * él se recuperan ocho, todas respaldadas.
+ *
+ * Se prueban en orden y se para en el primero que venga RESPALDADO: la escalera no relaja nada,
+ * solo le da al matcher el nombre en las formas en que la fuente pudo escribirlo.
+ */
+async function nombresParaReintentar(row: any): Promise<Array<{ titulo: string; year: string; via: string }>> {
+  const yearGuardado = String(row.release_date || '').slice(0, 4) || sourceTitleFromId(row.id).year || '';
+  const escalera: Array<{ titulo: string; year: string; via: string }> = [];
+
+  const identificador = String(row.id || '').replace(/^archive-/, '');
+  if (String(row.id || '').startsWith('archive-')) {
+    const { titulo, year } = identidadDeArchive(identificador);
+    if (titulo) {
+      escalera.push({ titulo, year: year || yearGuardado, via: 'identificador' });
+      // Sin año también: el que trae la descripción puede ser el equivocado y tapar el acierto
+      // («La Gorra 2» estaba guardada con 2019 y su archivo dice 2009).
+      if (year && yearGuardado && year !== yearGuardado) escalera.push({ titulo, year, via: 'identificador (su año)' });
+    }
+  }
+
+  const guardado = String(row.title || '').trim();
+  if (guardado) escalera.push({ titulo: guardado, year: yearGuardado, via: 'título guardado' });
+
+  /**
+   * ÚLTIMO PELDAÑO, Y EL ÚNICO QUE CUESTA UNA PETICIÓN: el nombre que quien subió el fichero
+   * escribió en la DESCRIPCIÓN. Va el último a propósito —se paga solo cuando los tres gratis han
+   * fallado— y es el que rescata a `0059-40-pistolas`, que no se encuentra ni por su identificador
+   * («40 pistolas») ni por su título mostrado, y sí por el «Cuarenta pistolas (1957)» con que abre
+   * su descripción: TMDB la registra como «Dragones de la violencia» y ese es el nombre alternativo
+   * que conoce.
+   */
+  if (identificador && String(row.id || '').startsWith('archive-')) {
+    const desc = await descripcionDeArchive(identificador);
+    const deLaDescripcion = nombreDeLaDescripcion(desc);
+    if (deLaDescripcion && !escalera.some(e => canonicalTitle(e.titulo) === canonicalTitle(deLaDescripcion))) {
+      escalera.push({ titulo: deLaDescripcion, year: yearGuardado, via: 'descripción de archive.org' });
+    }
+  }
+
+  return escalera;
+}
+
+/** La descripción de un item de archive.org. Vacía si no contesta: nunca hace fallar la pasada. */
+async function descripcionDeArchive(identifier: string): Promise<string> {
+  try {
+    const res = await axios.get(`https://archive.org/metadata/${encodeURIComponent(identifier)}`, { timeout: 12000 });
+    return String(res.data?.metadata?.description || '');
+  } catch {
+    return '';
+  }
+}
+
 async function fuseSyntheticDuplicates(apply: boolean, limitArg?: number): Promise<void> {
   const DELETE_SCORE = 0.9;
 
@@ -457,6 +521,9 @@ async function fuseSyntheticDuplicates(apply: boolean, limitArg?: number): Promi
     console.warn('     Sin ella la fusión perdería la fuente de la ficha absorbida: se aborta.');
     return;
   }
+
+  // Hace falta para reescribir la ficha entera al adoptar un tmdb_id (ver más abajo).
+  const withMetadataSource = await hasColumn('metadata_source');
 
   const rows = await fetchSyntheticRows();
   console.log(`   ${rows.length} fichas sin match en TMDB (tmdb_id sintético)`);
@@ -473,15 +540,16 @@ async function fuseSyntheticDuplicates(apply: boolean, limitArg?: number): Promi
 
     const results = await Promise.all(chunk.map(async row => {
       const type: ContentType = row.type === 'tvseries' ? 'tvseries' : 'movie';
-      const year = String(row.release_date || '').slice(0, 4) || sourceTitleFromId(row.id).year;
-      try {
-        return { row, type, match: await TmdbService.resolveTmdb(row.title, type, year || undefined, row.id) };
-      } catch {
-        return { row, type, match: null };
+      for (const intento of await nombresParaReintentar(row)) {
+        const m = await TmdbService
+          .resolveTmdb(intento.titulo, type, intento.year || undefined, row.id)
+          .catch(() => null);
+        if (m && m.matched && m.verified && m.id > 0) return { row, type, match: m, via: intento };
       }
+      return { row, type, match: null, via: null };
     }));
 
-    for (const { row, type, match } of results) {
+    for (const { row, type, match, via } of results) {
       if (!match || !match.matched || match.id <= 0) {
         stillUnmatched++;
         continue;
@@ -492,22 +560,30 @@ async function fuseSyntheticDuplicates(apply: boolean, limitArg?: number): Promi
         .select('id,title,original_title,aliases,release_date,source_url,source_urls')
         .eq('tmdb_id', match.id)
         .neq('id', row.id)
-        .limit(1);
-
-      // a) El tmdb_id real está libre: la ficha lo adopta y deja de ser un duplicado
-      //    en potencia (el próximo crawl ya la fusionará por tmdb_id si toca).
+      /**
+       * a) EL TMDB_ID ESTÁ LIBRE: la ficha lo adopta Y SE REESCRIBE ENTERA.
+       *
+       * Aquí solo se escribía el número. La fila se quedaba con el título del que subió el
+       * fichero —«Hallam Foe Inglés + Subtítulos En»—, sin carátula y sin sinopsis, o sea
+       * anunciándose por fin y en el peor estado posible. `rewriteRowFromMatch` es la que trae
+       * la ficha de TMDB y la escribe completa; ya la usan `--verify` y `--refetch`.
+       */
       if (!clash || clash.length === 0) {
-        console.log(`   ↑ ${row.id}\n     "${row.title}" adopta tmdb ${match.id} (score ${match.score.toFixed(2)})`);
-        if (apply) {
-          const { error } = await db
-            .from('media_items')
-            .update({ tmdb_id: match.id, updated_at: new Date().toISOString() })
-            .eq('id', row.id);
-          if (error) {
-            console.warn(`     ⚠ no se pudo adoptar: ${error.message}`);
-            continue;
-          }
-        }
+        const nombre = await rewriteRowFromMatch(
+          row,
+          type,
+          match.id,
+          { title: via!.titulo, year: via!.year, originalTitle: null, imageHint: null } as any,
+          { apply, withMetadataSource }
+        );
+        console.log(
+          `   ↑ ${row.id}` +
+          `
+     "${row.title}" adopta tmdb ${match.id} (score ${match.score.toFixed(2)}, por ${via!.via})` +
+          `
+       queda como "${nombre.title || row.title}"`
+        );
+        if (apply && !nombre.title) { skipped++; continue; }
         adopted++;
         continue;
       }
@@ -524,7 +600,13 @@ async function fuseSyntheticDuplicates(apply: boolean, limitArg?: number): Promi
       // acertar de más y arrastrar una película entera a la ficha equivocada—, y comparar
       // los dos títulos entre sí tampoco, porque las variantes regionales legítimas no se
       // parecen. Sin esta comprobación, "Solo en casa 4" acabó absorbida por "Yu-Gi-Oh! GX".
-      const confirmed = await TmdbService.confirmsTitle(match.id, type, row.title).catch(() => false);
+      /**
+       * Se confirma con EL NOMBRE QUE DIO EL MATCH, no con el guardado. En archive.org el guardado
+       * es el que escribió quien subió el fichero —«The Dreamers Inglés + Subtítulos En»— y TMDB
+       * no registra ese nombre para nadie, así que la reja rechazaba una fusión correcta: tmdb 1278
+       * se llama «The Dreamers» en original y así es como se le encontró.
+       */
+      const confirmed = await TmdbService.confirmsTitle(match.id, type, via!.titulo).catch(() => false);
       if (!confirmed) {
         skipped++;
         console.log(`   ! ${row.id}\n     "${row.title}" → tmdb ${match.id} = "${twin.title}", pero TMDB no registra ese nombre para la ficha: no se funde`);
@@ -587,6 +669,51 @@ async function fuseSyntheticDuplicates(apply: boolean, limitArg?: number): Promi
     `${skipped} omitidas por parecido insuficiente, ${stillUnmatched} siguen sin match en TMDB`
   );
   if (!apply && (fused > 0 || adopted > 0)) console.log('   Ejecuta de nuevo con --apply para escribir los cambios.');
+}
+
+/**
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * BORRA LAS FICHAS DE ARCHIVE.ORG QUE SIGUEN SIN IDENTIDAD EN TMDB (`--purgar-sin-identidad`).
+ *
+ * Es la regla que el crawl ya aplica al ENTRAR y que nadie aplicaba a lo que entró antes de que
+ * existiera (ver el bloque de `fallbacks` en `refreshCatalog`): en archive.org no hay título de
+ * catálogo, hay el nombre que le puso quien subió el fichero, así que hace falta un árbitro
+ * externo. Ese árbitro es TMDB, y si TMDB no reconoce la obra, la obra no entra.
+ *
+ * Solo archive.org. Las demás fuentes publican títulos de verdad y su ficha sin identidad se
+ * queda donde está.
+ *
+ * Se ejecuta DESPUÉS de `--fuse`, nunca antes: primero se agota el intento de identificarlas —que
+ * con la escalera de nombres recupera la mayoría— y solo se borra lo que queda. De las 12 que
+ * había el 2026-08-24, `--fuse` rescató 9 y aquí cayeron 3: la cartelera semanal de un canal, un
+ * documental de Animal Planet y una película real cuyo título en español TMDB no registra.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ */
+async function purgarSinIdentidad(apply: boolean): Promise<void> {
+  console.log(`🗑  Buscando fichas de archive.org sin identidad en TMDB${apply ? '' : ' (dry-run: no se borra nada)'}...`);
+
+  const rows = (await fetchSyntheticRows()).filter(r => String(r.id || '').startsWith('archive-'));
+  if (!rows.length) {
+    console.log('   ninguna: todas las fichas de archive.org tienen su ficha de TMDB.');
+    return;
+  }
+
+  console.log(`   ${rows.length} ficha(s) que TMDB no reconoce
+`);
+  let borradas = 0;
+  for (const row of rows) {
+    console.log(`   ${apply ? '✖' : '·'} ${row.id}
+     "${row.title}" (${String(row.release_date || '').slice(0, 4) || 'sin año'})`);
+    if (!apply) continue;
+    marcarTocada(row);
+    const { error } = await db.from('media_items').delete().eq('id', row.id);
+    if (error) { console.warn(`     ⚠ no se pudo borrar: ${error.message}`); continue; }
+    borradas++;
+  }
+
+  console.log(`
+${apply ? `✅ ${borradas} ficha(s) borradas` : `📋 Dry-run: ${rows.length} se borrarían`}`);
+  if (!apply) console.log('   Ejecuta de nuevo con --apply para borrarlas.');
 }
 
 /**
@@ -3549,6 +3676,11 @@ async function main() {
 
   if (process.argv.includes('--aliases')) {
     await backfillRegionalAliases(apply, Number.isFinite(limitArg) ? limitArg : undefined);
+    return;
+  }
+
+  if (process.argv.includes('--purgar-sin-identidad')) {
+    await purgarSinIdentidad(apply);
     return;
   }
 
