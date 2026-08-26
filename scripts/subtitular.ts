@@ -258,11 +258,29 @@ async function guardar(fila: {
    * ESA, y quiere verla salir en el registro de esta corrida.
    */
   if (soloUna && apply) {
+    /*
+     * Y LE BORRA LOS INTENTOS FALLIDOS, que es lo que faltaba.
+     *
+     * La cola descarta lo que ha fallado tres veces, para no gastarse la ventana entera en el
+     * mismo imposible. Perfecto para el barrido automatico y pesimo para este caso: nombrar una
+     * pelicula a mano es, casi siempre, lo que se hace JUSTO DESPUES de arreglar lo que la rompio.
+     *
+     * Con `ignoreDuplicates` la fila se quedaba como estaba —tres intentos, descartada— y la
+     * corrida contestaba «no hay nada pendiente» sobre la pelicula que le acababas de nombrar.
+     * Paso: tres arreglos seguidos y ninguno se llego a probar.
+     */
     const { error } = await supabase
       .from('subtitulos_cola')
       .upsert(
-        { media_id: soloUna, episodio_id: texto('episodio') || '', prioridad: 100 },
-        { onConflict: 'media_id,episodio_id', ignoreDuplicates: true },
+        {
+          media_id: soloUna,
+          episodio_id: texto('episodio') || '',
+          prioridad: 100,
+          intentos: 0,
+          ultimo_error: null,
+          hecho_en: null,
+        },
+        { onConflict: 'media_id,episodio_id' },
       );
     if (error) throw new Error(`no se pudo encolar ${soloUna}: ${error.message}`);
   }
