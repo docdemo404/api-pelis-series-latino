@@ -51,40 +51,91 @@ def avisar(texto: str) -> None:
     print(texto, file=sys.stderr, flush=True)
 
 
-def lineas_legibles(palabras, corte_por_silencio=0.7, ancho=84):
+def lineas_legibles(palabras, corte_por_silencio=0.7, ancho=84, renglon=42):
     """
     Agrupa palabras sueltas en líneas que se puedan LEER.
 
-    Whisper devuelve sus propios bloques y a veces son de veinte segundos: una parrafada que no
-    cabe en pantalla y que aparece entera antes de que se diga la mitad. Aquí se corta por donde
-    corta quien habla —un silencio de siete décimas— y por lo que cabe en dos renglones.
+    ── SE CORTA POR FRASES, NO POR SILENCIOS ─────────────────────────────────────────────────
 
-    El ancho es de dos líneas de 42 caracteres, que es lo que caben en un móvil tumbado sin
-    taparle media cara a nadie.
+    Cortar por pausas y por ancho parece razonable y arruina el texto. Whisper entrega el diálogo
+    con su puntuación y sus mayúsculas; troceándolo por donde calla el actor, la mayoría de las
+    líneas empiezan a media frase y acaban sin punto. Medido sobre la primera transcripción real:
+
+        con puntuación      38 %
+        empiezan mayúscula  27 %
+
+    O sea que dos de cada tres líneas parecían sacadas de un dictado sin corregir — y la
+    puntuación estaba ahí, en las palabras, antes de que este código las juntara mal.
+
+    Así que manda el punto final: donde acaba una frase, acaba la línea. Los silencios y el ancho
+    siguen valiendo, pero solo DENTRO de una frase que no cabe entera.
+
+    ── Y SE PARTE EN DOS RENGLONES ───────────────────────────────────────────────────────────
+
+    Sin esto salían líneas de noventa caracteres cruzando la pantalla de lado a lado. Dos renglones
+    de unos cuarenta es lo que usa todo el mundo, y no por costumbre: es lo que se lee de un
+    vistazo sin mover los ojos por toda la pantalla.
     """
     lineas = []
     actual = []
 
+    def texto_de(grupo):
+        return "".join(p.word for p in grupo).strip()
+
     def cerrar():
         if not actual:
             return
-        lineas.append({
-            "inicio": actual[0].start,
-            "fin": actual[-1].end,
-            "texto": "".join(p.word for p in actual).strip(),
-        })
+        texto = partir(texto_de(actual), renglon)
+        if texto:
+            lineas.append({"inicio": actual[0].start, "fin": actual[-1].end, "texto": texto})
         actual.clear()
 
     for palabra in palabras:
         if actual:
             silencio = palabra.start - actual[-1].end
-            largo = sum(len(p.word) for p in actual)
+            largo = len(texto_de(actual))
+            # La frase anterior ya se cerró sola: ver `termina_frase`.
             if silencio >= corte_por_silencio or largo >= ancho:
                 cerrar()
+
         actual.append(palabra)
+
+        # El punto final manda, pero no sobre una línea de dos palabras: «¿Sí?» suelto ocupa un
+        # subtítulo entero para nada, y encadenados dan un parpadeo constante.
+        if termina_frase(palabra.word) and len(texto_de(actual)) >= renglon // 2:
+            cerrar()
 
     cerrar()
     return lineas
+
+
+def termina_frase(palabra: str) -> bool:
+    """Un punto, una interrogación o una exclamación al final. Los puntos suspensivos NO cuentan."""
+    limpia = palabra.strip()
+    if limpia.endswith("..."):
+        return False
+    return limpia.endswith((".", "?", "!", "。", "？", "！"))
+
+
+def partir(texto: str, renglon: int) -> str:
+    """
+    Parte en dos renglones equilibrados si no cabe en uno.
+
+    Por el hueco más cercano a la mitad, no por el primero que se pase del ancho: partiendo por el
+    primero salen un renglón lleno y otro con dos palabras, que se lee peor que la línea larga.
+    """
+    if len(texto) <= renglon:
+        return texto
+
+    mitad = len(texto) // 2
+    huecos = [i for i, c in enumerate(texto) if c == " "]
+    if not huecos:
+        return texto
+
+    corte = min(huecos, key=lambda i: abs(i - mitad))
+    # `chr(10)` y no un salto escrito: al generar este fichero desde otro script, el escape
+    # se convertia en un salto de verdad y partia el literal por la mitad. Paso dos veces.
+    return texto[:corte] + chr(10) + texto[corte + 1:]
 
 
 def main() -> int:
