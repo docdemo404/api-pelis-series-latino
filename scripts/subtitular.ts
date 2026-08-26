@@ -61,6 +61,15 @@ type Idioma = (typeof IDIOMAS)[number];
 
 const NOMBRE_DEL_IDIOMA: Record<Idioma, string> = { en: 'Inglés', es: 'Español' };
 
+/**
+ * Lo que se le añade a la etiqueta para que nadie confunda esto con un subtitulo de fabrica.
+ *
+ * Se quito y se volvio a poner a peticion, y la segunda vez tiene mas razon: estas pistas no son
+ * lo mismo que las que trae el fichero. Un subtitulo automatico se equivoca en nombres propios y
+ * en frases sueltas, y quien lo lee tiene derecho a saber lo que esta leyendo antes de extrañarse.
+ */
+const SELLO_DE_ORIGEN = ' (Generado automáticamente)';
+
 const supabase = getSupabaseAdmin();
 
 // ── Herramientas ──────────────────────────────────────────────────────────────────────────
@@ -250,13 +259,26 @@ function contextoDe(item: any): string | null {
   const partes = [item?.title, item?.original_title, ...reparto].filter(Boolean);
   if (!partes.length) return null;
 
-  // Una frase, no una lista: el modelo espera texto natural, no un CSV.
-  return `${partes.slice(0, 20).join(', ')}.`;
+  /*
+   * SEPARADOS POR PUNTOS, NO POR COMAS. Y no es un detalle de formato.
+   *
+   * El contexto no solo le dice al modelo QUE nombres esperar: le dice COMO SE ESCRIBE aqui. El
+   * modelo imita el estilo de lo que se le da, y una lista separada por comas y sin un solo punto
+   * es exactamente el estilo que salio en la primera transcripcion real — texto corrido, sin
+   * puntuar y sin mayusculas.
+   *
+   * Con puntos, el contexto ya enseña frases que empiezan en mayuscula y acaban en punto.
+   *
+   * Y NADA DE TEXTO PROPIO ALREDEDOR. La tentacion es escribir «Los personajes de esta serie son…»,
+   * pero eso mete un idioma en el contexto, y cuando el audio esta en otro el modelo se
+   * desconcierta — puede hasta arrastrar la deteccion de idioma. Solo nombres.
+   */
+  return partes.slice(0, 20).join('. ') + '.';
 }
 
 /** Lo que hace falta para ir a por el audio, y para pedir el subtitulo publico que le toca. */
 interface Donde {
-  url: string;
+  urls: string[];
   /** Solo en series. Un banco publico necesita los dos numeros para dar el fichero correcto. */
   temporada?: number;
   capitulo?: number;
@@ -275,17 +297,13 @@ interface Donde {
  * progreso, asi que tiene que ser exactamente la misma: `serie:s1e1`.
  */
 function urlDe(item: any, episodioId: string): Donde | undefined {
-  const primera = (servers: any) => {
-    for (const s of paraElCliente(servers)) {
-      const url = enlaceDirecto(s);
-      if (url) return url;
-    }
-    return undefined;
-  };
+  // TODOS, no solo el primero: cual sirve se decide despues, mirando quien tiene audio ingles.
+  const todas = (servers: any) =>
+    paraElCliente(servers).map(enlaceDirecto).filter((u): u is string => !!u);
 
   if (!episodioId) {
-    const url = primera(item?.servers);
-    return url ? { url } : undefined;
+    const urls = todas(item?.servers);
+    return urls.length ? { urls } : undefined;
   }
 
   for (const temporada of item?.seasons || []) {
@@ -294,11 +312,39 @@ function urlDe(item: any, episodioId: string): Donde | undefined {
       const numeroDeCapitulo = Number(capitulo?.episode_number);
       if (`${item.id}:s${numeroDeTemporada}e${numeroDeCapitulo}` !== episodioId) continue;
 
-      const url = primera(capitulo?.servers);
-      return url ? { url, temporada: numeroDeTemporada, capitulo: numeroDeCapitulo } : undefined;
+      const urls = todas(capitulo?.servers);
+      return urls.length ? { urls, temporada: numeroDeTemporada, capitulo: numeroDeCapitulo } : undefined;
     }
   }
   return undefined;
+}
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * EL SERVIDOR QUE TENGA LA PISTA INGLESA, NO EL PRIMERO QUE SALGA
+ *
+ * Una ficha suele tener varios servidores y NO son la misma copia: uno trae el doblaje y otro el
+ * original con sus dos pistas. Cogiendo el primero, lo que sale depende del orden en que el
+ * catalogo los devuelva ese dia — y ese orden cambia.
+ *
+ * Paso de verdad: la primera corrida cogio el servidor con audio ingles y transcribio en ingles;
+ * la siguiente cogio otro, se quedo sin pista inglesa, y como ya existia la transcripcion española
+ * dio el trabajo por hecho. El ingles no se llegaba a generar nunca.
+ *
+ * Asi que se preguntan por orden y se para en el primero que ofrezca ingles. Si ninguno lo tiene,
+ * el primero que haya — que es lo que habia antes, pero ahora como ultimo recurso y no por azar.
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ */
+async function elegirAudio(urls: string[]): Promise<Audio> {
+  let respaldo: Audio | null = null;
+
+  for (const url of urls) {
+    const pista = await pistaDeAudio(urlAbsoluta(url));
+    if (pista.idioma === 'en') return pista;
+    respaldo = respaldo || pista;
+  }
+
+  return respaldo || { url: urlAbsoluta(urls[0]) };
 }
 
 // ── Los dos caminos ───────────────────────────────────────────────────────────────────────
@@ -345,7 +391,18 @@ async function guardar(fila: {
   if (!apply) return;
   const { error } = await supabase
     .from('subtitulos')
-    .upsert({ ...fila, etiqueta: `${NOMBRE_DEL_IDIOMA[fila.idioma as Idioma]} (generado)`, creado_en: new Date().toISOString() },
+    /*
+     * LA ETIQUETA ES EL IDIOMA A SECAS. Decia «Ingles (generado)» y se pidio quitarlo: quien abre
+     * el menu esta eligiendo en que idioma leer, no auditando de donde salio el fichero. El origen
+     * sigue guardado en su columna y la API lo entrega, asi que no se pierde — simplemente deja de
+     * ocupar sitio en la unica linea que se lee con la pelicula corriendo.
+     */
+    .upsert(
+      {
+        ...fila,
+        etiqueta: NOMBRE_DEL_IDIOMA[fila.idioma as Idioma] + SELLO_DE_ORIGEN,
+        creado_en: new Date().toISOString(),
+      },
       { onConflict: 'media_id,episodio_id,idioma' });
   if (error) throw new Error(`no se pudo guardar: ${error.message}`);
 }
@@ -455,8 +512,11 @@ async function guardar(fila: {
       const donde = urlDe(item, entrada.episodio_id);
       if (!donde) throw new Error('sin url reproducible');
 
-      const audio = await pistaDeAudio(urlAbsoluta(donde.url));
-      if (audio.idioma) console.log(`   hay pista en ${audio.idioma}: se escucha esa`);
+      const audio = await elegirAudio(donde.urls);
+      console.log(
+        `   ${donde.urls.length} servidor(es) · se escucha ` +
+        (audio.idioma ? `la pista en ${audio.idioma}` : 'la pista que venga por defecto')
+      );
 
       const { data: yaHay } = await supabase
         .from('subtitulos')
@@ -567,9 +627,20 @@ async function guardar(fila: {
        * y se pregunta por ese. Cuando no, se conserva la regla vieja: sin saber que va a salir, no
        * hay forma de saber si ya esta.
        */
+      /*
+       * SOLO SE SALTA LO QUE SE SABE QUE YA ESTA.
+       *
+       * Cuando se ha podido elegir la pista, se sabe de antemano que idioma va a salir y se
+       * pregunta por ese. Cuando NO se sabe, antes se daba el trabajo por hecho si existia
+       * cualquier transcripcion — y eso es lo que dejaba el ingles sin generar para siempre en
+       * cuanto habia una española.
+       *
+       * Ahora, sin saberlo, se escucha. Puede costar una transcripcion repetida; lo otro costaba
+       * no tener nunca el idioma que se pidio.
+       */
       const yaTranscrito = audio.idioma
         ? (yaHay || []).some(f => f.origen === 'transcrito' && f.idioma === audio.idioma)
-        : (yaHay || []).some(f => f.origen === 'transcrito');
+        : false;
 
       if (!yaTranscrito) {
         const wav = join(carpeta, 'completo.wav');
