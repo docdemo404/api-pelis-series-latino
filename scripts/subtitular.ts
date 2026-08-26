@@ -145,23 +145,48 @@ function contextoDe(item: any): string | null {
   return `${partes.slice(0, 20).join(', ')}.`;
 }
 
-/** La url reproducible de una ficha o de uno de sus capítulos. */
-function urlDe(item: any, episodioId: string): string | undefined {
-  if (!episodioId) {
-    for (const s of paraElCliente(item?.servers)) {
+/** Lo que hace falta para ir a por el audio, y para pedir el subtitulo publico que le toca. */
+interface Donde {
+  url: string;
+  /** Solo en series. Un banco publico necesita los dos numeros para dar el fichero correcto. */
+  temporada?: number;
+  capitulo?: number;
+}
+
+/**
+ * La url reproducible de una ficha o de uno de sus capítulos.
+ *
+ * EL IDENTIFICADOR DE UN CAPITULO NO ESTA GUARDADO: SE CONSTRUYE. Esto buscaba `capitulo.id`
+ * contra el id de la cola, y en la base los episodios no tienen ese campo —traen `season_number` y
+ * `episode_number`—, asi que la comparacion no acertaba nunca y TODA serie habria fallado con «sin
+ * url reproducible». Un fallo que no se habria visto hasta la primera serie, porque las peliculas
+ * van por la otra rama.
+ *
+ * La regla vive en la app (`VodMapping.episodeId`) y es la que decide bajo que clave se guarda el
+ * progreso, asi que tiene que ser exactamente la misma: `serie:s1e1`.
+ */
+function urlDe(item: any, episodioId: string): Donde | undefined {
+  const primera = (servers: any) => {
+    for (const s of paraElCliente(servers)) {
       const url = enlaceDirecto(s);
       if (url) return url;
     }
     return undefined;
+  };
+
+  if (!episodioId) {
+    const url = primera(item?.servers);
+    return url ? { url } : undefined;
   }
 
   for (const temporada of item?.seasons || []) {
+    const numeroDeTemporada = Number(temporada?.season_number);
     for (const capitulo of temporada?.episodes || []) {
-      if (capitulo?.id !== episodioId) continue;
-      for (const s of paraElCliente(capitulo?.servers)) {
-        const url = enlaceDirecto(s);
-        if (url) return url;
-      }
+      const numeroDeCapitulo = Number(capitulo?.episode_number);
+      if (`${item.id}:s${numeroDeTemporada}e${numeroDeCapitulo}` !== episodioId) continue;
+
+      const url = primera(capitulo?.servers);
+      return url ? { url, temporada: numeroDeTemporada, capitulo: numeroDeCapitulo } : undefined;
     }
   }
   return undefined;
@@ -316,8 +341,9 @@ async function guardar(fila: {
         .single();
       if (!item) throw new Error('la ficha ya no está');
 
-      const url = urlDe(item, entrada.episodio_id);
-      if (!url) throw new Error('sin url reproducible');
+      const donde = urlDe(item, entrada.episodio_id);
+      if (!donde) throw new Error('sin url reproducible');
+      const url = donde.url;
 
       const { data: yaHay } = await supabase
         .from('subtitulos')
@@ -329,7 +355,12 @@ async function guardar(fila: {
         (yaHay || []).some(f => f.idioma === idioma && (!origen || f.origen === origen));
 
       const contexto = contextoDe(item);
-      const duracionS = (Number(item.runtime) || 100) * 60;
+      /*
+       * Solo se usa para repartir las tres ventanas del sondeo, asi que basta con que se parezca.
+       * En series `runtime` es la duracion de UN capitulo, que es justo lo que hace falta; cuando
+       * no hay dato, 45 minutos se acerca mas a un capitulo que los 100 de una pelicula.
+       */
+      const duracionS = (Number(item.runtime) || (entrada.episodio_id ? 45 : 100)) * 60;
 
       console.log(`▶ ${etiqueta} · ${item.title}`);
 
@@ -352,7 +383,14 @@ async function guardar(fila: {
       for (const idioma of IDIOMAS) {
         if (tiene(idioma)) continue;
         const candidatos = await buscarPublicos({
-          imdbId: item.imdb_id, tmdbId: item.tmdb_id, idioma,
+          imdbId: item.imdb_id,
+          tmdbId: item.tmdb_id,
+          idioma,
+          // SIN ESTOS DOS, UNA SERIE PIDE «LOS SUBTITULOS DE BREAKING BAD» y el banco contesta con
+          // cualquiera de sus sesenta y dos capitulos. El comprobador lo rechazaria —es su
+          // trabajo— pero se habria gastado una descarga de la cuota diaria para nada.
+          temporada: donde.temporada,
+          capitulo: donde.capitulo,
         });
         if (candidatos.length) candidatosPorIdioma.set(idioma, candidatos);
       }

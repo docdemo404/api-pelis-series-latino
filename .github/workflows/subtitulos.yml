@@ -36,6 +36,10 @@ on:
         description: 'Una sola ficha, por su media_id. Vacío = la cola.'
         required: false
         default: ''
+      episodio:
+        description: 'Un capítulo concreto, como md-1396:s1e1. Requiere `solo`.'
+        required: false
+        default: ''
       minutos:
         description: 'Presupuesto de la corrida'
         required: false
@@ -135,6 +139,7 @@ jobs:
           WHISPER_MODELO: large-v3
           PYTHON: python
           SOLO: ${{ inputs.solo }}
+          EPISODIO: ${{ inputs.episodio }}
           MINUTOS: ${{ inputs.minutos }}
           LLENAR: ${{ inputs.llenar }}
         run: |
@@ -154,6 +159,11 @@ jobs:
             '') ;;
             *[!a-zA-Z0-9._:-]*) echo "::error::solo='$SOLO' no parece un media_id"; exit 1 ;;
             *) ARGS="$ARGS --solo=$SOLO" ;;
+          esac
+          case "$EPISODIO" in
+            '') ;;
+            *[!a-zA-Z0-9._:-]*) echo "::error::episodio='$EPISODIO' no parece un id"; exit 1 ;;
+            *) ARGS="$ARGS --episodio=$EPISODIO" ;;
           esac
           if [ "${{ inputs.ensayo }}" != "true" ]; then ARGS="$ARGS --apply"; fi
 
