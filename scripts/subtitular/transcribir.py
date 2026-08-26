@@ -110,19 +110,62 @@ def main() -> int:
     modelo = WhisperModel(nombre, device="cpu", compute_type="int8", cpu_threads=hilos)
     avisar(f"   listo en {time.time() - t0:.0f} s")
 
+    def escuchar(con_vad: bool):
+        return modelo.transcribe(
+            args.audio,
+            language=args.idioma,
+            task="transcribe",
+            beam_size=5,
+            word_timestamps=True,
+            # Ver la cabecera: sin esto, un tropiezo se convierte en un bucle.
+            condition_on_previous_text=False,
+            vad_filter=con_vad,
+            vad_parameters={"min_silence_duration_ms": 500} if con_vad else None,
+            initial_prompt=args.contexto,
+        )
+
     t1 = time.time()
-    segmentos, info = modelo.transcribe(
-        args.audio,
-        language=args.idioma,
-        task="transcribe",
-        beam_size=5,
-        word_timestamps=True,
-        # Ver la cabecera: sin esto, un tropiezo se convierte en un bucle.
-        condition_on_previous_text=False,
-        vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 500},
-        initial_prompt=args.contexto,
-    )
+
+    """
+    SI EL FILTRO DE VOZ SE LO COME TODO, SE ESCUCHA OTRA VEZ SIN FILTRO.
+
+    El filtro existe para que el modelo no invente sobre música y silencio, y hace falta. Pero
+    cuando no reconoce NADA como habla deja el audio en cero, y entonces la detección de idioma se
+    queda sin material y revienta desde dentro de la librería:
+
+        language = max(...)
+        ValueError: max() arg is an empty sequence
+
+    Pasó en la primera corrida real, sobre un minuto que tenía sonido de sobra —media de −31 dB,
+    picos de −12— pero que era música. El error no dice nada de eso: dice que una lista estaba
+    vacía, tres funciones por debajo de donde uno mira.
+
+    Que un minuto no tenga habla es un resultado legítimo, no una avería. Se reintenta sin filtro
+    —por si el filtro se pasó de estricto— y si aun así no hay nada, se devuelve vacío y quien
+    llamó decide. Lo que no puede es tumbar la corrida.
+    """
+    #
+    # NO se materializa el generador para atrapar esto, y la distinción importa: el filtro de voz y
+    # la detección de idioma ocurren en la LLAMADA, antes de devolver nada. Lo que se recorre
+    # después es la transcripción de verdad, que en una película son horas — y forzarla a lista
+    # aquí dejaría la corrida muda todo ese rato, sin una línea de progreso.
+    try:
+        segmentos, info = escuchar(con_vad=True)
+    except ValueError:
+        avisar("   ⚠ el filtro de voz no encontró habla; se escucha otra vez sin filtro")
+        try:
+            segmentos, info = escuchar(con_vad=False)
+        except ValueError:
+            avisar("   ⚠ tampoco hay habla sin filtro: se devuelve vacío")
+            json.dump({
+                "idioma": "",
+                "seguridad": 0.0,
+                "segundos_audio": 0,
+                "segundos_maquina": round(time.time() - t1),
+                "modelo": nombre,
+                "lineas": [],
+            }, sys.stdout, ensure_ascii=False)
+            return 0
 
     palabras = []
     ultimo_aviso = 0.0

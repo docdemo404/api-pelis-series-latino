@@ -28,7 +28,7 @@
  */
 import 'dotenv/config';
 import { spawn } from 'child_process';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, rmSync, statSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
@@ -315,68 +315,118 @@ async function guardar(fila: {
 
       console.log(`▶ ${etiqueta} · ${item.title}`);
 
-      // --- 1. El sondeo: en qué idioma habla, y material para comprobar públicos ---
-      const sondeo = await sondear(url, duracionS, contexto, carpeta);
-      console.log(`   habla ${sondeo.idioma} (${(sondeo.seguridad * 100).toFixed(0)} %) · ${sondeo.lineas.length} líneas de muestra`);
-
-      // --- 2. Los públicos, como adelanto ---
+      /*
+       * ── 1. ¿HAY ALGUN PUBLICO QUE MEREZCA COMPROBARSE? ────────────────────────────────────
+       *
+       * ESTE ORDEN ES EL ARREGLO DE UN DESPERDICIO MEDIDO. Antes se sondeaba SIEMPRE —tres
+       * ventanas de un minuto— y despues se miraba si habia candidatos. Pero el sondeo existe
+       * solo para decidir si un fichero publico sirve: sin candidatos no decide nada.
+       *
+       * Y no es gratis. Medido contra archive.org: sacar UNA ventana de un minuto tardo cinco
+       * minutos de reloj, porque el `-ss` no se salta la descarga, la acelera como puede. Tres
+       * ventanas son un cuarto de hora largo antes de empezar a escuchar nada. Sin clave de
+       * OpenSubtitles configurada no hay candidatos jamas, asi que ese cuarto de hora se pagaba
+       * en todas las peliculas para no comprobar nada.
+       *
+       * Preguntar primero cuesta una peticion HTTP.
+       */
+      const candidatosPorIdioma = new Map<Idioma, Awaited<ReturnType<typeof buscarPublicos>>>();
       for (const idioma of IDIOMAS) {
         if (tiene(idioma)) continue;
-
         const candidatos = await buscarPublicos({
           imdbId: item.imdb_id, tmdbId: item.tmdb_id, idioma,
         });
+        if (candidatos.length) candidatosPorIdioma.set(idioma, candidatos);
+      }
 
-        for (const candidato of candidatos) {
-          const crudo = await descargarPublico(candidato);
-          if (!crudo) continue;
+      // --- 2. El sondeo, solo si hay algo que comprobar con el ---
+      let sondeo: { lineas: Linea[]; idioma: string; seguridad: number } | null = null;
+      if (candidatosPorIdioma.size) {
+        sondeo = await sondear(url, duracionS, contexto, carpeta);
+        console.log(
+          `   habla ${sondeo.idioma || '?'} (${(sondeo.seguridad * 100).toFixed(0)} %) · ` +
+          `${sondeo.lineas.length} lineas de muestra`
+        );
+      } else {
+        console.log('   sin candidatos publicos: se escucha la pelicula directamente.');
+      }
 
-          const lineas = leerSubtitulo(crudo);
-          const encaje = medirEncaje(sondeo.lineas, lineas);
-          console.log(`   público ${idioma} «${candidato.nombre}» → ${encaje.veredicto} · ${encaje.detalle}`);
-          if (encaje.veredicto === 'no es') continue;
+      // --- 3. Los publicos que pasen la comprobacion ---
+      if (sondeo && sondeo.lineas.length) {
+        for (const [idioma, candidatos] of candidatosPorIdioma) {
+          for (const candidato of candidatos) {
+            const crudo = await descargarPublico(candidato);
+            if (!crudo) continue;
 
-          await guardar({
-            media_id: entrada.media_id,
-            episodio_id: entrada.episodio_id,
-            idioma,
-            origen: 'publico',
-            contenido: escribirVtt(correrEnElTiempo(lineas, encaje.desfaseMs)),
-            desfase_ms: encaje.desfaseMs,
-            parecido: Number(encaje.parecido.toFixed(3)),
-          });
-          break;
+            const lineas = leerSubtitulo(crudo);
+            const encaje = medirEncaje(sondeo.lineas, lineas);
+            console.log(`   publico ${idioma} «${candidato.nombre}» → ${encaje.veredicto} · ${encaje.detalle}`);
+            if (encaje.veredicto === 'no es') continue;
+
+            await guardar({
+              media_id: entrada.media_id,
+              episodio_id: entrada.episodio_id,
+              idioma,
+              origen: 'publico',
+              contenido: escribirVtt(correrEnElTiempo(lineas, encaje.desfaseMs)),
+              desfase_ms: encaje.desfaseMs,
+              parecido: Number(encaje.parecido.toFixed(3)),
+            });
+            break;
+          }
         }
       }
 
-      // --- 3. La transcripción, que es la que de verdad se pidió ---
-      //
-      // Solo del idioma QUE SE HABLA: transcribir es escuchar, y no se puede escuchar un idioma
-      // que no suena. Lo otro sería traducir, que es otro trabajo y otra fidelidad.
-      const hablado = sondeo.idioma as Idioma;
-      const interesa = IDIOMAS.includes(hablado);
+      /*
+       * ── 4. LA TRANSCRIPCION, QUE ES LA QUE DE VERDAD SE PIDIO ─────────────────────────────
+       *
+       * Solo del idioma QUE SE HABLA: transcribir es escuchar, y no se puede escuchar un idioma
+       * que no suena. Lo otro seria traducir, que es otro trabajo y otra fidelidad.
+       *
+       * Y NO SE LE DICE CUAL ES cuando no se sabe. La deteccion sobre la pelicula entera es mas
+       * fiable que la de un minuto suelto —que puede caer en musica— y no cuesta nada aparte: el
+       * modelo la hace igual antes de empezar. Si hubo sondeo, su idioma va como pista.
+       */
+      const yaTranscrito = (yaHay || []).some(f => f.origen === 'transcrito');
 
-      if (interesa && !tiene(hablado, 'transcrito')) {
+      if (!yaTranscrito) {
         const wav = join(carpeta, 'completo.wav');
-        console.log(`   escuchando la película entera…`);
-        await sacarAudio(url, wav);
+        console.log('   bajando el audio de la pelicula entera…');
 
-        const t = await transcribir(wav, { idioma: hablado, contexto });
+        const t0 = Date.now();
+        await sacarAudio(url, wav);
+        const mb = statSync(wav).size / 1048576;
+        console.log(`   ${mb.toFixed(0)} MB de audio en ${((Date.now() - t0) / 60000).toFixed(1)} min`);
+
+        const t = await transcribir(wav, {
+          idioma: (sondeo?.idioma as Idioma) || null,
+          contexto,
+        });
         rmSync(wav, { force: true });
 
-        await guardar({
-          media_id: entrada.media_id,
-          episodio_id: entrada.episodio_id,
-          idioma: hablado,
-          origen: 'transcrito',
-          contenido: escribirVtt(aLineas(t)),
-          modelo: t.modelo,
-          segundos_audio: t.segundos_audio,
-        });
+        const hablado = t.idioma as Idioma;
+        if (!IDIOMAS.includes(hablado)) {
+          console.log(`   habla ${t.idioma || '?'}, que no es ninguno de los dos: no se guarda.`);
+        } else if (!t.lineas.length) {
+          console.log('   no se oyo ni una palabra en toda la pelicula: no se guarda.');
+        } else {
+          await guardar({
+            media_id: entrada.media_id,
+            episodio_id: entrada.episodio_id,
+            idioma: hablado,
+            origen: 'transcrito',
+            contenido: escribirVtt(aLineas(t)),
+            modelo: t.modelo,
+            segundos_audio: t.segundos_audio,
+          });
 
-        console.log(`   ✅ ${hablado} transcrito · ${t.lineas.length} líneas · ${(t.segundos_maquina / 60).toFixed(0)} min de máquina`);
-      } else if (!interesa) {
-        console.log(`   habla ${sondeo.idioma}, que no es ninguno de los dos: solo queda lo público.`);
+          console.log(
+            `   ✅ ${hablado} transcrito · ${t.lineas.length} lineas · ` +
+            `${(t.segundos_audio / 60).toFixed(0)} min de audio en ` +
+            `${(t.segundos_maquina / 60).toFixed(1)} min de maquina ` +
+            `(${(t.segundos_audio / Math.max(1, t.segundos_maquina)).toFixed(1)}× tiempo real)`
+          );
+        }
       }
 
       if (apply) await supabase.from('subtitulos_cola').update({ hecho_en: new Date().toISOString() }).eq('id', entrada.id);
