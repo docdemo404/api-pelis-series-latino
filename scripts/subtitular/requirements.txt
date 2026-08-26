@@ -10,3 +10,20 @@
 # Y este fichero es ademas lo que le da a `actions/setup-python` una clave con la que cachear la
 # instalacion. Sin el, la accion aborta el trabajo entero antes de instalar nada.
 faster-whisper==1.0.3
+
+# LAS DOS DE ABAJO NO SON CAPRICHO: SIN ELLAS `faster-whisper` 1.0.3 NI SIQUIERA IMPORTA.
+#
+# Su `utils.py` hace `import requests` pero NO lo declara entre sus dependencias. Durante años eso
+# no se noto porque `huggingface_hub` lo arrastraba, y las versiones nuevas de esa libreria ya no
+# lo usan. O sea que la dependencia no declarada dejo de llegar de rebote, y la primera corrida
+# real murio asi:
+#
+#     File ".../faster_whisper/utils.py", line 8, in <module>
+#         import requests
+#     ModuleNotFoundError: No module named 'requests'
+#
+# Se declara aqui lo que aquella no declaro, y ademas se sujeta `huggingface_hub` a la epoca en la
+# que `faster-whisper` 1.0.3 fue escrito: la que cambio de libreria de red tambien pudo cambiar
+# otras cosas de las que este usa, y perseguir eso una a una es peor que quedarse quieto.
+requests<3
+huggingface_hub<1.0
