@@ -81,12 +81,18 @@ jobs:
         with:
           python-version: '3.11'
           cache: 'pip'
+          # SIN ESTA LINEA LA ACCION ABORTA EL TRABAJO ENTERO. `cache: 'pip'` busca por su cuenta
+          # un `requirements.txt` o un `pyproject.toml` en la raiz para calcular la clave, y aqui
+          # no hay ninguno de los dos: este es un proyecto TypeScript donde Python es un script
+          # suelto. Sin encontrarlo no avisa y sigue — falla, y se lleva la corrida por delante
+          # antes de instalar nada. Medido: 38 segundos hasta el error.
+          cache-dependency-path: scripts/subtitular/requirements.txt
 
       # `faster-whisper` es Whisper compilado con CTranslate2: en procesador va varias veces más
       # rápido que la implementación original y ocupa la mitad de memoria. Sin él esto no cabría
-      # en un runner.
+      # en un runner. La version va clavada en el fichero, no aqui: ver la nota de alli.
       - name: Instalar faster-whisper
-        run: pip install faster-whisper==1.0.3
+        run: pip install -r scripts/subtitular/requirements.txt
 
       # EL MODELO PESA MÁS DE UN GIGA Y NO CAMBIA NUNCA. Bajarlo en cada corrida serían diez
       # minutos de las seis horas, cuatro veces al día, para traerse exactamente el mismo
@@ -95,7 +101,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: whisper-${{ env.WHISPER_MODELO || 'large-v3' }}-v1
+          # La clave va ESCRITA, no interpolada de `env`. Estaba como `env.WHISPER_MODELO`, que en
+          # este punto del fichero no existe todavia —se define en el paso de mas abajo— y se
+          # resolvia a cadena vacia: la caché funcionaba igual, pero su nombre no decia de que
+          # modelo era. El dia que se cambie de modelo hay que cambiar tambien esto, y si el nombre
+          # miente nadie se acuerda.
+          key: whisper-large-v3-v1
 
       - name: Escuchar y escribir
         env:

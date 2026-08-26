@@ -1,0 +1,12 @@
+# Lo que hace falta para escuchar una pelicula. Ver `transcribir.py`.
+#
+# `faster-whisper` es Whisper compilado con CTranslate2: en procesador va varias veces mas rapido
+# que la implementacion original y ocupa la mitad de memoria. Sin el, esto no cabria en un runner.
+#
+# LA VERSION VA CLAVADA A PROPOSITO. Un cambio de version del modelo o del tokenizador cambia el
+# TEXTO que sale, y aqui el texto es el producto: una actualizacion silenciosa convertiria «se
+# transcribio con esto» en una frase sin significado. Se sube a mano, cuando se decida.
+#
+# Y este fichero es ademas lo que le da a `actions/setup-python` una clave con la que cachear la
+# instalacion. Sin el, la accion aborta el trabajo entero antes de instalar nada.
+faster-whisper==1.0.3
