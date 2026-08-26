@@ -134,18 +134,29 @@ router.post('/api/v1/subtitles/:id/pedir', async (req: Request, res: Response, n
       return;
     }
 
-    if (yaEsta) {
-      await supabase
-        .from('subtitulos_cola')
-        .update({ prioridad: (yaEsta.prioridad || 0) + 10 })
-        .eq('id', yaEsta.id);
-    } else {
-      await supabase.from('subtitulos_cola').insert({
-        media_id: req.params.id,
-        episodio_id: episodio,
-        prioridad: 10,
-      });
-    }
+    /*
+     * SE MIRA SI LA ESCRITURA FUNCIONO, y esto dejo de ser opcional al encender RLS.
+     *
+     * La cola solo acepta a la *service role*. Si el entorno que sirve la API se quedara sin
+     * `SUPABASE_SERVICE_ROLE_KEY`, `getSupabaseAdmin()` degrada al cliente anon —lo dice su propio
+     * comentario— y la fila no entraria. Sin comprobar el error, esta ruta contestaria «en cola»
+     * sobre una cola en la que no hay nada, y el fallo no apareceria por ningun lado: ni en la
+     * app, que no espera nada, ni en el barrido, que simplemente no encuentra trabajo.
+     *
+     * Un «no se pudo» es incomodo; un «hecho» que no hizo nada es indepurable.
+     */
+    const escritura = yaEsta
+      ? await supabase
+          .from('subtitulos_cola')
+          .update({ prioridad: (yaEsta.prioridad || 0) + 10 })
+          .eq('id', yaEsta.id)
+      : await supabase.from('subtitulos_cola').insert({
+          media_id: req.params.id,
+          episodio_id: episodio,
+          prioridad: 10,
+        });
+
+    if (escritura.error) throw new Error(escritura.error.message);
 
     res.json({ status: 'success', data: { estado: 'en cola' } });
   } catch (err) {

@@ -114,7 +114,38 @@ CREATE TABLE IF NOT EXISTS subtitulos (
     CONSTRAINT subtitulos_unicos UNIQUE (media_id, episodio_id, idioma)
 );
 
-ALTER TABLE subtitulos DISABLE ROW LEVEL SECURITY;
+/*
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * CON RLS, Y AQUÍ NO ES BUROCRACIA
+ *
+ * El resto del esquema va con RLS desactivado, pero estas dos tablas no pueden permitírselo, y el
+ * motivo es concreto: **el anon key está escrito en el código** (`src/services/supabaseService.ts`)
+ * y este repositorio es público. O sea que ese key lo tiene cualquiera que sepa leer GitHub.
+ *
+ * Con RLS apagado, ese key da ESCRITURA sobre lo que toque. En estas dos tablas eso significa:
+ *
+ *   · meter texto arbitrario en `subtitulos`, que la app pinta encima del vídeo;
+ *   · inundar `subtitulos_cola` y gastar los minutos de GitHub Actions transcribiendo basura.
+ *
+ * No cuesta nada cerrarlo: todo lo que escribe aquí —la API y los barridos— usa
+ * `getSupabaseAdmin()`, que va con la *service role*, y esa se salta RLS por diseño.
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ */
+ALTER TABLE subtitulos ENABLE ROW LEVEL SECURITY;
+
+/*
+ * LEER SÍ, ESCRIBIR NO.
+ *
+ * El texto de un subtítulo no es un secreto: se sirve a cualquiera que reproduzca la película, y
+ * la ruta que lo entrega no pide nada. Dejar la lectura abierta es además la red de seguridad de
+ * un caso concreto: si el entorno que sirve la API se quedara sin `SUPABASE_SERVICE_ROLE_KEY`,
+ * `getSupabaseAdmin()` degrada al cliente anon —lo dice su propio comentario— y sin esta política
+ * los subtítulos dejarían de servirse sin que nada lo dijera.
+ *
+ * Lo que NO hay es política de escritura, y esa ausencia es la que cierra la puerta.
+ */
+CREATE POLICY subtitulos_lectura_publica ON subtitulos
+    FOR SELECT USING (true);
 
 -- El acceso real es siempre «dame los de esta ficha», y en series «los de este capítulo».
 CREATE INDEX IF NOT EXISTS idx_subtitulos_ficha ON subtitulos (media_id, episodio_id);
@@ -154,7 +185,14 @@ CREATE TABLE IF NOT EXISTS subtitulos_cola (
     CONSTRAINT subtitulos_cola_unica UNIQUE (media_id, episodio_id)
 );
 
-ALTER TABLE subtitulos_cola DISABLE ROW LEVEL SECURITY;
+/*
+ * LA COLA VA CERRADA DEL TODO: ni lectura ni escritura para nadie que no sea la service role.
+ *
+ * Aquí no hay nada que un cliente necesite ver —la app pregunta por las pistas, no por la cola— y
+ * en cambio sí hay algo que perder: quien pueda escribir aquí decide en qué gasta el runner las
+ * próximas seis horas.
+ */
+ALTER TABLE subtitulos_cola ENABLE ROW LEVEL SECURITY;
 
 -- El barrido pregunta siempre lo mismo: lo pendiente, lo más pedido primero.
 CREATE INDEX IF NOT EXISTS idx_subtitulos_cola_pendiente

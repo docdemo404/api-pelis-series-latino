@@ -245,6 +245,28 @@ async function guardar(fila: {
   }
 
   const soloUna = texto('solo');
+
+  /*
+   * `--solo` TIENE QUE PODER METER LA FICHA EN LA COLA, no solo filtrarla.
+   *
+   * Filtraba y ya: si la ficha no estaba en la cola, la consulta no devolvia nada y la corrida
+   * terminaba diciendo «no hay nada pendiente» — sobre la ficha que le acababas de nombrar. O sea
+   * que el unico modo pensado para probar una pelicula concreta no servia para probar una pelicula
+   * concreta, salvo que alguien la hubiera pedido antes desde la app.
+   *
+   * Con prioridad alta porque es una peticion a mano: quien lanza esto con un nombre encima quiere
+   * ESA, y quiere verla salir en el registro de esta corrida.
+   */
+  if (soloUna && apply) {
+    const { error } = await supabase
+      .from('subtitulos_cola')
+      .upsert(
+        { media_id: soloUna, episodio_id: texto('episodio') || '', prioridad: 100 },
+        { onConflict: 'media_id,episodio_id', ignoreDuplicates: true },
+      );
+    if (error) throw new Error(`no se pudo encolar ${soloUna}: ${error.message}`);
+  }
+
   let consulta = supabase
     .from('subtitulos_cola')
     .select('id, media_id, episodio_id, intentos')
