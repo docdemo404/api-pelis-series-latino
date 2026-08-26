@@ -8,6 +8,7 @@ import catalogRoutes from '../src/routes/catalog.routes';
 import searchRoutes from '../src/routes/search.routes';
 import mediaRoutes from '../src/routes/media.routes';
 import streamRoutes from '../src/routes/stream.routes';
+import subtitulosRoutes from '../src/routes/subtitulos.routes';
 import { sendErrorResponse } from '../src/utils/apiHelpers';
 import { publicOrigin, withAbsoluteDirectStreams } from '../src/utils/publicUrl';
 
@@ -189,6 +190,9 @@ app.use(panelRoutes);
 app.use(catalogRoutes);
 app.use(searchRoutes);
 app.use(mediaRoutes);
+// Los subtitulos van aparte de `/streams`: un enlace caduca en horas, un subtitulo no
+// cambia nunca. Ver `subtitulos.routes.ts`.
+app.use(subtitulosRoutes);
 app.use(streamRoutes);
 
 // Manejador global de errores inesperados (Zero 500 HTML Pages)

@@ -1,0 +1,140 @@
+name: Subtítulos para lo que no trae ninguno
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# ESCUCHAR PELÍCULAS EN UN RUNNER GRATIS
+#
+# Buena parte del catálogo llega sin una sola pista de texto. Esto se las pone: baja el audio,
+# lo transcribe con Whisper y guarda WebVTT en la base. Ver `scripts/subtitular.ts` para el
+# orden de los dos caminos —fichero público comprobado primero, película entera después— y
+# `src/services/subtitulos/encaje.ts` para cómo se decide si un público es de esta copia.
+#
+# ── POR QUÉ CABE AQUÍ, SIENDO LO MÁS CARO DEL REPOSITORIO ──────────────────────────────────
+#
+# Porque no hace falta bajarse la película. `ffmpeg` con `-ss` delante del `-i` pide un rango y
+# se trae solo el trozo que necesita, y de ese trozo solo el audio a 16 kHz mono, que es lo que
+# Whisper escucha. Una película de dos horas son ~110 MB de audio en vez de dos gigas de vídeo,
+# y las tres ventanas de comprobación son tres minutos.
+#
+# Lo caro es el procesador, no la red. Por eso la corrida tiene presupuesto y guarda según
+# avanza: lo que no dé tiempo sale en la vuelta siguiente, y lo ya hecho no se repite.
+#
+# ── QUÉ SE HACE PRIMERO ────────────────────────────────────────────────────────────────────
+#
+# Manda la cola, y en la cola manda la demanda: lo que alguien acaba de abrir sin subtítulos
+# entra con prioridad. `--llenar` mete fichas sin pedir por debajo para que la máquina no se
+# quede parada cuando nadie ha pedido nada.
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+
+on:
+  schedule:
+    # Cada 6 h. No más: cada corrida ocupa un runner durante horas, y hay otros seis trabajos
+    # en este repositorio que también lo necesitan.
+    - cron: '25 1,7,13,19 * * *'
+  workflow_dispatch:
+    inputs:
+      solo:
+        description: 'Una sola ficha, por su media_id. Vacío = la cola.'
+        required: false
+        default: ''
+      minutos:
+        description: 'Presupuesto de la corrida'
+        required: false
+        default: '300'
+      llenar:
+        description: 'Cuántas fichas sin pedir meter en la cola antes de empezar'
+        required: false
+        default: '0'
+      ensayo:
+        description: 'Solo decir lo que haría, sin escribir'
+        type: boolean
+        required: false
+        default: false
+
+# Dos corridas a la vez se pelearían por las mismas fichas de la cola y se transcribiría dos
+# veces lo mismo, que es lo más caro que puede pasar aquí.
+concurrency:
+  group: subtitulos
+  cancel-in-progress: false
+
+jobs:
+  subtitular:
+    runs-on: ubuntu-latest
+    # Por debajo del tope duro de GitHub, para que quien corte sea nuestro presupuesto y no una
+    # cancelación de plataforma —que se lleva por delante hasta los pasos con `if: always()`—.
+    timeout-minutes: 350
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Comprobar que todo compila
+        run: npx tsc --noEmit
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # `faster-whisper` es Whisper compilado con CTranslate2: en procesador va varias veces más
+      # rápido que la implementación original y ocupa la mitad de memoria. Sin él esto no cabría
+      # en un runner.
+      - name: Instalar faster-whisper
+        run: pip install faster-whisper==1.0.3
+
+      # EL MODELO PESA MÁS DE UN GIGA Y NO CAMBIA NUNCA. Bajarlo en cada corrida serían diez
+      # minutos de las seis horas, cuatro veces al día, para traerse exactamente el mismo
+      # fichero. La caché lo deja en segundos.
+      - name: Recuperar el modelo de la caché
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: whisper-${{ env.WHISPER_MODELO || 'large-v3' }}-v1
+
+      - name: Escuchar y escribir
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          VIDEO_PROXY_URL: ${{ secrets.VIDEO_PROXY_URL }}
+          VIDEO_PROXY_KEY: ${{ secrets.VIDEO_PROXY_KEY }}
+          # Sin esta clave no hay búsqueda de subtítulos públicos y todo se transcribe. No es un
+          # fallo: es el modo en el que esto arranca hasta que alguien la ponga.
+          OPENSUBTITLES_API_KEY: ${{ secrets.OPENSUBTITLES_API_KEY }}
+          # El grande porque lo que se pidió es fidelidad. Se puede bajar a `large-v3-turbo` por
+          # aquí el día que sobre prisa y falte calidad.
+          WHISPER_MODELO: large-v3
+          PYTHON: python
+          SOLO: ${{ inputs.solo }}
+          MINUTOS: ${{ inputs.minutos }}
+          LLENAR: ${{ inputs.llenar }}
+        run: |
+          ARGS=""
+          # Los mandos llegan por ENTORNO y se validan contra una forma cerrada: interpolados en
+          # la línea de comandos, un valor con `;` dentro se ejecutaría en el runner.
+          case "${MINUTOS:-300}" in
+            ''|*[!0-9]*) echo "::error::minutos no es un número"; exit 1 ;;
+            *) ARGS="$ARGS --minutos=${MINUTOS:-300}" ;;
+          esac
+          case "${LLENAR:-0}" in
+            ''|*[!0-9]*) echo "::error::llenar no es un número"; exit 1 ;;
+            0) ;;
+            *) ARGS="$ARGS --llenar=$LLENAR" ;;
+          esac
+          case "$SOLO" in
+            '') ;;
+            *[!a-zA-Z0-9._:-]*) echo "::error::solo='$SOLO' no parece un media_id"; exit 1 ;;
+            *) ARGS="$ARGS --solo=$SOLO" ;;
+          esac
+          if [ "${{ inputs.ensayo }}" != "true" ]; then ARGS="$ARGS --apply"; fi
+
+          echo "subtitular $ARGS"
+          npx ts-node -T scripts/subtitular.ts $ARGS
