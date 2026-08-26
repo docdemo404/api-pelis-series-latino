@@ -57,6 +57,11 @@ import { fichaReproducible } from '../src/services/streamSorter';
 import { esUrlDeFicheroPermanente } from '../src/scrapers/directStream';
 import { esManifiestoHls, manifiestoArranca } from '../src/services/permanentHealth';
 import { leerLedger, ledgerVacio, fusionarConLedger } from '../src/services/manualLedger';
+import { noMorirPorUnCorteDeRed } from '../src/utils/seguirVivo';
+
+// Un socket que se muere no puede llevarse por delante el barrido entero. Ver ahi.
+noMorirPorUnCorteDeRed();
+
 
 const db = getSupabaseAdmin();
 const numero = (bandera: string, porDefecto: number) =>

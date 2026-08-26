@@ -25,6 +25,11 @@
 import 'dotenv/config';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
 import { ficherosDeVideoArchive, urlDeFicheroArchive } from '../src/services/realScraperService';
+import { noMorirPorUnCorteDeRed } from '../src/utils/seguirVivo';
+
+// Un socket que se muere no puede llevarse por delante el barrido entero. Ver ahi.
+noMorirPorUnCorteDeRed();
+
 
 /** De tres en tres: archive.org va lento y aquí no hay ninguna prisa. */
 const A_LA_VEZ = 3;

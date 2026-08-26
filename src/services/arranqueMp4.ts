@@ -49,6 +49,29 @@ async function pedir(url: string, desde: number, hasta?: number) {
   return fetch(url, { headers: { Range: rango }, signal: AbortSignal.timeout(PACIENCIA_MS) });
 }
 
+/**
+ * CERRAR EL CUERPO SIEMPRE, AUNQUE NO SE VAYA A LEER. AQUI ESTABA EL FALLO QUE MATABA EL BARRIDO.
+ *
+ * Un `fetch` con `AbortSignal.timeout` deja el cuerpo abierto hasta que alguien lo lee o lo cierra.
+ * Si se vuelve antes —un 404, un 500, una cabecera corta— el cuerpo se queda ahi colgando, y a los
+ * veinticinco segundos el temporizador lo aborta: una promesa rota que ya no espera NADIE, o sea
+ * un `unhandledRejection`, o sea el proceso entero muerto con codigo 1.
+ *
+ * Asi moria `verificarPermanentes` en todas sus corridas, al minuto y medio, con 200 de sus 2.000
+ * comprobaciones hechas. El sintoma —`DOMException [TimeoutError]`— no apuntaba a la peticion que
+ * lo causaba, porque para cuando salta ya se contesto hace rato y se sigue en otra cosa.
+ *
+ * `noMorirPorUnCorteDeRed` es la red de seguridad de eso mismo un nivel mas arriba. Esta es la
+ * causa; aquella es el airbag. Hacen falta las dos.
+ */
+async function cerrar(r: Response | null | undefined): Promise<void> {
+  try {
+    await r?.body?.cancel();
+  } catch {
+    /* ya estaba cerrado, o el lector se lo llevo: da igual, lo que importaba era no dejarlo */
+  }
+}
+
 /** Lee como mucho `tope` bytes y corta la descarga. */
 async function leerHasta(r: Response, tope: number): Promise<Uint8Array> {
   const lector = r.body!.getReader();
@@ -124,10 +147,21 @@ async function localizarIndice(
       return { ok: false, veredicto: noSeSabe('no se puede leer la cabecera', e?.message || String(e)) };
     }
     if (!r.ok || !r.body) {
+      await cerrar(r);
       return { ok: false, veredicto: noSeSabe(`la cabecera da ${r.status}`, `en el byte ${posicion}`) };
     }
 
-    const d = await leerHasta(r, 16);
+    let d: Uint8Array;
+    try {
+      d = await leerHasta(r, 16);
+    } catch (e: any) {
+      // Era la unica lectura del fichero sin proteger, y por tanto la unica que podia salir de
+      // esta funcion sin que nadie la esperara. Un corte aqui es «no se pudo», no «esta roto».
+      await cerrar(r);
+      return { ok: false, veredicto: noSeSabe('la cabecera se corta', e?.message || String(e)) };
+    }
+    await cerrar(r);
+
     if (d.length < 8) {
       return { ok: false, veredicto: noSeSabe('cabecera corta', `${d.length} bytes en ${posicion}`) };
     }
@@ -188,13 +222,14 @@ export async function puedeAbrirse(url: string): Promise<Arranque> {
     return noSeSabe('no contesta', e?.message || String(e));
   }
   if (!abierto.ok || !abierto.body) {
+    await cerrar(abierto);
     return noSeSabe(`estado ${abierto.status}`, abierto.statusText || '');
   }
 
   const total = totalDe(abierto);
   const declarado = Number(abierto.headers.get('content-length') || 0);
   if (!total) {
-    await abierto.body.cancel().catch(() => {});
+    await cerrar(abierto);
     return noSeSabe('sin tamaño', 'ni Content-Range ni Content-Length');
   }
 
@@ -204,7 +239,7 @@ export async function puedeAbrirse(url: string): Promise<Arranque> {
    * porque no depende de la suerte: es cómo se está sirviendo.
    */
   if (declarado > 0 && declarado < total) {
-    await abierto.body.cancel().catch(() => {});
+    await cerrar(abierto);
     return { ok: false, causa: 'la respuesta se corta', detalle: `declara ${declarado} de ${total} bytes` };
   }
 
@@ -212,9 +247,10 @@ export async function puedeAbrirse(url: string): Promise<Arranque> {
   try {
     cabeceraCorta = await leerHasta(abierto, 16);
   } catch (e: any) {
+    await cerrar(abierto);
     return noSeSabe('la cabecera se corta', e?.message || String(e));
   }
-  await abierto.body.cancel().catch(() => {});
+  await cerrar(abierto);
 
   /**
    * ¿ES UN MP4 SIQUIERA? Si no lo es, esta prueba no opina.
@@ -247,6 +283,7 @@ export async function puedeAbrirse(url: string): Promise<Arranque> {
     return noSeSabe('el índice no llega', `${(indiceTam / 1048576).toFixed(1)} MB: ${e?.message || e}`);
   }
   if (!respuestaIndice.ok || !respuestaIndice.body) {
+    await cerrar(respuestaIndice);
     return noSeSabe(`el índice da ${respuestaIndice.status}`, `en el byte ${indiceEn}`);
   }
 
@@ -254,8 +291,10 @@ export async function puedeAbrirse(url: string): Promise<Arranque> {
   try {
     leido = await leerHasta(respuestaIndice, indiceTam);
   } catch (e: any) {
+    await cerrar(respuestaIndice);
     return noSeSabe('el índice se corta', e?.message || String(e));
   }
+  await cerrar(respuestaIndice);
   const ms = Date.now() - t0;
 
   if (leido.length < indiceTam) {

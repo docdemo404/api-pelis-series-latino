@@ -85,6 +85,11 @@ import { directEndpointUrl } from '../src/scrapers/directStream';
 import { nombreConTipo, paraElCliente, fichaReproducible, veredictoDisponibilidad } from '../src/services/streamSorter';
 import { extraerManuales, fusionarConLedger, leerLedger, ledgerVacio, todoElLedger, esManual } from '../src/services/manualLedger';
 import { MediaItem, ContentType } from '../src/types';
+import { noMorirPorUnCorteDeRed } from '../src/utils/seguirVivo';
+
+// Un socket que se muere no puede llevarse por delante el barrido entero. Ver ahi.
+noMorirPorUnCorteDeRed();
+
 
 const db = getSupabaseAdmin();
 

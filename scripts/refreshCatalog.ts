@@ -28,6 +28,11 @@ import { streamClient } from '../src/utils/httpClient';
 import { CacheStore } from '../src/cache/store';
 import { paraElCliente } from '../src/services/streamSorter';
 import { MediaItem } from '../src/types';
+import { noMorirPorUnCorteDeRed } from '../src/utils/seguirVivo';
+
+// Un socket que se muere no puede llevarse por delante el barrido entero. Ver ahi.
+noMorirPorUnCorteDeRed();
+
 
 // Con RLS activado en media_items, escribir requiere la SUPABASE_SERVICE_ROLE_KEY
 // (secret del workflow / variable de entorno). Sin ella el upsert fallará con RLS.

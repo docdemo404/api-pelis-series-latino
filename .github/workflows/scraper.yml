@@ -46,6 +46,22 @@ jobs:
   refresh-catalog:
     runs-on: ubuntu-latest
 
+    # ── EL TECHO PROPIO, PORQUE EL DE GITHUB NO PERDONA ────────────────────────────────────────
+    #
+    # Era el ÚNICO trabajo del repositorio sin `timeout-minutes`, y eso significa el tope duro de
+    # la plataforma: seis horas y cancelación. No es un fallo teórico — la corrida del 2026-08-26
+    # murió así a las 6h05m, y en una cancelación de plataforma NO se ejecutan los pasos con
+    # `if: always()`. O sea que el crawl diario se llevaba por delante, todos los días, los cinco
+    # pasos de mantenimiento que van detrás: retirar fuentes de otra película, rotar servidores,
+    # limpiar los muertos, rellenar sinopsis y comprobar cruces.
+    #
+    # El comentario de más abajo decía «tarda 2h51m de las 6 h que tiene»; eso era verdad cuando se
+    # escribió. El catálogo ha crecido y ya no cabe.
+    #
+    # Con 350 el trabajo termina por su cuenta diez minutos antes del tope de GitHub, así que lo
+    # que decide qué pasa es nuestro presupuesto y no una guillotina externa.
+    timeout-minutes: 350
+
     steps:
       - name: Checkout del código fuente
         uses: actions/checkout@v4
@@ -84,6 +100,14 @@ jobs:
       # en dos vueltas y esto queda otra vez en mantenimiento. Cabe: el trabajo tarda 2h51m de
       # las 6 h que tiene por defecto.
       - name: Refrescar catálogo pre-scrapeado en Supabase
+        # EL CRAWL SE CORTA A LAS CUATRO HORAS, Y LO DE DETRÁS SE EJECUTA IGUAL.
+        #
+        # Un `timeout-minutes` de PASO no es lo mismo que uno de trabajo: marca el paso como
+        # fallido, pero el trabajo sigue vivo y los pasos con `if: always()` corren. Que es
+        # exactamente lo que hacía falta — el crawl guarda por tandas mientras avanza, así que
+        # cortarlo cuesta la cola de esta vuelta y nada más, mientras que perder el mantenimiento
+        # cuesta un día entero de catálogo sin repasar.
+        timeout-minutes: 240
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
