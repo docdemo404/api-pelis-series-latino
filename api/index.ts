@@ -99,10 +99,27 @@ app.use((req: Request, res: Response, next: NextFunction) => {
        * 5 min frescos + 10 de gracia: la peor demora pasa de 24 h a un cuarto de hora, y el borde
        * sigue absorbiendo la inmensa mayoría de las peticiones. El caché propio (Redis) sí se
        * invalida al escribir; este no se puede purgar, así que la única palanca es la ventana.
+       *
+       * Y BAJA OTRA VEZ: DE UN CUARTO DE HORA A DOS MINUTOS.
+       *
+       * El cuarto de hora seguía siendo demasiado para el caso que de verdad se sufre, que no es
+       * un título retirándose solo —eso puede esperar— sino **añadir algo a mano por el panel y
+       * quedarse mirando la app sin ver el cambio**. Reportado tal cual con una serie de la fuente
+       * propia: se añadieron sus capítulos, la app siguió enseñando la ficha vieja, y acabó
+       * borrándose los datos de la app persiguiendo un fallo que no existía. Quince minutos sin
+       * respuesta no se leen como caché, se leen como que algo está roto.
+       *
+       * Se puede bajar tanto por lo que ya dice el párrafo de arriba: al origen una ficha le
+       * cuesta 0,33 s, que es leer la base. Lo que el borde absorbe aquí no es una
+       * reconstrucción, es una consulta barata.
+       *
+       * 1 min fresco + 1 de gracia. Y `max-age=30` para el cliente, que es lo que decide cuánto
+       * guarda la caché en disco de la app — la de Android sí honra esta cabecera, así que sin
+       * bajarla también aquí, el aparato seguiría enseñando lo suyo aunque el borde ya no.
        */
-      res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
-      res.setHeader('CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
-      res.setHeader('Vercel-CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
+      res.setHeader('Cache-Control', 'public, max-age=30, s-maxage=60, stale-while-revalidate=60');
+      res.setHeader('CDN-Cache-Control', 'public, max-age=60, stale-while-revalidate=60');
+      res.setHeader('Vercel-CDN-Cache-Control', 'public, max-age=60, stale-while-revalidate=60');
     } else {
       /**
        * PORTADA Y CATÁLOGO — y aquí estaba lo peor de todo.
