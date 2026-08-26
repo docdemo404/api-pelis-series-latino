@@ -109,3 +109,30 @@ export function sourceTitleFromSlug(id: string | null | undefined): { title: str
 export function yearFromSlug(id: string | null | undefined): string | undefined {
   return sourceTitleFromSlug(id).year;
 }
+
+/**
+ * Palabras que SOLO existen en uno de los dos idiomas. No comparten ninguna entre sí, que es lo
+ * que hace fiable el recuento: «de», «la» o «no» aparecen en los dos y no distinguirían nada.
+ */
+const MARCADORES_ES = /\b(que|de|la|el|los|las|una|con|para|por|su|es|se|del|pero|cuando|más|año|años|película|vida|hombre|mujer|sus|como|todo)\b/gi;
+const MARCADORES_EN = /\b(the|and|of|to|in|is|his|her|with|for|from|when|after|their|who|but|about|into|while|they|has)\b/gi;
+
+/**
+ * ¿Este texto está en inglés?
+ *
+ * Existe porque la cascada de sinopsis de TMDB acaba en inglés a propósito —una sinopsis real en
+ * otro idioma informa más que ninguna— y esas fichas hay que poder encontrarlas después para
+ * completarlas por otro lado. Medido sobre el catálogo: 27 de 609 (4,4 %), y comprobado contra
+ * TMDB que ninguna de las 27 tiene traducción al español que rescatar.
+ *
+ * El criterio es deliberadamente conservador —hacen falta TRES marcadores ingleses y que doblen a
+ * los españoles— porque un falso positivo manda a reemplazar una sinopsis española que estaba
+ * bien. Los textos cortos no se juzgan: en dos líneas el recuento no significa nada.
+ */
+export function pareceIngles(texto: string | null | undefined): boolean {
+  const t = (texto || '').trim();
+  if (t.length < 40) return false;
+  const es = (t.match(MARCADORES_ES) || []).length;
+  const en = (t.match(MARCADORES_EN) || []).length;
+  return en >= 3 && en > es * 2;
+}

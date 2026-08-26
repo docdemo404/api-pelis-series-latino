@@ -12,16 +12,20 @@
     "direct:catalog": "ts-node scripts/refreshCatalog.ts --direct-only",
     "repair:catalog": "ts-node scripts/repairCatalog.ts",
     "rotular:capitulos": "ts-node scripts/rotularCapitulos.ts",
+    "migrar": "ts-node scripts/migrar.ts",
+    "metadatos:rellenar": "ts-node scripts/rellenarMetadatos.ts",
     "check:catalog": "ts-node scripts/checkCatalog.ts",
     "check:sources": "ts-node scripts/checkSources.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.43.5",
+    "@types/pg": "^8.23.1",
     "axios": "^1.7.2",
     "cheerio": "^1.0.0-rc.12",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "pg": "^8.23.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",

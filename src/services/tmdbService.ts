@@ -8,6 +8,15 @@ import { canonicalTitle, normalizeTitle, dedupeTitles, yearFromSlug } from '../u
 const API_KEY = '99b8bc99e85e79fabd52b64513c9780d';
 
 /**
+ * La misma clave, para los servicios que hablan con TMDB desde FUERA de este módulo.
+ *
+ * La usa `complementoService`, que necesita preguntarle a TMDB por el id de TheTVDB de una serie
+ * antes de poder pedirle su logo a Fanart.tv (los dos catálogos se numeran distinto). Se exporta
+ * en vez de copiarla allí para que siga habiendo una sola clave que cambiar.
+ */
+export const TMDB_API_KEY = API_KEY;
+
+/**
  * La plantilla de SEO con la que las webs rellenan la sinopsis («Ver X online gratis en FuegoCine
  * con audio Latino»). No es metadata: es publicidad de la fuente, y publicada ocupa el sitio de la
  * sinopsis de verdad — ver `rotuladoPorLaWeb` y `rotularEpisodiosConTmdb`.
@@ -148,15 +157,31 @@ function queryVariants(cleanTitle: string): string[] {
 }
 
 /**
+ * Idiomas de logo aceptables cuando no hay ni español ni inglés ni uno sin idioma.
+ *
+ * Un logo es arte TIPOGRÁFICO: se lee. Uno en portugués o en italiano dice el título de la
+ * película con letras que el espectador reconoce —«L'Arca di Noè» se entiende—, mientras que uno
+ * en cirílico o en kana no es una alternativa al texto, es peor que el texto, y la caída a texto
+ * ya existe en la app (ver `TitleArt` en Billboard.kt).
+ *
+ * Medido sobre 50 fichas del catálogo sin logo: 4 tenían uno en TMDB y las cuatro en un idioma
+ * que el filtro `include_image_language` dejaba fuera (ru, pt, de, it). Con esta lista se
+ * recuperan las de alfabeto latino y se sigue descartando la rusa.
+ */
+const IDIOMAS_DE_LOGO_LEGIBLES = ['pt', 'it', 'fr', 'de', 'ca', 'gl'];
+
+/**
  * Logo del título (arte tipográfico) para el hero estilo Netflix/Prime.
- * Prioriza el logo en español, luego inglés, luego el que no declara idioma.
+ * Prioriza el logo en español, luego inglés, luego el que no declara idioma, y como último
+ * recurso cualquiera escrito en alfabeto latino (ver IDIOMAS_DE_LOGO_LEGIBLES).
  */
 function pickLogo(tmdbData: any): string | null {
-  const logos: any[] = tmdbData?.images?.logos || [];
+  const logos: any[] = (tmdbData?.images?.logos || []).filter((l: any) => l?.file_path);
   if (logos.length === 0) return null;
-  const byLang = (lang: string | null) => logos.find(l => l.iso_639_1 === lang && l.file_path);
-  const chosen = byLang('es') || byLang('en') || byLang(null) || logos[0];
-  return chosen?.file_path ? `https://image.tmdb.org/t/p/w500${chosen.file_path}` : null;
+  const byLang = (lang: string | null) => logos.find(l => l.iso_639_1 === lang);
+  const chosen = byLang('es') || byLang('en') || byLang(null)
+    || logos.find(l => IDIOMAS_DE_LOGO_LEGIBLES.includes(l.iso_639_1));
+  return chosen ? `https://image.tmdb.org/t/p/w500${chosen.file_path}` : null;
 }
 
 /** Duración en minutos: `runtime` en películas, media del episodio en series. */
@@ -232,6 +257,30 @@ function pickDisplayTitle(tmdbData: any, sourceTitle: string): string {
   if (sinTraducir && sourceTitle && !OTRO_ALFABETO.test(sourceTitle)) return sourceTitle;
 
   return tmdbTitle || sourceTitle;
+}
+
+/**
+ * Tráiler oficial en YouTube, con el de español por delante.
+ *
+ * `all_videos` lo deja puesto `getTmdbDetails`: es la lista GLOBAL de vídeos, que se pide aparte
+ * porque la de es-MX viene vacía en la mayoría de las fichas. Sin ella la ficha se quedaba sin
+ * tráiler teniéndolo TMDB, que es la mitad del hueco del 21,8 % que mide diag_metadatos.
+ */
+function pickTrailer(tmdbData: any): string | null {
+  const videos: any[] = tmdbData?.all_videos || tmdbData?.videos?.results || [];
+  const elegido = videos.find(v => v.site === 'YouTube' && (v.type === 'Trailer' || v.type === 'Teaser') && (v.iso_639_1 === 'es' || v.iso_639_1 === 'es-MX'))
+    || videos.find(v => v.site === 'YouTube' && v.type === 'Trailer')
+    || videos.find(v => v.site === 'YouTube');
+  return elegido?.key ? `https://www.youtube.com/watch?v=${elegido.key}` : null;
+}
+
+/** Reparto principal con sus fotos (doce nombres: los que caben en la ficha). */
+function pickCast(tmdbData: any): CastMember[] {
+  return (tmdbData?.credits?.cast || []).slice(0, 12).map((c: any) => ({
+    name: c.name,
+    character: c.character || '',
+    photo: c.profile_path ? `https://image.tmdb.org/t/p/w185${c.profile_path}` : null,
+  }));
 }
 
 /** Director (películas) tomado del equipo técnico. */
@@ -1030,7 +1079,10 @@ export class TmdbService {
             //   ("Solo en casa" ⇄ "Mi pobre angelito"), que alimentan aliases para que la
             //   búsqueda encuentre el título por cualquiera de sus nombres (ver collectAliases).
             append_to_response: `credits,videos,images,alternative_titles,translations,${endpoint === 'tv' ? 'content_ratings' : 'release_dates'}`,
-            include_image_language: 'es,en,null'
+            // Con 'es,en,null' a secas se descartaban logos que SÍ existen: de 50 fichas sin
+            // logo, las 4 que TMDB tenía estaban todas en un idioma no pedido. Ver pickLogo,
+            // que es quien decide cuál de ellos es legible y cuál no.
+            include_image_language: `es,en,null,${IDIOMAS_DE_LOGO_LEGIBLES.join(',')}`
           },
           timeout: 2500
         }),
@@ -1089,6 +1141,39 @@ export class TmdbService {
       console.warn(`[TMDB Detail Warning] ID ${tmdbId}: ${err.message}`);
       return null;
     }
+  }
+
+  /**
+   * Los campos de una ficha que TMDB puede aportar, YA ELEGIDOS, sin tocar nada más.
+   *
+   * `enrichWithTmdb` construye la ficha ENTERA —título, alias, temporadas, árbol de capítulos— y
+   * eso es justo lo que no quiere quien solo viene a tapar un hueco: volver a decidir el título de
+   * una ficha que lleva meses correcta es arriesgar una regresión a cambio de nada. Esto expone la
+   * parte escalar, que es la única que `scripts/rellenarMetadatos.ts` necesita, con exactamente los
+   * mismos criterios de selección (los `pick*` de arriba) para que las dos vías no se separen.
+   *
+   * Las claves son las de la TABLA, no las del `MediaItem`, porque el destino es un UPDATE.
+   */
+  static camposDeTmdb(tmdbData: any): Record<string, any> {
+    const cast = pickCast(tmdbData);
+    return {
+      logo: pickLogo(tmdbData),
+      poster: tmdbData?.poster_path ? `https://image.tmdb.org/t/p/w500${tmdbData.poster_path}` : null,
+      backdrop: tmdbData?.backdrop_path ? `https://image.tmdb.org/t/p/w1280${tmdbData.backdrop_path}` : null,
+      trailer: pickTrailer(tmdbData),
+      runtime: pickRuntime(tmdbData) ?? null,
+      content_rating: pickContentRating(tmdbData) || null,
+      director: pickDirector(tmdbData) || null,
+      genres: (tmdbData?.genres || []).map((g: any) => g.name).filter(Boolean),
+      cast_data: cast.length > 0 ? cast : null,
+      overview: (tmdbData?.overview || '').trim() || null,
+      tagline: (tmdbData?.tagline || '').trim() || null,
+      release_date: tmdbData?.release_date || tmdbData?.first_air_date || null,
+      rating: typeof tmdbData?.vote_average === 'number' && tmdbData.vote_average > 0
+        ? Number(tmdbData.vote_average.toFixed(1)) : null,
+      // Solo las películas lo traen en el detalle; en series habría que pedir external_ids.
+      imdb_id: /^tt\d+$/.test(tmdbData?.imdb_id || '') ? tmdbData.imdb_id : null,
+    };
   }
 
   /**
@@ -1379,20 +1464,8 @@ export class TmdbService {
       const isTv = (tmdbData.number_of_seasons && tmdbData.number_of_seasons > 0) || item.type === 'tvseries' || tmdbData.first_air_date !== undefined;
       const contentType = isTv ? 'tvseries' as const : 'movie' as const;
 
-      // Seleccionar Trailer oficial en YouTube (priorizar español)
-      const videos = tmdbData.all_videos || tmdbData.videos?.results || [];
-      const trailerObj = videos.find((v: any) => v.site === 'YouTube' && (v.type === 'Trailer' || v.type === 'Teaser') && (v.iso_639_1 === 'es' || v.iso_639_1 === 'es-MX'))
-        || videos.find((v: any) => v.site === 'YouTube' && v.type === 'Trailer')
-        || videos.find((v: any) => v.site === 'YouTube');
-
-      const trailerUrl = trailerObj ? `https://www.youtube.com/watch?v=${trailerObj.key}` : item.trailer;
-
-      // Mapear reparto con fotografías de TMDB y lista simple de nombres
-      const castMembers: CastMember[] = tmdbData.credits?.cast?.slice(0, 12).map((c: any) => ({
-        name: c.name,
-        character: c.character || '',
-        photo: c.profile_path ? `https://image.tmdb.org/t/p/w185${c.profile_path}` : null
-      })) || [];
+      const trailerUrl = pickTrailer(tmdbData) || item.trailer;
+      const castMembers: CastMember[] = pickCast(tmdbData);
 
       const existingCastStrings: string[] = Array.isArray(item.cast)
         ? item.cast.map((c: any) => (typeof c === 'string' ? c : (c.name || '')))

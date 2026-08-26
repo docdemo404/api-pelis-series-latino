@@ -25,6 +25,9 @@ CREATE TABLE IF NOT EXISTS media_items (
     backdrop TEXT,
     logo TEXT,
     trailer TEXT,
+    -- De qué fuente salió CADA campo prestado ({"overview":"wikipedia-es:<url>"}).
+    -- Los campos ausentes vienen de TMDB. Ver migración 012.
+    metadata_fuentes JSONB DEFAULT '{}'::jsonb,
     cast_data JSONB DEFAULT '[]'::jsonb,
     dubbing_cast_data JSONB DEFAULT '[]'::jsonb,
     runtime INT,
@@ -75,3 +78,7 @@ CREATE INDEX IF NOT EXISTS idx_media_streams_updated ON media_items (streams_upd
 -- Feeds sin fichas fantasma. Ver src/db/migrations/005_multisource_and_availability.sql
 CREATE INDEX IF NOT EXISTS idx_media_playable ON media_items (updated_at DESC) WHERE has_streams = true;
 CREATE INDEX IF NOT EXISTS idx_media_streams_checked ON media_items (streams_checked_at DESC NULLS FIRST);
+
+-- Reparto de complementos por campo, y qué fichas recuperar cuando TMDB se ponga
+-- al día. Ver src/db/migrations/012_metadata_fuentes.sql
+CREATE INDEX IF NOT EXISTS idx_media_metadata_fuentes ON media_items USING gin (metadata_fuentes);
