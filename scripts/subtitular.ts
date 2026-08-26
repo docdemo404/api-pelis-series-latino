@@ -88,14 +88,123 @@ function correr(programa: string, args: string[], recogerSalida: boolean): Promi
  * 16 kHz y mono porque es exactamente lo que Whisper escucha; darle más es tirar ancho de banda
  * para que el modelo lo tire después.
  */
-async function sacarAudio(url: string, destino: string, desdeS?: number, duracionS?: number): Promise<void> {
+async function sacarAudio(
+  fuente: Audio,
+  destino: string,
+  desdeS?: number,
+  duracionS?: number,
+): Promise<void> {
   const args = ['-nostdin', '-hide_banner', '-loglevel', 'error', '-y'];
   if (desdeS !== undefined) args.push('-ss', String(desdeS));
-  args.push('-i', url);
+  args.push('-i', fuente.url);
   if (duracionS !== undefined) args.push('-t', String(duracionS));
+  if (fuente.mapa) args.push('-map', fuente.mapa);
   args.push('-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', destino);
 
   await correr('ffmpeg', args, false);
+}
+
+/** De donde sacar el audio y, si hizo falta elegir, cual se eligio. */
+interface Audio {
+  url: string;
+  mapa?: string;
+  idioma?: string;
+}
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * LA PISTA DE AUDIO QUE HAY QUE ESCUCHAR — Y SI HAY INGLES, LA INGLESA
+ *
+ * Esto es lo que decide si el subtitulo sale en el idioma que se pidio. La primera corrida real
+ * transcribio Breaking Bad y salio EN ESPAÑOL: el fichero traia las dos pistas y ffmpeg, sin que
+ * nadie le dijera nada, cogio la primera. El ingles estaba ahi al lado.
+ *
+ * ── POR QUE NO SE HACE CON `-map ...:m:language:eng` ───────────────────────────────────────
+ *
+ * Porque no funciona sobre un HLS. Probado contra el manifiesto real:
+ *
+ *     ffmpeg -i main.m3u8 -map "0:a:m:language:eng?"  →  Error opening output files
+ *
+ * Los idiomas viven en el MANIFIESTO —`#EXT-X-MEDIA:TYPE=AUDIO,LANGUAGE="en"`— y no llegan a las
+ * etiquetas de los flujos que `-map` sabe mirar.
+ *
+ * Asi que en HLS se lee el manifiesto y se apunta DIRECTAMENTE a la pista inglesa, que ademas
+ * sale mucho mas barato: esa lista solo tiene audio. Lo de antes bajaba la variante entera —107 MB
+ * de Breaking Bad— para tirar el video con `-vn`.
+ *
+ * En lo que no es HLS si vale preguntar por los flujos, que ahi las etiquetas si estan.
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ */
+async function pistaDeAudio(url: string): Promise<Audio> {
+  const preferido = 'en';
+
+  if (/\.m3u8(\?|$)/i.test(url)) {
+    const enElManifiesto = await pistaDelManifiesto(url, preferido);
+    if (enElManifiesto) return enElManifiesto;
+  } else {
+    const entreLosFlujos = await pistaEntreLosFlujos(url, preferido);
+    if (entreLosFlujos) return entreLosFlujos;
+  }
+
+  // Sin idioma declarado no se adivina: se coge lo que el fichero ofrezca por defecto y luego el
+  // propio modelo dice en que se hablaba. Ver la nota de la transcripcion.
+  return { url };
+}
+
+/** Las lineas `#EXT-X-MEDIA:TYPE=AUDIO` de un master de HLS, con su idioma y su direccion. */
+async function pistaDelManifiesto(url: string, preferido: string): Promise<Audio | null> {
+  try {
+    const r = await fetch(url, { signal: AbortSignal.timeout(20_000) });
+    if (!r.ok) return null;
+    const texto = await r.text();
+
+    for (const linea of texto.split('\n')) {
+      if (!/^#EXT-X-MEDIA:.*TYPE=AUDIO/i.test(linea)) continue;
+
+      const idioma = /LANGUAGE="([^"]+)"/i.exec(linea)?.[1] || '';
+      const destino = /URI="([^"]+)"/i.exec(linea)?.[1];
+      if (!destino || !idioma.toLowerCase().startsWith(preferido)) continue;
+
+      return { url: new URL(destino, url).toString(), idioma };
+    }
+  } catch {
+    // Un manifiesto que no se puede leer no es un problema: se sigue por el camino de siempre.
+  }
+  return null;
+}
+
+/** Los flujos de audio de un fichero normal, preguntando a ffprobe por sus etiquetas. */
+async function pistaEntreLosFlujos(url: string, preferido: string): Promise<Audio | null> {
+  try {
+    const crudo = await correr('ffprobe', [
+      '-v', 'error', '-select_streams', 'a',
+      '-show_entries', 'stream=index:stream_tags=language',
+      '-of', 'json', url,
+    ], true);
+
+    const flujos = (JSON.parse(crudo)?.streams || []) as Array<{ tags?: { language?: string } }>;
+    const cual = flujos.findIndex(f => (f?.tags?.language || '').toLowerCase().startsWith(preferido));
+    if (cual < 0) return null;
+
+    return { url, mapa: `0:a:${cual}`, idioma: preferido };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Una url que ffmpeg pueda abrir.
+ *
+ * Algunos servidores se sirven por NUESTRA API y su enlace sale como ruta relativa
+ * —`/api/v1/stream/direct/...`—, que dentro de la app se completa sola con el host del catalogo.
+ * Aqui no hay app: ffmpeg recibe eso y no sabe que hacer con ello. Si un titulo solo tuviera un
+ * servidor de esos, fallaria con un error que no dice nada de la causa.
+ */
+function urlAbsoluta(url: string): string {
+  if (!url.startsWith('/')) return url;
+  const base = (process.env.API_PUBLIC_URL || 'https://api-pelis-series-latino-gilt.vercel.app')
+    .replace(/\/$/, '');
+  return base + url;
 }
 
 interface Transcripcion {
@@ -201,7 +310,7 @@ function urlDe(item: any, episodioId: string): Donde | undefined {
  * que decide todo lo demás. Una película que se anuncia en inglés y llega doblada al español no es
  * rara en este catálogo.
  */
-async function sondear(url: string, duracionS: number, contexto: string | null, carpeta: string) {
+async function sondear(fuente: Audio, duracionS: number, contexto: string | null, carpeta: string) {
   const trozos: Linea[] = [];
   let idioma = '';
   let seguridad = 0;
@@ -210,7 +319,7 @@ async function sondear(url: string, duracionS: number, contexto: string | null, 
     const desde = Math.max(0, Math.round(duracionS * fraccion));
     const wav = join(carpeta, `ventana-${Math.round(fraccion * 100)}.wav`);
 
-    await sacarAudio(url, wav, desde, VENTANA_SEGUNDOS);
+    await sacarAudio(fuente, wav, desde, VENTANA_SEGUNDOS);
     const t = await transcribir(wav, { contexto, desde });
     rmSync(wav, { force: true });
 
@@ -331,7 +440,9 @@ async function guardar(fila: {
     if (Date.now() > hasta) { console.log(`\n   ⏱ agotado el presupuesto: ${hechas}/${cola.length} hechas.`); break; }
 
     const carpeta = mkdtempSync(join(tmpdir(), 'sub-'));
-    const etiqueta = `${entrada.media_id}${entrada.episodio_id ? ':' + entrada.episodio_id : ''}`;
+    // El id de un capitulo YA LLEVA DENTRO el de su serie —`md-1396:s1e1`—, asi que pegarlos
+    // daba `md-1396:md-1396:s1e1` en cada linea del registro.
+    const etiqueta = entrada.episodio_id || entrada.media_id;
 
     try {
       const { data: item } = await supabase
@@ -343,7 +454,9 @@ async function guardar(fila: {
 
       const donde = urlDe(item, entrada.episodio_id);
       if (!donde) throw new Error('sin url reproducible');
-      const url = donde.url;
+
+      const audio = await pistaDeAudio(urlAbsoluta(donde.url));
+      if (audio.idioma) console.log(`   hay pista en ${audio.idioma}: se escucha esa`);
 
       const { data: yaHay } = await supabase
         .from('subtitulos')
@@ -398,7 +511,7 @@ async function guardar(fila: {
       // --- 2. El sondeo, solo si hay algo que comprobar con el ---
       let sondeo: { lineas: Linea[]; idioma: string; seguridad: number } | null = null;
       if (candidatosPorIdioma.size) {
-        sondeo = await sondear(url, duracionS, contexto, carpeta);
+        sondeo = await sondear(audio, duracionS, contexto, carpeta);
         console.log(
           `   habla ${sondeo.idioma || '?'} (${(sondeo.seguridad * 100).toFixed(0)} %) · ` +
           `${sondeo.lineas.length} lineas de muestra`
@@ -443,14 +556,27 @@ async function guardar(fila: {
        * fiable que la de un minuto suelto —que puede caer en musica— y no cuesta nada aparte: el
        * modelo la hace igual antes de empezar. Si hubo sondeo, su idioma va como pista.
        */
-      const yaTranscrito = (yaHay || []).some(f => f.origen === 'transcrito');
+      /*
+       * «YA TRANSCRITO» ES POR IDIOMA, NO EN GENERAL.
+       *
+       * Era en general, y con eso Breaking Bad se quedaba cerrado para siempre en cuanto existia
+       * su transcripcion del DOBLAJE: la pista inglesa —la que se pidio— no se llegaba a escuchar
+       * nunca porque ya habia «una».
+       *
+       * Cuando se ha podido elegir la pista de audio, se sabe de antemano en que idioma va a salir
+       * y se pregunta por ese. Cuando no, se conserva la regla vieja: sin saber que va a salir, no
+       * hay forma de saber si ya esta.
+       */
+      const yaTranscrito = audio.idioma
+        ? (yaHay || []).some(f => f.origen === 'transcrito' && f.idioma === audio.idioma)
+        : (yaHay || []).some(f => f.origen === 'transcrito');
 
       if (!yaTranscrito) {
         const wav = join(carpeta, 'completo.wav');
         console.log('   bajando el audio de la pelicula entera…');
 
         const t0 = Date.now();
-        await sacarAudio(url, wav);
+        await sacarAudio(audio, wav);
         const mb = statSync(wav).size / 1048576;
         console.log(`   ${mb.toFixed(0)} MB de audio en ${((Date.now() - t0) / 60000).toFixed(1)} min`);
 
