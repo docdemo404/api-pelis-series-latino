@@ -394,4 +394,22 @@ async function guardar(fila: {
   }
 
   console.log(`\n✅ ${hechas} ficha(s) atendidas.` + (apply ? '' : '\n   (ensayo — con --apply se escribe)'));
+
+  /*
+   * QUE FALLEN TODAS ES UN FALLO DE LA CORRIDA, NO UN DIA FLOJO.
+   *
+   * Un titulo que no se puede escuchar —el fichero se cayo, el host no da rangos— no puede tumbar
+   * el barrido: por eso cada ficha va en su propio `try` y la corrida sigue. Pero si NINGUNA sale
+   * adelante, lo que hay no son veinte titulos con mala suerte: es algo roto que las afecta a
+   * todas, y eso tiene que verse en rojo.
+   *
+   * Sin esto, la primera corrida real termino en VERDE habiendo atendido 0 de 1, y el motivo
+   * —`spawn ffmpeg ENOENT`, o sea que faltaba la herramienta— estaba enterrado en el registro de
+   * un trabajo que decia que todo habia ido bien.
+   */
+  if (cola.length && hechas === 0) {
+    console.error('');
+    console.error('Ninguna salio adelante. No es mala suerte: revisa el primer error de arriba.');
+    process.exit(1);
+  }
 })();

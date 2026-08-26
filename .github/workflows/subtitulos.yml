@@ -77,6 +77,16 @@ jobs:
       - name: Comprobar que todo compila
         run: npx tsc --noEmit
 
+      # FFMPEG NO VIENE EN EL RUNNER. Se dio por hecho que si —es la herramienta mas comun del
+      # mundo para esto— y la primera corrida murio con `spawn ffmpeg ENOENT` despues de haber
+      # instalado node, compilado el proyecto y bajado el modelo. La imagen de `ubuntu-latest` trae
+      # muchas cosas; esta no.
+      #
+      # Es la pieza mas importante de la cadena: es la que hace que baste con el audio, y que del
+      # audio baste con el trozo que se pide. Sin ella no hay nada que escuchar.
+      - name: Instalar ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
