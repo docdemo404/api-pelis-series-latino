@@ -25,7 +25,7 @@ on:
   workflow_dispatch:
     inputs:
       solo:
-        description: 'Crawlear UNA sola web: fuegocine, peliculas, series o animes. Vacío = todas.'
+        description: 'Crawlear UNA sola web: fuegocine, archive, peliculas, series, animes o moviedays. Vacío = todas.'
         required: false
         default: ''
       minutos:
@@ -36,11 +36,15 @@ on:
         description: 'Tope de títulos por corrida. Con `saltar_guardados`, cada lanzamiento coge un tramo nuevo.'
         required: false
         default: ''
+      # AHORA VIENE PUESTO. Ver el porqué en el paso del crawl: la corrida programada no lo
+      # pasaba nunca, y por eso se gastaba las cuatro horas repasando lo que ya tenía.
+      # Desmarcarlo sigue siendo posible, y sirve para lo que siempre sirvió: forzar un repaso
+      # completo del catálogo ya guardado.
       saltar_guardados:
-        description: 'Saltar los títulos que ya están en la base, para avanzar en vez de repetir.'
+        description: 'Saltar los títulos que ya están en la base (y los que se miraron hace poco sin vídeo). Desmarcar = repasar TODO otra vez.'
         type: boolean
         required: false
-        default: false
+        default: true
 
 jobs:
   refresh-catalog:
@@ -124,7 +128,7 @@ jobs:
         run: |
           ARGS="--streams=300 --verify=1500"
           case "$SOLO" in
-            fuegocine|archive|peliculas|series|animes) ARGS="$ARGS --solo=$SOLO" ;;
+            fuegocine|archive|peliculas|series|animes|moviedays) ARGS="$ARGS --solo=$SOLO" ;;
             "") ;;
             *) echo "::error::solo='$SOLO' no es una fuente conocida"; exit 1 ;;
           esac
@@ -133,7 +137,23 @@ jobs:
             *[!0-9]*) echo "::error::minutos='$MINUTOS' no es un número"; exit 1 ;;
             *) ARGS="$ARGS --minutos=$MINUTOS" ;;
           esac
-          if [ "$SALTAR" = "true" ]; then ARGS="$ARGS --saltar-guardados"; fi
+          # ── POR DEFECTO SÍ SE SALTA LO YA TRABAJADO ────────────────────────────────────────
+          #
+          # Este era el motivo de que el crawl diario no aportara casi nada. `--saltar-guardados`
+          # solo se añadía cuando alguien marcaba la casilla a mano, así que la corrida
+          # PROGRAMADA —la que corre todos los días— nunca lo llevaba. Y dentro del script ese
+          # mismo flag es el que activa las DOS cribas: las fichas que ya están en la base y las
+          # que se miraron hace poco y no daban vídeo (la memoria de 14 días).
+          #
+          # Sin él, cada corrida diaria volvía a bajarse la página y a medir los ficheros de las
+          # 610 fichas guardadas y de todos los cadáveres conocidos, por delante de lo que no se
+          # ha mirado nunca. Con un presupuesto de 240 minutos y ~4.600 títulos recolectados, el
+          # paso se cortaba por tiempo antes de llegar a lo nuevo: gastaba cuatro horas para
+          # confirmar lo que ya sabía.
+          #
+          # Ahora va salvo que se pida explícitamente lo contrario (casilla desmarcada), que es
+          # el caso legítimo de «repasa el catálogo entero otra vez».
+          if [ "$SALTAR" != "false" ]; then ARGS="$ARGS --saltar-guardados"; fi
           # El tope va SIN guion: es el argumento posicional del script, no una bandera.
           case "$LIMITE" in
             '') ;;

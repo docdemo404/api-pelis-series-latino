@@ -102,6 +102,58 @@ con `502` en las dos vueltas: vidhideplus, drive.google, dropload y gumlet. Ese 
 veredicto —la API llega al host y el host no entrega— y de vidhideplus ya se sabe por qué: sus
 ficheros están borrados (`scripts/dev/probe_entrega_host.ts`).
 
+## 🐌 Por qué el catálogo crecía a un título al día (2026-08-27)
+
+La queja era «hay muy poco contenido». **El crawl no era el problema**: los índices se recorren
+enteros y se releen en cada tanda, así que lo que la fuente publica hoy entra hoy. Medido en el log
+de la tanda de las 00:24:
+
+| | FuegoCine | archive.org |
+|---|---|---|
+| Títulos que ve en el índice | 3.240 | 1.414 |
+| Ya guardados | 337 | 218 |
+| Trabajados en la corrida | 300 | 300 |
+| Con url directa **permanente y funcional** | 2 | 0 |
+| Filas guardadas | **1** | **0** |
+
+Lo que estrangula es la regla de la puerta (`refreshCatalog.ts`, «SOLO ENTRA LO QUE TIENE URL
+DIRECTA Y FUNCIONA», y además permanente). Eso es una **decisión**, no un fallo, y se mantiene.
+
+Lo que sí era un fallo son dos cosas que dejaban cuatro fuentes apagadas:
+
+**1. El crawl diario nunca pasaba `--saltar-guardados`.** Ese flag es el que activa las dos cribas
+—lo que ya está en la base y la memoria de 14 días de lo que se miró sin vídeo—, y solo se añadía
+si alguien marcaba la casilla a mano. La corrida programada, la de todos los días, no lo llevaba:
+se gastaba sus cuatro horas de presupuesto remidiendo los ficheros de las 610 fichas que ya tenía
+antes de llegar a lo que no había mirado nunca. Cinco corridas seguidas en `failure`/`cancelled`,
+la última anotada por GitHub como *«exceeded the maximum execution time of 6h0m0s»*.
+
+**2. `poblar.yml` solo rotaba dos fuentes.** Las demás dependían del crawl diario, que no
+terminaba. Se ve en el reparto del catálogo:
+
+```bash
+node -e "require('dotenv').config();const{createClient}=require('@supabase/supabase-js');const sb=createClient(process.env.SUPABASE_URL||'https://kgeytmocuitbchpdcoad.supabase.co',process.env.SUPABASE_SERVICE_ROLE_KEY);(async()=>{const c={};let f=0;for(;;){const{data}=await sb.from('media_items').select('id,source_url,source_urls').order('id').range(f,f+999);if(!data?.length)break;for(const r of data){const u=[r.source_url,...(r.source_urls||[])].filter(Boolean);const h=new Set(u.map(x=>{try{return new URL(x).hostname.replace(/^www\./,'')}catch{return 'sin-pagina'}}));(h.size?[...h]:['sin-pagina']).forEach(k=>c[k]=(c[k]||0)+1)}f+=1000}console.log(c)})()"
+```
+
+> `{ 'fuegocine.com': 353, 'archive.org': 218, 'tioplus.app': 86, 'moviedays.lat': 50 }`
+> — y **cinecalidad, cero**.
+
+Arreglado: la matriz de `poblar.yml` pasa de `[fuegocine, archive]` a las seis
+(`peliculas`/`series`/`animes` son las categorías de tioplus, y arrastran a cinecalidad y moviedays
+porque `scrapeLatest` las pide por la misma puerta), y el crawl diario lleva `--saltar-guardados`
+salvo que se pida lo contrario. `moviedays` recibe además un `--desde` rotado con el número de
+corrida: es la única fuente sin índice —baja por TMDB por número de votos— y sin eso repetiría
+siempre las mismas páginas.
+
+El precio: una vuelta entera de la matriz pasa de ~45 min a ~2 h y salen menos vueltas al día, así
+que FuegoCine pierde unas tres tandas diarias. A cambio, cuatro webs pasan de cero.
+
+Para ver si una corrida aportó algo, sin abrir la interfaz de GitHub:
+
+```bash
+gh run view <id> --log | grep -E "recolectados|ya estaban guardados|url directa permanente|Refresh completado"
+```
+
 ## ☁️ Despliegue en Vercel (Gratis $0/mes)
 
 ```bash

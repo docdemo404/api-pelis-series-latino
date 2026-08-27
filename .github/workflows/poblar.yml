@@ -25,15 +25,35 @@ name: Poblar el catálogo por tandas
 # CUÁNTO FALTA, con lo medido: FuegoCine publica 3.219 títulos y ~29 % tiene url permanente y
 # funcional. A ~72 títulos por tanda de 40 min, son unas 45 vueltas. Cuando ya no queda nada por
 # mirar, la corrida termina en segundos y no gasta nada.
+#
+# ── Y AQUÍ ENTRAN TAMBIÉN LAS OTRAS CUATRO WEBS (2026-08-27) ────────────────────────────────
+#
+# Esto se dedicaba a las dos fuentes «probadas» y las demás quedaban para el crawl diario
+# (`scraper.yml`). El crawl diario lleva una semana sin terminar —cinco corridas seguidas en
+# `failure`/`cancelled`, la última anotada por GitHub como «exceeded the maximum execution time of
+# 6h0m0s»—, así que esas webs llevaban días sin recorrerse. Se ve en el catálogo: de las 610 fichas
+# que hay, 353 son de FuegoCine y 218 de archive.org —las dos que sí tienen tandas— contra 86 de
+# tioplus, 50 de moviedays y CERO de cinecalidad.
+#
+# Una fuente que solo entra por un trabajo que nunca acaba es una fuente apagada. Así que pasan a
+# la rotación: `peliculas`, `series` y `animes` recorren tioplus (y arrastran cinecalidad y
+# archive, que `scrapeLatest` pide en paralelo), y `moviedays` baja por TMDB por número de votos.
+#
+# El precio es que una vuelta entera de la matriz pasa de ~45 min a ~2 h, y como la guarda de
+# concurrencia no deja solapar, salen menos vueltas al día. FuegoCine pierde unas tres tandas
+# diarias —tres títulos, al ritmo medido— y a cambio cuatro webs pasan de cero tandas a todas las
+# de la rotación. Es el cambio que se pidió: sacar el máximo de CADA fuente, no de dos.
 
 on:
   schedule:
-    # Cada 30 min, alternando fuente por corrida (ver `matrix`). Si no queda trabajo, sale sola.
+    # Cada 30 min. Cada corrida recorre la matriz entera, una fuente detrás de otra (ver `matrix`);
+    # la guarda de concurrencia impide que dos se pisen, así que en la práctica sale una vuelta
+    # cada dos o tres horas. Si no queda trabajo, cada tanda termina en segundos y no gasta nada.
     - cron: '*/30 * * * *'
   workflow_dispatch:
     inputs:
       fuente:
-        description: 'fuegocine o archive. Vacío = las dos, una detrás de otra.'
+        description: 'fuegocine, archive, peliculas, series, animes o moviedays. Vacío = todas, una detrás de otra.'
         required: false
         default: ''
 
@@ -50,11 +70,16 @@ jobs:
     strategy:
       # Secuencial a propósito, por lo mismo que la guarda de concurrencia.
       max-parallel: 1
-      # Y `fail-fast: false` para que una fuente que falle no cancele la otra: son independientes
-      # y perder las dos por culpa de una sería exactamente el problema que esto viene a resolver.
+      # Y `fail-fast: false` para que una fuente que falle no cancele a las demás: son
+      # independientes y perderlas todas por culpa de una sería exactamente el problema que esto
+      # viene a resolver.
       fail-fast: false
       matrix:
-        fuente: [fuegocine, archive]
+        # EL ORDEN IMPORTA: la vuelta puede quedarse a medias —el runner muere, o la corrida
+        # siguiente ya no cabe—, así que delante van las dos que más aportan por tanda.
+        # `peliculas`/`series`/`animes` son las categorías de tioplus, y de paso arrastran a
+        # cinecalidad y moviedays, que `scrapeLatest` pide en paralelo por la misma puerta.
+        fuente: [fuegocine, archive, peliculas, series, animes, moviedays]
 
     steps:
       - uses: actions/checkout@v4
@@ -83,4 +108,14 @@ jobs:
         # guarda antes de seguir, y ese trabajo tiene su propio presupuesto: por defecto son 45
         # minutos, que sumados a los 18 del recorrido se pasan del `timeout-minutes: 50` de este
         # trabajo y lo matarían en cada corrida — cada media hora, para siempre. 18 + 20 sí cabe.
-        run: npx ts-node scripts/refreshCatalog.ts --solo=$FUENTE --saltar-guardados --minutos=18 --completar-minutos=20 300
+        #
+        # Y moviedays necesita ADEMÁS por dónde empezar. Es la única fuente sin índice que
+        # recorrer: baja por el catálogo de TMDB ordenado por número de votos, así que sin
+        # `--desde` cada tanda vuelve a pedir las mismas primeras páginas y no avanza nunca por
+        # muchas vueltas que dé. Se rota con el número de corrida, que es lo único que cambia
+        # entre tandas y no exige guardar estado en ningún sitio.
+        run: |
+          EXTRA=""
+          if [ "$FUENTE" = "moviedays" ]; then EXTRA="--desde=$(( ${{ github.run_number }} % 40 + 1 ))"; fi
+          echo "refreshCatalog --solo=$FUENTE $EXTRA"
+          npx ts-node scripts/refreshCatalog.ts --solo=$FUENTE --saltar-guardados --minutos=18 --completar-minutos=20 $EXTRA 300
