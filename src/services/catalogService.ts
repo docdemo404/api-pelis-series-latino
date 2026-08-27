@@ -1065,7 +1065,21 @@ export class CatalogService {
       const { data } = await query;
       const filas = (data || []) as any[];
       if (filas.length >= 30) {
-        const newest = Date.parse(filas[0].updated_at || '') || 0;
+        /**
+         * LA MÁS RECIENTE DE TODAS, NO LA PRIMERA DE LA LISTA.
+         *
+         * Antes bastaba con `filas[0]` porque la consulta venía ordenada por `updated_at DESC` y
+         * la primera fila ERA la más nueva. Al anteponer la completitud (`primeroLoCompleto`) eso
+         * dejó de ser cierto: la primera fila pasó a ser una cualquiera con puntuación 100, y su
+         * fecha podía ser de hace meses.
+         *
+         * La consecuencia no fue un orden raro: fue el catálogo entero sin cargar. Con una fecha
+         * vieja, `isFresh` daba falso, se descartaba una base perfectamente al día y se caía al
+         * scraping en vivo — respuestas de 33 segundos y listados de 2 y 50 títulos según la
+         * página, sobre 1.119 publicables. Una suposición sobre el ORDEN escondida dentro de una
+         * comprobación de FRESCURA.
+         */
+        const newest = filas.reduce((max, f) => Math.max(max, Date.parse(f.updated_at || '') || 0), 0);
         const isFresh = Date.now() - newest < 24 * 60 * 60 * 1000;
         if (isFresh) {
           // La consulta ya trae solo `has_streams = true`; el filtro en memoria sobra y, sobre

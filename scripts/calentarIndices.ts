@@ -95,9 +95,20 @@ function ficheroDe(servidores: any[]): string | null {
   return null;
 }
 
-async function main() {
-  const soloFuente = process.argv.find(a => a.startsWith('--solo='))?.slice(7);
-  const limite = Number(process.argv.find(a => a.startsWith('--limite='))?.slice(9)) || 0;
+/**
+ * Calienta el indice de todo el catalogo. Devuelve cuantas lo consiguieron.
+ *
+ * Se exporta para que el barrido pueda llamarlo al terminar (ver `refreshCatalog.ts`): ese proceso
+ * ya recorre el catalogo entero, no tiene prisa y corre sin nadie mirando una pantalla, que son
+ * exactamente las tres condiciones que hacen falta aqui. Antes esto solo existia como comando
+ * suelto, o sea que en la practica no lo ejecutaba nadie y el arranque en frio lo seguia pagando
+ * el primero que abriera cada pelicula.
+ */
+export async function calentarIndices(
+  opciones: { soloFuente?: string; limite?: number } = {}
+): Promise<{ buenas: number; total: number }> {
+  const soloFuente = opciones.soloFuente;
+  const limite = opciones.limite || 0;
 
   const db = getSupabaseAdmin();
   const { data, error } = await db
@@ -130,6 +141,18 @@ async function main() {
 
   const buenas = resultados.filter(r => r.ok).length;
   console.log(`\nÍndice caliente en ${buenas} de ${resultados.length}.`);
+  return { buenas, total: resultados.length };
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+/**
+ * Y como comando suelto, para poder lanzarlo a mano sobre una fuente concreta.
+ *
+ * `require.main === module` es lo que separa las dos formas de usarlo: importado desde el
+ * barrido no hace nada por su cuenta, y ejecutado directamente se comporta como siempre.
+ */
+if (require.main === module) {
+  calentarIndices({
+    soloFuente: process.argv.find(a => a.startsWith('--solo='))?.slice(7),
+    limite: Number(process.argv.find(a => a.startsWith('--limite='))?.slice(9)) || 0,
+  }).catch(e => { console.error(e); process.exit(1); });
+}
