@@ -23,6 +23,8 @@ import { getSupabaseAdmin } from '../src/services/supabaseService';
 import { canonicalTitle, searchIndexKey, yearFromSlug } from '../src/utils/text';
 import { mereceRepasoDeExtraccion, hasVolatileToken, canonicalArchiveOrg, esUrlDeFicheroPermanente, extractDirect } from '../src/scrapers/directStream';
 import { inspectEmbed } from '../src/scrapers/embedHealth';
+import { externalProxyEnabled } from '../src/utils/externalProxy';
+import { calentarIndices } from './calentarIndices';
 import { bajarManifiesto, segmentoDescargable } from '../src/services/manifestHealth';
 import { streamClient } from '../src/utils/httpClient';
 import { CacheStore } from '../src/cache/store';
@@ -802,6 +804,148 @@ async function entregaVideo(url: string): Promise<{ ok: boolean; kbs: number; to
 const DESDE_MEDIO = 1000000;
 
 /**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * ¿ESTE MANIFIESTO ES PERMANENTE POR DENTRO?
+ *
+ * Un `.mp4` se juzga por su forma y ya está: si la url no lleva firma, mañana sigue sirviendo el
+ * mismo fichero. Un `.m3u8` NO se puede juzgar así, y esa es toda la razón de que esta función
+ * exista. El manifiesto puede estar limpio y apuntar a segmentos firmados, y entonces la url dura
+ * y el vídeo no — que es exactamente la promesa rota que la regla de permanencia vino a evitar.
+ *
+ * Así que hay que abrirlo y mirar lo de dentro. Tres cosas, en este orden:
+ *
+ *   1. Ninguna url del manifiesto lleva firma ni caducidad (`hasVolatileToken`).
+ *   2. Si es un MAESTRO, se baja un escalón y se repite — las variantes de turboviplay viven en
+ *      OTRO host (`cdn4.turboviplay.com` manda a `g246.turbosplayer.com`), así que un maestro
+ *      limpio no dice nada de sus hijas.
+ *   3. Y un segmento de verdad entrega vídeo, con la MISMA prueba que se le pide a un mp4:
+ *      `entregaVideo`. No basta con que el manifiesto responda 200; un índice de texto siempre
+ *      responde 200.
+ *
+ * NO SE USA `segmentoDescargable` DE `manifestHealth`, aunque haga casi esto. Su regla es
+ * «devuelve true cuando no hay nada que comprobar», y es la regla correcta ALLÍ: ese código
+ * decide qué se BORRA, y no condenar lo que no se ha podido medir es la norma de la casa. Aquí se
+ * decide qué ENTRA, y ahí la carga de la prueba va al revés: lo que no se ha podido comprobar no
+ * es permanente. La misma duda, dos respuestas opuestas, según a quién le toque perder.
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ */
+async function entregaHls(
+  url: string,
+  referer: string
+): Promise<{ ok: boolean; kbs: number; total: number; kbpsNecesarios?: number }> {
+  const NADA = { ok: false, kbs: 0, total: 0 };
+
+  const manifiesto = await bajarManifiesto(url, referer);
+  if (!manifiesto) return NADA;
+
+  const dentro = urisDeManifiesto(manifiesto, url);
+  if (!dentro.length) return NADA;
+  if (dentro.some(hasVolatileToken)) return NADA;
+
+  let listaDeSegmentos = manifiesto;
+  let baseDeSegmentos = url;
+  let kbpsNecesarios: number | undefined = anchoDeBandaDeclarado(manifiesto);
+
+  // Un maestro no tiene segmentos: tiene variantes. Se sigue la mejor, que es la que se va a ver.
+  const variantes = dentro.filter(u => /\.m3u8(\?|$)/i.test(u));
+  if (variantes.length) {
+    const mejor = mejorVariante(manifiesto, url) || variantes[0];
+    if (hasVolatileToken(mejor)) return NADA;
+    const hija = await bajarManifiesto(mejor, referer);
+    if (!hija) return NADA;
+    const dentroHija = urisDeManifiesto(hija, mejor);
+    if (!dentroHija.length) return NADA;
+    if (dentroHija.some(hasVolatileToken)) return NADA;
+    // Tres niveles no se persiguen: a estas alturas ya no es un empaquetado normal.
+    if (dentroHija.some(u => /\.m3u8(\?|$)/i.test(u))) return NADA;
+    listaDeSegmentos = hija;
+    baseDeSegmentos = mejor;
+  }
+
+  const segmentos = urisDeManifiesto(listaDeSegmentos, baseDeSegmentos)
+    .filter(u => !/\.m3u8(\?|$)/i.test(u));
+  if (!segmentos.length) return NADA;
+
+  /*
+   * Se mide UN segmento y no el primero: el primero de una película suele ser el logo del
+   * distribuidor y en algunos empaquetados pesa una décima parte del resto, así que su velocidad
+   * no representa nada. Se coge uno del medio, por lo mismo que `DESDE_MEDIO` en el mp4.
+   */
+  const medida = await entregaVideo(segmentos[Math.floor(segmentos.length / 2)]);
+  if (!medida.ok) return NADA;
+
+  return { ok: true, kbs: medida.kbs, total: 0, kbpsNecesarios };
+}
+
+/**
+ * Con qué `Referer` se le pide el vídeo a este servidor.
+ *
+ * No es cortesía: hay CDN que devuelven 403 sin él, y el catálogo ya guarda por servidor las
+ * cabeceras que su host exige (`headers`, casi siempre un Referer). Se usa esa si está; si no, la
+ * página del reproductor, que es de donde el navegador lo pediría de verdad.
+ *
+ * Sin ninguna de las dos se manda cadena vacía y que decida el host. Inventarse un Referer sería
+ * peor que no ponerlo: un origen que no es el suyo es justo lo que algunos bloquean.
+ */
+function refererDe(sv: any): string {
+  const cabeceras = sv?.headers || {};
+  for (const [clave, valor] of Object.entries(cabeceras)) {
+    if (/^referer$/i.test(clave) && valor) return String(valor);
+  }
+  return String(sv?.embed_url || '');
+}
+
+/** Las urls de un manifiesto, absolutas. Las líneas que empiezan por `#` son directivas. */
+function urisDeManifiesto(manifiesto: string, base: string): string[] {
+  const salida: string[] = [];
+  for (const linea of manifiesto.split(/\r?\n/)) {
+    const l = linea.trim();
+    if (!l || l.startsWith('#')) continue;
+    try {
+      salida.push(new URL(l, base).toString());
+    } catch { /* una línea que no es una url no es una url */ }
+  }
+  return salida;
+}
+
+/**
+ * La variante de más calidad de un maestro.
+ *
+ * `#EXT-X-STREAM-INF:...BANDWIDTH=1205600` y la url viene en la línea SIGUIENTE — así está
+ * definido el formato, y por eso esto no se puede resolver mirando las urls por su cuenta.
+ */
+function mejorVariante(maestro: string, base: string): string | null {
+  const lineas = maestro.split(/\r?\n/).map(l => l.trim());
+  let mejor: { url: string; ancho: number } | null = null;
+  for (let i = 0; i < lineas.length - 1; i++) {
+    if (!lineas[i].startsWith('#EXT-X-STREAM-INF')) continue;
+    const ancho = Number(/BANDWIDTH=(\d+)/i.exec(lineas[i])?.[1] || 0);
+    const cruda = lineas[i + 1];
+    if (!cruda || cruda.startsWith('#')) continue;
+    try {
+      const url = new URL(cruda, base).toString();
+      if (!mejor || ancho > mejor.ancho) mejor = { url, ancho };
+    } catch { /* siguiente */ }
+  }
+  return mejor?.url || null;
+}
+
+/**
+ * Lo que el manifiesto DICE que necesita, en KB/s.
+ *
+ * `BANDWIDTH` va en bits por segundo y es propiedad del empaquetado, no de la red del momento:
+ * es justo lo que `kbps_necesarios` quiere decir. En un mp4 ese dato hay que deducirlo del tamaño
+ * y la duración; aquí viene escrito.
+ */
+function anchoDeBandaDeclarado(maestro: string): number | undefined {
+  let mayor = 0;
+  for (const m of maestro.matchAll(/BANDWIDTH=(\d+)/gi)) {
+    mayor = Math.max(mayor, Number(m[1]) || 0);
+  }
+  return mayor > 0 ? Math.round(mayor / 8 / 1024) : undefined;
+}
+
+/**
  * TODAS las urls permanentes y funcionales de una lista de servidores, ordenadas de mejor a peor.
  *
  * No se queda con la primera que funcione: una película o un capítulo puede tener varios enlaces
@@ -879,10 +1023,22 @@ async function urlsBuenasDe(servidores: any[], fuente: string, minutos?: number)
    * que se ganó al dejar de ir en serie; solo se le quita el pico.
    */
   const POR_FICHA = 4;
-  const medidos: Array<{ sv: any; url: string; medida: { ok: boolean; kbs: number; total: number } }> = [];
+  type Medida = { ok: boolean; kbs: number; total: number; kbpsNecesarios?: number };
+  const medidos: Array<{ sv: any; url: string; medida: Medida }> = [];
   for (let i = 0; i < candidatos.length; i += POR_FICHA) {
     const lote = candidatos.slice(i, i + POR_FICHA);
-    medidos.push(...await Promise.all(lote.map(async c => ({ ...c, medida: await entregaVideo(c.url) }))));
+    medidos.push(...await Promise.all(lote.map(async c => ({
+      /*
+       * CADA CLASE CON SU PRUEBA. Un mp4 se comprueba pidiéndole un trozo; a un manifiesto eso no
+       * se le puede hacer, porque lo que devuelve es un índice de texto de medio kilobyte — la
+       * guarda de `entregaVideo` que exige más de 8 KB lo suspendería siempre, teniendo el vídeo
+       * detrás. Ver `entregaHls`, que abre el manifiesto y mide un segmento de verdad.
+       */
+      ...c,
+      medida: /\.m3u8(\?|$)/i.test(c.url)
+        ? await entregaHls(c.url, refererDe(c.sv))
+        : await entregaVideo(c.url),
+    }))));
   }
 
   // El mejor primero; los demás quedan detrás como respaldo.
@@ -921,9 +1077,16 @@ async function urlsBuenasDe(servidores: any[], fuente: string, minutos?: number)
        * usa el criterio siguiente. `runtime` viene de TMDB y ya está resuelto cuando corre esta
        * fase, así que casi siempre está.
        */
-      kbps_necesarios: minutos && minutos > 0 && m.medida.total > 0
-        ? Math.round(m.medida.total / 1024 / (minutos * 60))
-        : undefined,
+      /*
+       * En HLS este dato NO se deduce: el manifiesto lo declara en `BANDWIDTH` y es propiedad del
+       * empaquetado. Se prefiere al cálculo por tamaño/duración, que en un manifiesto ni siquiera
+       * se puede hacer —no hay un fichero con un tamaño—.
+       */
+      kbps_necesarios: m.medida.kbpsNecesarios ?? (
+        minutos && minutos > 0 && m.medida.total > 0
+          ? Math.round(m.medida.total / 1024 / (minutos * 60))
+          : undefined
+      ),
     }));
 }
 
@@ -2150,6 +2313,29 @@ async function main() {
 
   if (directLimit > 0) {
     await fillDirectStreams(directLimit);
+  }
+
+  /*
+   * Y AL FINAL, DEJAR EL INDICE DE CADA PELICULA EN LA CACHE.
+   *
+   * Es lo que convierte «arreglar peliculas» en «arreglar el problema». Todo lo demas hace la
+   * reproduccion mas rapida, pero alguien sigue pagando el arranque en frio: el PRIMERO que abre
+   * cada pelicula. Y con archive.org ese primero muchas veces no llega — esta medido que 6 de 21
+   * fichas fallaban porque traer el indice tardaba mas de los 25 s que el reproductor aguanta.
+   *
+   * Ese trabajo no tiene por que hacerlo un espectador, y aqui no hay ninguna prisa: este barrido
+   * ya recorre el catalogo entero y corre sin nadie mirando una pantalla. Es idempotente, asi que
+   * lo que ya este en la cache no se vuelve a pedir.
+   *
+   * Solo si hay Worker: sin el, `cacheUrlFor` devuelve null, no hay ninguna cache que calentar y
+   * esto seria una vuelta al catalogo para no hacer nada.
+   */
+  if (externalProxyEnabled()) {
+    await calentarIndices().catch(e =>
+      console.warn('   ⚠ No se pudo calentar el índice:', e?.message || e)
+    );
+  } else {
+    console.log('   ℹ Sin Worker configurado: no hay caché que calentar.');
   }
 }
 

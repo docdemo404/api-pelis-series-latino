@@ -102,6 +102,55 @@ con `502` en las dos vueltas: vidhideplus, drive.google, dropload y gumlet. Ese 
 veredicto —la API llega al host y el host no entrega— y de vidhideplus ya se sabe por qué: sus
 ficheros están borrados (`scripts/dev/probe_entrega_host.ts`).
 
+## 🎬 Un HLS sin firma es tan permanente como un mp4 (2026-08-27)
+
+`esUrlDeFicheroPermanente` decidía con `/\.(mp4|mkv|webm)$/` sobre el `pathname`, así que **ningún
+`.m3u8` podía pasar jamás**, llevara token o no. Y HLS es lo que publican tioplus, cinecalidad y la
+mayoría de las webs modernas: por eso las «fuentes probadas» acabaron siendo las dos que sirven
+ficheros sueltos.
+
+Un `.mp4` se juzga por su forma; un `.m3u8` no, porque el manifiesto puede estar limpio y apuntar a
+segmentos firmados. Así que el trabajo se partió en dos: la **forma** sigue en
+`esUrlDeFicheroPermanente` —síncrona y pura, que es lo que hace que el crawl y el barrido den la
+misma respuesta— y el **contenido** en `entregaHls`, que abre el manifiesto, rechaza si alguna url
+de dentro lleva firma, baja un escalón si es maestro (las variantes de turboviplay viven en otro
+host) y exige que un segmento del medio entregue vídeo con la misma prueba que un mp4.
+
+> `entregaHls` **no** reutiliza `segmentoDescargable` aunque haga casi lo mismo. Su regla es
+> «devuelve true cuando no hay nada que comprobar», correcta allí porque decide qué se BORRA. Aquí
+> se decide qué ENTRA, y la carga de la prueba va al revés: lo que no se ha podido comprobar no es
+> permanente.
+
+De paso, la función ahora rechaza por sí misma lo que lleva token. `pathname` no incluye la query,
+así que un `pelicula.mp4?e=1784869872` pasaba entero; se salvaba porque **uno** de los cinco sitios
+que la llaman encadenaba `hasVolatileToken` en la línea siguiente.
+
+**El barrido no necesitó nada**: ya sabía de HLS (`manifiestoArranca` + la regla de dos avisos de
+`fallos_arranque`), así que el caso «el host empezó a firmar» sale como «sus trozos no llegan».
+
+Medido antes de tocar producción, comparando la regla vieja y la nueva sobre los 2.287 servidores
+guardados: **0 pierden el sello** y 5 lo ganan —los `.m3u8` pegados a mano que el barrido borraba—.
+
+Y una tanda real de tioplus:
+
+```bash
+npx ts-node scripts/refreshCatalog.ts --solo=peliculas --saltar-guardados --minutos=18 --completar-minutos=20 300
+```
+
+| | Antes | Después |
+|---|---|---|
+| `N/300 títulos tienen url directa permanente y funcional` | **0** | **256** |
+| Filas en la tabla | 610 | **808** |
+| Publicables | 575 | **773** |
+| Fichas de tioplus | 86 | **332** |
+| Servidores directos | 659 fichero · 0 HLS | 659 fichero · **567 HLS** |
+
+**Riesgo que queda anotado:** los segmentos de turboviplay salen de `lh3.googleusercontent.com`, y
+`IP_BOUND_HOSTS` lista `googleusercontent` como host que ata el vídeo a la IP que lo pidió. Un
+segmento bajó bien desde una máquina sin sesión previa, lo que apunta a que no está atado, pero el
+crawl corre en un runner y el aparato del espectador es una tercera IP. Si una ficha nueva da 403,
+es esto.
+
 ## 🐌 Por qué el catálogo crecía a un título al día (2026-08-27)
 
 La queja era «hay muy poco contenido». **El crawl no era el problema**: los índices se recorren

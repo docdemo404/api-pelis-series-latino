@@ -80,9 +80,24 @@ export function esUrlDeFicheroPermanente(url: string): boolean {
    * Y la extensión, EN LA RUTA. Mismo motivo que en `esFicheroDirecto`: el envoltorio de
    * FuegoCine (`blogspot.com/?…&link=https://…/video.mp4`) acaba en `.mp4` sin ser un fichero, y
    * por aquí se colaba en la base como si fuera una url permanente. No lo es: es una página.
+   *
+   * ── Y LA FIRMA, QUE ANTES NO SE MIRABA AQUÍ ────────────────────────────────────────────────
+   *
+   * `pathname` no incluye la query, así que un `pelicula.mp4?token=…&e=1784869872` pasaba esta
+   * prueba entero: la ruta acaba en `.mp4` y la caducidad iba en la parte que no se miraba.
+   *
+   * Se salvaba en UN sitio de los cinco que llaman aquí —`urlsBuenasDe` encadena
+   * `hasVolatileToken` en la línea siguiente—, o sea que la guarda dependía de que quien llamara
+   * se acordara. Los otros cuatro no se acordaban, y dos de ellos tienen escrito en su propio
+   * comentario que la necesitaban: `ficheroPermanenteDentroDelEmbed` («guardar una url firmada
+   * sería llenar la caché de trozos que caducan») y el atajo de `mode=proxy` en `stream.routes`,
+   * que le pasa al Worker una url ya acuñada para que la cachee por trozos.
+   *
+   * Ahora la regla se defiende sola.
    */
   try {
-    return /\.(mp4|mkv|webm)$/i.test(new URL(url).pathname);
+    if (hasVolatileToken(url)) return false;
+    return /\.(mp4|mkv|webm|m3u8)$/i.test(new URL(url).pathname);
   } catch {
     return false;
   }
