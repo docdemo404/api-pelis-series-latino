@@ -74,6 +74,34 @@ Radiografía del estado actual en cualquier momento:
 npx ts-node scripts/dev/diag_metadatos.ts
 ```
 
+## 🚚 Cuándo se retira un host — y, sobre todo, cuándo no
+
+`--entrega` comprueba que la API sepa servir cada host **por el camino del reproductor**, y al que
+no puede le quita el sello a sus servidores. El 2026-08-26 a las 20:19 condenó **once hosts de
+quince y retiró 1.939 sellos: 217 títulos dejaron de anunciarse en una sola corrida.** Nueve de
+los once habían contestado `429`, que no significa «este host no entrega» sino «vas demasiado
+rápido» — y se lo provocaba el propio sondeo, disparando sin pausa.
+
+Ahora un `429`, `503`, `504`, `408` o un corte de red cuentan como **sin veredicto** y no condenan
+a nadie; las sondas van espaciadas; a los que fallan se les vuelve a preguntar al final de la
+corrida; y hacen falta **dos corridas con fallo concluyente** antes de retirar un sello, que es la
+misma regla que `verificarPermanentes` ya tenía desde el principio.
+
+```bash
+npm run repair:catalog -- --entrega                        # informa, no escribe
+npm run repair:catalog -- --entrega --incluir-sin-sello    # …y pregunta también por los ya condenados
+```
+
+El segundo comando existe porque había un punto ciego: en cuanto un host se condena, sus
+servidores se quedan sin sello y dejan de entrar en el muestreo, así que este paso no podía
+enterarse nunca de que el host había vuelto.
+
+Medido con él el 2026-08-27: de los once condenados, **siete entregan vídeo real** —ok.ru,
+archive.org, emturbovid, mp4upload, yourupload, fast.wistia y unlimplay—. Quedan cuatro que fallan
+con `502` en las dos vueltas: vidhideplus, drive.google, dropload y gumlet. Ese `502` sí es un
+veredicto —la API llega al host y el host no entrega— y de vidhideplus ya se sabe por qué: sus
+ficheros están borrados (`scripts/dev/probe_entrega_host.ts`).
+
 ## ☁️ Despliegue en Vercel (Gratis $0/mes)
 
 ```bash

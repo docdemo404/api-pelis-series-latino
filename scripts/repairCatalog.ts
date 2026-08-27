@@ -2969,7 +2969,14 @@ async function verifyPlayableServers(apply: boolean, limitArg?: number, soloHost
         if (v === 'muerto') { cambio = true; return { ...sinVideoDirecto(s), status: 'offline', name: nombreConTipo(s.name, false) }; }
         if (s.verified_at === sello) return s;
         cambio = true;
-        return { ...s, verified_at: sello, status: 'online' };
+        /**
+         * Y se le borra el golpe de `--entrega`, si lo llevaba: acaba de entregar un segmento de
+         * vídeo de verdad, así que un fallo de entrega de la vuelta anterior ya no describe nada
+         * de hoy. Sin esto, dos malos ratos separados por una semana condenarían igual que dos
+         * seguidos, y el contador dejaría de significar «esto está pasando ahora».
+         */
+        const { fallos_entrega, ...limpio } = s;
+        return { ...limpio, verified_at: sello, status: 'online' };
       };
 
       const servers = (row.servers || []).map(revisar);
@@ -3370,7 +3377,9 @@ async function repairFakeDirects(apply: boolean, limitArg?: number, soloHost?: s
  * sería viable, porque cada una mueve bytes de verdad por la API.
  *
  * Se prueban varios representantes por host antes de condenarlo: un fichero puede estar roto sin
- * que lo esté el sitio. Solo si NINGUNO entrega se da el host por inalcanzable.
+ * que lo esté el sitio. Solo si NINGUNO entrega se da el host por inalcanzable — y ni aun así a
+ * la primera: hace falta que el fallo sea CONCLUYENTE y que se repita en dos corridas. Un `429`
+ * no es concluyente, y tomarlo por tal escondió 217 títulos de una sentada (ver abajo).
  *
  * QUÉ SE HACE CON UN HOST INALCANZABLE: se le quita el SELLO a sus servidores, no el
  * `direct_stream`. La diferencia es deliberada — no se destruye nada de lo scrapeado, solo se
@@ -3385,6 +3394,19 @@ async function checkDeliveryByHost(apply: boolean): Promise<void> {
   const API = (process.env.API_BASE_URL || 'https://api-pelis-series-latino-gilt.vercel.app').replace(/\/+$/, '');
   console.log(`🚚 Comprobando la entrega REAL por host, contra ${API}${apply ? '' : ' (dry-run)'}...`);
 
+  /**
+   * Cuántos veredictos concluyentes de «no entrega» hacen falta para condenar un host, y a qué
+   * ritmo se le pregunta. Las razones, en `sondearHost` y en `revisar`.
+   */
+  const GOLPES_PARA_CONDENAR = 2;
+  /** Ver el muestreo de aquí abajo: pregunta también por los hosts que ya perdieron el sello. */
+  const MIRAR_SIN_SELLO = process.argv.includes('--incluir-sin-sello');
+  /** Códigos que hablan del TRÁFICO, no del host. Ver la nota de dentro de `entrega`. */
+  const SIN_VEREDICTO = new Set([408, 429, 503, 504]);
+  const ENTRE_SONDAS_MS = 1500;
+  const ANTES_DE_REPETIR_MS = 60_000;
+  const respirar = (ms: number) => new Promise(r => setTimeout(r, ms));
+
   const rows = await fetchAllRows(['servers', 'seasons', 'has_streams']);
   const hostDe = (u: string) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return '(ilegible)'; } };
   const servidoresDe = (r: any): any[] => [
@@ -3396,8 +3418,21 @@ async function checkDeliveryByHost(apply: boolean): Promise<void> {
   const porHost = new Map<string, any[]>();
   for (const row of rows) {
     for (const s of servidoresDe(row)) {
-      if (!s?.embed_url || !s.direct_stream || !s.verified_at) continue;
-      if (Date.now() - Date.parse(s.verified_at) > 6 * 60 * 60 * 1000) continue;
+      if (!s?.embed_url || !s.direct_stream) continue;
+      /**
+       * ...salvo con `--incluir-sin-sello`, que mira TAMBIÉN los que ya lo perdieron.
+       *
+       * Sin esa puerta hay un punto ciego: en cuanto este paso condena un host, sus servidores se
+       * quedan sin sello y dejan de entrar en el muestreo, así que este paso no puede enterarse
+       * NUNCA de que el host ha vuelto. Depende de que `--verificar` lo selle antes por el camino
+       * directo, y mientras tanto no hay forma de preguntar «¿ya entrega?» sin esperar horas.
+       *
+       * Solo mira más: no escribe distinto. Un servidor sin sello no tiene sello que retirar.
+       */
+      if (!MIRAR_SIN_SELLO) {
+        if (!s.verified_at) continue;
+        if (Date.now() - Date.parse(s.verified_at) > 6 * 60 * 60 * 1000) continue;
+      }
       const h = hostDe(s.embed_url);
       if (!porHost.has(h)) porHost.set(h, []);
       const lista = porHost.get(h)!;
@@ -3420,7 +3455,7 @@ async function checkDeliveryByHost(apply: boolean): Promise<void> {
    * SEGMENTO— y solo cuentan como entrega los BYTES DE VÍDEO del final. Es la misma prueba que
    * hace `--verificar` contra el host, solo que por el camino que usa el espectador.
    */
-  async function entrega(s: any): Promise<{ ok: boolean; detalle: string }> {
+  async function entrega(s: any): Promise<{ ok: boolean; sinVeredicto?: boolean; detalle: string }> {
     const t = Date.now();
     const pasos: string[] = [];
     let url = API + directEndpointUrl(s.embed_url, s.direct_kind === 'mp4' ? 'mp4' : 'hls');
@@ -3437,6 +3472,28 @@ async function checkDeliveryByHost(apply: boolean): Promise<void> {
         });
         const buf: Buffer = Buffer.from((r.data as any) || []);
         pasos.push(`${r.status}/${buf.length}B`);
+
+        /**
+         * UN 429 NO DICE NADA DEL HOST, y confundirlo con un «no entrega» es lo que vaciaba el
+         * catálogo cada dos horas.
+         *
+         * Medido el 2026-08-26 a las 20:19: nueve de los quince hosts contestaron `429/837B` en
+         * menos de tres segundos —archive.org, sus cuatro muestras seguidas—, se condenaron once
+         * hosts, se retiraron 1.939 sellos y 217 títulos dejaron de anunciarse. Los mismos
+         * ficheros, pedidos por el mismo camino desde otra máquina, entregaban sus 65.536 bytes
+         * con la cabecera mp4 intacta. No estaban caídos: al sondeo le estaban frenando el ritmo,
+         * y se le frenaba porque el propio sondeo iba a rueda libre (ver `sondearHost`).
+         *
+         * Así que un `429` —y un `503`, y un `504`, y un `408`— es exactamente el `sinVeredicto`
+         * del resto del verificador: no se pudo concluir, y no saber no condena a nadie.
+         *
+         * El `502` SÍ sigue siendo veredicto, y la diferencia importa: ese lo devuelve la API
+         * cuando fue al host y el host falló. Es una afirmación sobre el host; el 429 es una
+         * afirmación sobre nosotros.
+         */
+        if (SIN_VEREDICTO.has(r.status)) {
+          return { ok: false, sinVeredicto: true, detalle: `${pasos.join('→')}/${((Date.now() - t) / 1000).toFixed(1)}s` };
+        }
 
         if (r.status !== 200 && r.status !== 206) {
           return { ok: false, detalle: `${pasos.join('→')}/${((Date.now() - t) / 1000).toFixed(1)}s` };
@@ -3460,46 +3517,121 @@ async function checkDeliveryByHost(apply: boolean): Promise<void> {
       }
       return { ok: false, detalle: `${pasos.join('→')}/sin-llegar-al-vídeo/${((Date.now() - t) / 1000).toFixed(1)}s` };
     } catch (e) {
-      return { ok: false, detalle: `${pasos.join('→')}/${e instanceof Error ? e.message : e}/${((Date.now() - t) / 1000).toFixed(1)}s` };
+      /**
+       * Aquí no ha contestado nadie: se cortó la conexión con la API, o se agotó la paciencia. La
+       * petición ni siquiera llegó a decirnos qué pasaba al otro lado, así que esto tampoco mide
+       * al host. Lento no es roto, y mudo tampoco.
+       */
+      return { ok: false, sinVeredicto: true, detalle: `${pasos.join('→')}/${e instanceof Error ? e.message : e}/${((Date.now() - t) / 1000).toFixed(1)}s` };
     }
   }
 
-  const caidos: string[] = [];
-  for (const [host, muestras] of porHost) {
-    let vivo = false;
+  /**
+   * UNA VUELTA, Y OTRA AL FINAL A LOS QUE NO ENTREGARON. Es lo que separa «este host no entrega»
+   * de «hoy no me están contestando».
+   *
+   * Dos cambios, y los dos salen del mismo log de las 20:19. El primero es el RITMO: los dos
+   * primeros hosts entregan con nota y a partir del tercero es 429 en cadena. O sea que el 429 se
+   * lo provocaba el propio barrido disparando sin pausa. Ahora las sondas van espaciadas.
+   *
+   * El segundo es la SEGUNDA VUELTA. Si un 429 significa «vuelve más tarde», lo honrado es volver
+   * más tarde: al que no entregó se le pregunta otra vez al final de la ronda, cuando ya no queda
+   * nadie metiendo prisa. Son pocas peticiones —solo los dudosos— y compran la diferencia entre
+   * retirar un host y retirarlo con razón.
+   */
+  const veredictoDe = new Map<string, 'entrega' | 'no-entrega' | 'sin-veredicto'>();
+
+  const sondearHost = async (host: string, muestras: any[]) => {
+    let concluyente = false;
     const detalles: string[] = [];
     for (const s of muestras) {
       const r = await entrega(s);
-      detalles.push(r.detalle);
-      if (r.ok) { vivo = true; break; }
+      detalles.push(r.sinVeredicto ? `${r.detalle}(?)` : r.detalle);
+      if (r.ok) {
+        console.log(`   OK  ${host.padEnd(32)} ${detalles.join(' | ')}`);
+        return 'entrega' as const;
+      }
+      /**
+       * Un no-veredicto no cuenta como golpe, pero tampoco corta la ronda: la siguiente muestra
+       * del mismo host puede contestar de verdad, y entonces sí se sabe algo.
+       */
+      if (!r.sinVeredicto) concluyente = true;
+      await respirar(ENTRE_SONDAS_MS);
     }
-    console.log(`   ${vivo ? 'OK ' : 'NO '} ${host.padEnd(32)} ${detalles.join(' | ')}`);
-    if (!vivo) caidos.push(host);
+    const salida = concluyente ? 'no-entrega' as const : 'sin-veredicto' as const;
+    console.log(`   ${salida === 'no-entrega' ? 'NO ' : '??? '} ${host.padEnd(32)} ${detalles.join(' | ')}`);
+    return salida;
+  };
+
+  for (const [host, muestras] of porHost) veredictoDe.set(host, await sondearHost(host, muestras));
+
+  const dudosos = Array.from(veredictoDe).filter(([, v]) => v !== 'entrega').map(([h]) => h);
+  if (dudosos.length) {
+    console.log(`\n🔁 segunda vuelta para ${dudosos.length} host(s), tras ${(ANTES_DE_REPETIR_MS / 1000).toFixed(0)} s de calma:\n`);
+    await respirar(ANTES_DE_REPETIR_MS);
+    for (const host of dudosos) veredictoDe.set(host, await sondearHost(host, porHost.get(host)!));
   }
 
-  if (caidos.length === 0) {
-    console.log('\n✅ todos los hosts publicados se pueden entregar desde la API');
-    return;
+  const caidos = Array.from(veredictoDe).filter(([, v]) => v === 'no-entrega').map(([h]) => h);
+  const sinSaber = Array.from(veredictoDe).filter(([, v]) => v === 'sin-veredicto').map(([h]) => h);
+  const entregan = new Set(Array.from(veredictoDe).filter(([, v]) => v === 'entrega').map(([h]) => h));
+
+  if (sinSaber.length) {
+    console.log(`\n🤷 ${sinSaber.length} host(s) sin veredicto, no se les toca nada: ${sinSaber.join(', ')}`);
   }
-  console.log(`\n❌ ${caidos.length} host(s) que la API NO puede entregar: ${caidos.join(', ')}`);
+  if (caidos.length === 0) {
+    console.log('\n✅ ningún host publicado se ha demostrado inalcanzable desde la API');
+  } else {
+    console.log(`\n❌ ${caidos.length} host(s) que la API NO puede entregar: ${caidos.join(', ')}`);
+  }
 
   const condenados = new Set(caidos);
-  let fichasTocadas = 0, sellosRetirados = 0, seEsconden = 0;
+  let fichasTocadas = 0, sellosRetirados = 0, seEsconden = 0, primerosAvisos = 0, absueltos = 0;
 
   for (const row of rows) {
     let cambio = false;
-    /** Se retira la PRUEBA, no el enlace. Ver la nota de arriba. */
-    const desellar = (s: any) => {
-      if (!s?.embed_url || !s.verified_at || !condenados.has(hostDe(s.embed_url))) return s;
-      cambio = true; sellosRetirados++;
+    /**
+     * Se retira la PRUEBA, no el enlace (ver la nota de arriba). Y NO A LA PRIMERA.
+     *
+     * `verificarPermanentes` lleva desde el principio su `GOLPES_PARA_RETIRAR = 2`, y lo puso ahí
+     * exactamente este disgusto: «54 servidores desellados de golpe por un host que contestaba mal
+     * una de cada seis veces». Este paso es el que más fichas mueve de una sentada —1.939 sellos
+     * en una corrida— y era el único sin esa red debajo.
+     *
+     * El golpe se anota en el propio servidor, igual que allí, y así no hay que llevar estado
+     * entre corridas: un punto de guardado en un runner se pierde.
+     */
+    const revisar = (s: any) => {
+      if (!s?.embed_url || !s.verified_at) return s;
+      const host = hostDe(s.embed_url);
+
+      // Entrega: se le perdona el golpe que tuviera pendiente.
+      if (entregan.has(host)) {
+        if (s.fallos_entrega === undefined) return s;
+        cambio = true; absueltos++;
+        const { fallos_entrega, ...resto } = s;
+        return resto;
+      }
+
+      // Sin veredicto: no se toca NADA. Ni el sello, ni el contador.
+      if (!condenados.has(host)) return s;
+
+      const golpes = Number(s.fallos_entrega || 0) + 1;
+      cambio = true;
+      if (golpes < GOLPES_PARA_CONDENAR) {
+        primerosAvisos++;
+        // Sigue anunciada: un golpe no retira. Pero queda escrito, y a la siguiente sí retira.
+        return { ...s, fallos_entrega: golpes };
+      }
+      sellosRetirados++;
       const { verified_at, ...resto } = s;
-      return resto;
+      return { ...resto, fallos_entrega: golpes };
     };
-    const servers = (row.servers || []).map(desellar);
+    const servers = (row.servers || []).map(revisar);
     const seasons = (row.seasons || []).map((t: any) => ({
       ...t,
       episodes: (t.episodes || []).map((e: any) => (
-        Array.isArray(e?.servers) ? { ...e, servers: e.servers.map(desellar) } : e
+        Array.isArray(e?.servers) ? { ...e, servers: e.servers.map(revisar) } : e
       )),
     }));
     if (!cambio) continue;
@@ -3517,6 +3649,7 @@ async function checkDeliveryByHost(apply: boolean): Promise<void> {
   }
 
   console.log(`\n🚫 ${sellosRetirados} sellos retirados en ${fichasTocadas} fichas · ${seEsconden} dejan de anunciarse ${apply ? '' : '(se harían)'}`);
+  console.log(`   ⏳ ${primerosAvisos} servidor(es) con su primer golpe, que siguen anunciados · 🙌 ${absueltos} absuelto(s)`);
   console.log(apply ? '   ✅ aplicado' : '   (dry-run: repite con --apply)');
   await purgarCacheDeTocadas(apply);
 }
