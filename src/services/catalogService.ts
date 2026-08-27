@@ -692,6 +692,46 @@ export class CatalogService {
     return { ok: true };
   }
 
+  private static scoreColumnProbe: Promise<boolean> | null = null;
+  /** Si la migracion 013 (metadata_score) esta puesta. Sin ella, el orden se queda como estaba. */
+  private static hasScoreColumn(): Promise<boolean> {
+    if (!this.scoreColumnProbe) {
+      this.scoreColumnProbe = (async () => {
+        try {
+          const { error } = await supabase.from('media_items').select('metadata_score').limit(1);
+          return !error;
+        } catch {
+          return false;
+        }
+      })();
+    }
+    return this.scoreColumnProbe;
+  }
+
+  /**
+   * PRIMERO LO QUE SE PUEDE MIRAR.
+   *
+   * Antepone la puntuacion de completitud (migracion 013) al orden que traiga la consulta, de modo
+   * que una ficha a medias caiga por debajo de una entera aunque sea mas reciente o tenga mejor
+   * nota. No esconde nada: las fichas peladas se reproducen igual de bien y siguen ahi, al final.
+   *
+   * No reordena el catalogo bueno, y eso es lo que hace que se pueda anteponer sin miedo: 822 de
+   * las 895 fichas puntuan entre 82 y 100, asi que el grueso queda empatado y dentro de el manda
+   * el orden de siempre. Lo que se mueve es la cola: las catorce fichas por debajo de 60, que en
+   * la portada se ven como un rectangulo gris entre caratulas.
+   *
+   * Se aplica ANTES que el `.order` propio de cada consulta porque en Supabase el primer `order`
+   * encadenado es el principal.
+   *
+   * Y es SINCRONA, con la bandera ya resuelta por quien llama —igual que `soloPublicables`— porque
+   * un builder de Supabase es «thenable»: devolverlo desde una funcion `async` hace que el `await`
+   * lo adopte y LANCE la consulta a medio construir, sin filtros ni limite.
+   */
+  private static primeroLoCompleto<T>(query: T, hayScore: boolean): T {
+    if (!hayScore) return query;
+    return (query as any).order('metadata_score', { ascending: false, nullsFirst: false }) as T;
+  }
+
   private static availabilityColumnProbe: Promise<boolean> | null = null;
   private static hasAvailabilityColumn(): Promise<boolean> {
     if (!this.availabilityColumnProbe) {
@@ -950,6 +990,7 @@ export class CatalogService {
         query = query.gte('release_date', '1900').lt('release_date', String(spec.beforeYear));
       }
 
+      query = this.primeroLoCompleto(query, await this.hasScoreColumn());
       query = spec.order === 'recent'
         ? query.order('updated_at', { ascending: false })
         : query.order('rating', { ascending: false, nullsFirst: false });
@@ -978,11 +1019,11 @@ export class CatalogService {
     const from = Math.max(0, (Math.max(1, page) - 1) * safeLimit);
 
     try {
-      let query = supabase
-        .from('media_items')
-        .select('*', { count: 'exact' })
-        .order('updated_at', { ascending: false })
-        .range(from, from + safeLimit - 1);
+      let query = this.primeroLoCompleto(
+        supabase.from('media_items').select('*', { count: 'exact' }),
+        await this.hasScoreColumn()
+      );
+      query = query.order('updated_at', { ascending: false }).range(from, from + safeLimit - 1);
 
       // El "ver todo" tampoco debe pasear fichas sin reproducción posible.
       query = this.soloPublicables(query, await this.hasAvailabilityColumn(), await this.hasOcultoColumn());
@@ -1004,7 +1045,10 @@ export class CatalogService {
    */
   static async getAll(): Promise<MediaItem[]> {
     // La versión evita reutilizar una lista anterior que todavía contenía títulos sin directo.
-    const cacheKey = 'all_homepage:direct-only:v1';
+    // v2: el orden cambió (completitud primero, ver `primeroLoCompleto`). Sin subir la versión, la
+    // portada seguiría sirviendo la lista vieja hasta que caducara, y el arreglo pareceria no
+    // haber funcionado — que es justo el sintoma que persigue `repair:catalog --purgar-cache`.
+    const cacheKey = 'all_homepage:direct-only:v2';
     const cached = await CacheStore.get<MediaItem[]>(cacheKey);
     if (cached) return cached;
 
@@ -1012,11 +1056,11 @@ export class CatalogService {
     //    Si Supabase tiene catálogo suficiente y fresco (< 24h), se sirve directo de la DB
     //    (1 query) en lugar de lanzar 4 scrapes en vivo por cold start.
     try {
-      let query = supabase
-        .from('media_items')
-        .select(this.COLUMNAS_DE_TARJETA)
-        .order('updated_at', { ascending: false })
-        .limit(200);
+      let query = this.primeroLoCompleto(
+        supabase.from('media_items').select(this.COLUMNAS_DE_TARJETA),
+        await this.hasScoreColumn()
+      );
+      query = query.order('updated_at', { ascending: false }).limit(200);
       query = this.soloPublicables(query, await this.hasAvailabilityColumn(), await this.hasOcultoColumn());
       const { data } = await query;
       const filas = (data || []) as any[];

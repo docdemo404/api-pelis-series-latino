@@ -78,6 +78,23 @@ vino prestado, y entonces no hay vuelta atrás el día que TMDB publique lo que 
 Opcional: `FANART_API_KEY` en el entorno activa el paso de logos (clave personal gratuita); sin
 ella ese paso se salta solo.
 
+### Lo que no se puede rellenar, se ordena más abajo
+
+Agotadas TMDB, Wikidata, Wikipedia y Fanart, quedan fichas que nadie tiene completas — 151 sin logo
+sobre 895. Se reproducen igual de bien, así que no se esconden: se hunden. La migración 013 añade
+`metadata_score`, una **columna generada** (0-100) que Postgres calcula de la propia fila, con los
+pesos puestos en cuánto se nota la ausencia mirando la app: sin carátula la ficha es un rectángulo
+gris en el carrusel (22 puntos), sin clasificación por edades no lo nota nadie (4).
+
+Entra en el orden del home, del "ver todo" y de la búsqueda, siempre **por delante de la nota y
+por detrás del acierto de nombre**: quien escribe "matilda" quiere Matilda, pero entre dos
+resultados que encajan igual manda el que se puede mirar. Y no reordena el catálogo bueno — 822 de
+895 fichas puntúan entre 82 y 100, así que el grueso queda empatado y dentro de él manda el orden
+de siempre.
+
+Es generada y no un campo mantenido a mano porque hay cuatro caminos que escriben fichas (crawl,
+relleno, reparaciones y panel): el primero que se olvidara dejaría puntuaciones mentirosas.
+
 Radiografía del estado actual en cualquier momento:
 
 ```bash
