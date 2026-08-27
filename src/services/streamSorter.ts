@@ -228,6 +228,25 @@ const MARCADOR_TIPO = /\s*\[(?:v[íi]deo\s+directo|embed)\]\s*$/i;
 export const VERIFICADO_VIGENTE_MS = 6 * 60 * 60 * 1000;
 
 /**
+ * Lo que dura el sello de un título servido por un enlace PERMANENTE (`direct_mode: 'public'`).
+ *
+ * Las seis horas de arriba están calculadas para una firma que caduca: pasado ese rato la URL en
+ * sí deja de valer, la tenga quien la tenga. Un enlace `public` no tiene ese problema —no caduca
+ * ni va atado a una IP—, así que aplicarle la misma ventana no protege de nada y sí hace daño: el
+ * 27/08/2026 el verificador se cayó unas horas y el catálogo se apagó solo, escondiendo 850 fichas
+ * cuyas URLs seguían perfectamente vivas.
+ *
+ * PERO NO ES EXENCIÓN, y la diferencia importa: permanente quiere decir que la URL no caduca, no
+ * que el fichero sea eterno. archive.org da de baja material y un CDN puede empezar a devolver
+ * 404. Estos enlaces también hay que mirarlos; lo que cambia es cada cuánto, porque lo que se
+ * vigila ya no es el reloj de una firma sino que la película siga publicada.
+ *
+ * Siete días: lo bastante largo para que la caída del barrido no vacíe el catálogo, y lo bastante
+ * corto para que una retirada no se anuncie durante semanas.
+ */
+export const VERIFICADO_PERMANENTE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
  * Lo que cuesta ENTREGAR este servidor, del más barato al más caro. Menor es mejor.
  *
  * `public` y `redirect` no hacen pasar ni un byte por esta API. `manifest` solo las playlists,

@@ -2,7 +2,7 @@ import { MediaItem, ServerOption, ContentType } from '../types';
 import { supabase, getSupabaseAdmin } from './supabaseService';
 import { RealScraperService } from './realScraperService';
 import { TmdbService } from './tmdbService';
-import { sortServersBySourcePriority, getPrimaryStream, paraElCliente, descartesDelCliente, fichaReproducible, veredictoDisponibilidad, VERIFICADO_VIGENTE_MS, soloDeEstaObra } from './streamSorter';
+import { sortServersBySourcePriority, getPrimaryStream, paraElCliente, descartesDelCliente, fichaReproducible, veredictoDisponibilidad, VERIFICADO_VIGENTE_MS, VERIFICADO_PERMANENTE_MS, soloDeEstaObra } from './streamSorter';
 import { hostNormalizado } from './hostsConCache';
 import { ficheroDentroDeNuestraCache } from '../utils/externalProxy';
 import { normalizeTitle, slugify, yearFromSlug, searchIndexKey } from '../utils/text';
@@ -332,6 +332,20 @@ export function duenoDeLaPagina<T extends { id: string; type?: string | null }>(
     .map(c => porId.get(c))
     .find((r): r is T =>
       !!r && esPaginaPropia(r.id, url, r.type === 'tvseries' ? 'tvseries' : 'movie'));
+}
+
+/**
+ * En que estado esta el sistema de sellos cuando se construye un listado.
+ *
+ * Se resuelve UNA vez por consulta y se pasa hacia dentro, en vez de consultarlo en `soloPublicables`,
+ * porque esa funcion es sincrona a proposito: un builder de Supabase es «thenable» y volverla async
+ * haria que el `await` de quien la usa lance la consulta a medio construir.
+ */
+interface EstadoDelSello {
+  /** Si la migracion 014 (`enlace_permanente`) esta puesta. Sin ella, la regla es la de siempre. */
+  hayColumnaPermanente: boolean;
+  /** Si NADIE ha verificado nada en toda una ventana: entonces el averiado es el verificador. */
+  verificadorCaido: boolean;
 }
 
 export class CatalogService {
@@ -732,6 +746,69 @@ export class CatalogService {
     return (query as any).order('metadata_score', { ascending: false, nullsFirst: false }) as T;
   }
 
+  private static permanenteColumnProbe: Promise<boolean> | null = null;
+  /** Si la migracion 014 (`enlace_permanente`) esta puesta. */
+  private static hasPermanenteColumn(): Promise<boolean> {
+    if (!this.permanenteColumnProbe) {
+      this.permanenteColumnProbe = (async () => {
+        try {
+          const { error } = await supabase.from('media_items').select('enlace_permanente').limit(1);
+          return !error;
+        } catch {
+          return false;
+        }
+      })();
+    }
+    return this.permanenteColumnProbe;
+  }
+
+  /** El fusible: se recuerda un minuto para no preguntarlo en cada consulta de cada listado. */
+  private static ultimoSelloVisto: { cuando: number; caido: boolean } | null = null;
+
+  /**
+   * ¿Sigue vivo el verificador?
+   *
+   * Mira el sello MAS NUEVO de todo el catalogo. Si hasta el mas nuevo esta vencido, es que nadie
+   * ha comprobado nada en toda una ventana — y entonces la regla del sello, aplicada tal cual,
+   * escondería el catalogo entero. Es la condicion exacta en la que el filtro deja de proteger y
+   * empieza a apagar, asi que es exactamente donde salta el fusible.
+   *
+   * Ante un error de consulta se responde «vivo»: el fusible es para una caida DEMOSTRADA del
+   * verificador, no para cualquier hipo de red, y desactivar la proteccion por no haber podido
+   * preguntar seria peor que la enfermedad.
+   */
+  private static async verificadorCaido(): Promise<boolean> {
+    const ahora = Date.now();
+    if (this.ultimoSelloVisto && ahora - this.ultimoSelloVisto.cuando < 60_000) {
+      return this.ultimoSelloVisto.caido;
+    }
+    let caido = false;
+    try {
+      const { data, error } = await supabase
+        .from('media_items')
+        .select('streams_checked_at')
+        .not('streams_checked_at', 'is', null)
+        .order('streams_checked_at', { ascending: false })
+        .limit(1);
+      const masNuevo = Date.parse(data?.[0]?.streams_checked_at || '') || 0;
+      caido = !error && masNuevo > 0 && ahora - masNuevo > VERIFICADO_VIGENTE_MS;
+      if (caido) {
+        console.warn(`[catalogo] Fusible: nada verificado desde hace ${((ahora - masNuevo) / 3600000).toFixed(1)} h — se sirve sin exigir sello.`);
+      }
+    } catch { /* vivo por defecto */ }
+    this.ultimoSelloVisto = { cuando: ahora, caido };
+    return caido;
+  }
+
+  /** El estado del sello, resuelto una vez y pasado a `soloPublicables`, que es sincrona. */
+  private static async estadoDelSello(): Promise<EstadoDelSello> {
+    const [hayColumnaPermanente, caido] = await Promise.all([
+      this.hasPermanenteColumn(),
+      this.verificadorCaido(),
+    ]);
+    return { hayColumnaPermanente, verificadorCaido: caido };
+  }
+
   private static availabilityColumnProbe: Promise<boolean> | null = null;
   private static hasAvailabilityColumn(): Promise<boolean> {
     if (!this.availabilityColumnProbe) {
@@ -790,7 +867,7 @@ export class CatalogService {
    * que aún faltaban por encadenar. Lo que hacía falta esperar —si la columna existe— se resuelve
    * fuera y se pasa ya resuelto.
    */
-  private static soloPublicables<T>(query: T, hayColumna: boolean, hayOculto: boolean = false): T {
+  private static soloPublicables<T>(query: T, hayColumna: boolean, hayOculto: boolean = false, sello: EstadoDelSello = { hayColumnaPermanente: false, verificadorCaido: false }): T {
     if (!hayColumna) return query;
     const q0 = query as any;
     /**
@@ -804,7 +881,7 @@ export class CatalogService {
      * `.eq(false)` los millares de filas que nunca se han tocado quedarían fuera del catálogo.
      */
     const q = hayOculto ? q0.not('oculto_manual', 'is', true) : q0;
-    return q
+    const conSello = q
       .eq('has_streams', true)
       .not('poster', 'is', null)
       /**
@@ -853,7 +930,51 @@ export class CatalogService {
        * significa que la salud del barrido pasa a ser visible en el tamaño del catálogo. Por eso
        * `--verificar` no puede volver a morir en silencio.
        */
-      .gt('streams_checked_at', new Date(Date.now() - VERIFICADO_VIGENTE_MS).toISOString()) as T;
+      // El sello, con la ventana que le toque a cada uno. `null` = fusible saltado, sin condicion.
+      ;
+    const condicion = this.condicionDeSello(sello);
+    return (condicion ? (conSello as any).or(condicion) : conSello) as T;
+  }
+
+  /**
+   * CADA ENLACE CADUCA A SU RITMO, Y CUANDO NADIE COMPRUEBA NADA EL ROTO NO SON LAS PELICULAS.
+   *
+   * Devuelve el filtro `or` de PostgREST que decide si una ficha tiene el sello al dia. Tres
+   * casos, y los tres salen del apagon del 27/08/2026:
+   *
+   *   1. VERIFICADOR CAIDO. Si el sello mas nuevo de TODO el catalogo ya esta vencido, no es que
+   *      las peliculas se hayan estropeado a la vez: es que nadie las esta mirando. Exigir sello
+   *      entonces no protege de nada y apaga el catalogo entero — que es literalmente lo que paso:
+   *      de 1.114 fichas que pasaban los demas filtros, quedo 1, y la app dejo de cargar. Aqui se
+   *      renuncia a la regla y se sirve lo que hay, que es infinitamente mejor que no servir nada.
+   *      Es un fusible: protege ficha a ficha mientras el sistema funciona y se desconecta cuando
+   *      el averiado es el sistema.
+   *
+   *   2. ENLACE PERMANENTE (`direct_mode: 'public'`, columna generada en la migracion 014). Su URL
+   *      no caduca, asi que se le pide sello de VERIFICADO_PERMANENTE_MS (siete dias) en vez de
+   *      seis horas. Son 850 de 1.129 fichas: la mayoria del catalogo estaba sometida a un reloj
+   *      que no le corresponde.
+   *
+   *   3. ENLACE QUE CADUCA (`redirect` / `proxy`). Sin cambios: seis horas, porque pasado ese rato
+   *      la firma de la URL no vale y el titulo mentiria.
+   *
+   * El caso 2 NO es una exencion. Un enlace permanente puede morirse igual —archive.org retira
+   * material—, solo que eso no lo dicta un reloj de firma, asi que se comprueba mas espaciado.
+   */
+  private static condicionDeSello(sello: EstadoDelSello): string | null {
+    const desde = (ms: number) => new Date(Date.now() - ms).toISOString();
+    const vigente = `streams_checked_at.gt.${desde(VERIFICADO_VIGENTE_MS)}`;
+
+    // Fusible saltado: sin condicion de sello. No se disfraza de `or` que lo acepta todo — eso
+    // seria el mismo filtro escrito para que no filtre, y el que lo leyera no sabria por que.
+    if (sello.verificadorCaido) return null;
+
+    if (!sello.hayColumnaPermanente) return vigente;
+
+    return [
+      vigente,
+      `and(enlace_permanente.is.true,streams_checked_at.gt.${desde(VERIFICADO_PERMANENTE_MS)})`,
+    ].join(',');
   }
 
   /**
@@ -905,7 +1026,7 @@ export class CatalogService {
         .order('updated_at', { ascending: false })
         .limit(limit);
 
-      query = this.soloPublicables(query, await this.hasAvailabilityColumn(), await this.hasOcultoColumn());
+      query = this.soloPublicables(query, await this.hasAvailabilityColumn(), await this.hasOcultoColumn(), await this.estadoDelSello());
 
       const { data } = await query;
 
@@ -978,7 +1099,7 @@ export class CatalogService {
         .not('genres', 'eq', '{}');
 
       // Los carruseles del home no anuncian títulos que ya sabemos que no se reproducen.
-      query = this.soloPublicables(query, await this.hasAvailabilityColumn(), await this.hasOcultoColumn());
+      query = this.soloPublicables(query, await this.hasAvailabilityColumn(), await this.hasOcultoColumn(), await this.estadoDelSello());
 
       if (spec.type) query = query.eq('type', spec.type);
       if (spec.genres && spec.genres.length > 0) query = query.overlaps('genres', spec.genres);
@@ -1026,7 +1147,7 @@ export class CatalogService {
       query = query.order('updated_at', { ascending: false }).range(from, from + safeLimit - 1);
 
       // El "ver todo" tampoco debe pasear fichas sin reproducción posible.
-      query = this.soloPublicables(query, await this.hasAvailabilityColumn(), await this.hasOcultoColumn());
+      query = this.soloPublicables(query, await this.hasAvailabilityColumn(), await this.hasOcultoColumn(), await this.estadoDelSello());
 
       if (type) query = query.eq('type', type);
       if (genre) query = query.contains('genres', [genre]);
@@ -1061,7 +1182,7 @@ export class CatalogService {
         await this.hasScoreColumn()
       );
       query = query.order('updated_at', { ascending: false }).limit(200);
-      query = this.soloPublicables(query, await this.hasAvailabilityColumn(), await this.hasOcultoColumn());
+      query = this.soloPublicables(query, await this.hasAvailabilityColumn(), await this.hasOcultoColumn(), await this.estadoDelSello());
       const { data } = await query;
       const filas = (data || []) as any[];
       if (filas.length >= 30) {
@@ -1927,6 +2048,9 @@ export class CatalogService {
     // El interruptor manual se PIDE siempre (para pintar el botón en su estado) pero solo se
     // filtra por él cuando el panel pregunta por lo visible.
     const hayOculto = await this.hasOcultoColumn();
+    // Resuelto AQUI y no dentro: `construirConsulta` es sincrona porque quien la usa encadena
+    // `.range(...)` sobre lo que devuelve, y volverla async le entregaria una promesa.
+    const sello = await this.estadoDelSello();
     const construirConsulta = () => {
       let c = supabase
         .from('media_items')
@@ -1949,15 +2073,33 @@ export class CatalogService {
       if (opts.q) c = c.ilike('title', `%${opts.q}%`);
       if (opts.visible && hayColumnaDisponibilidad) {
         const desdeCuando = new Date(Date.now() - VERIFICADO_VIGENTE_MS).toISOString();
+        const desdeLargo = new Date(Date.now() - VERIFICADO_PERMANENTE_MS).toISOString();
+        /**
+         * EL «no visible» DEL PANEL ES EL COMPLEMENTO EXACTO DE `soloPublicables`, y hay que
+         * moverlo con ella. Cuando el sello dejó de ser uno solo —seis horas para los enlaces que
+         * caducan, siete días para los permanentes (migración 014)—, este listado se quedó con la
+         * regla vieja, y entonces una ficha con enlace permanente y sello de ayer salía a la vez
+         * como visible y como no visible. El panel es donde se decide qué esconder a mano: no
+         * puede contradecir a lo que la app enseña.
+         */
+        const selloVencido = sello.hayColumnaPermanente
+          ? [
+              'streams_checked_at.is.null',
+              // Caducable y pasado de seis horas.
+              `and(streams_checked_at.lte.${desdeCuando},enlace_permanente.not.is.true)`,
+              // Permanente y pasado de siete días (cubre también al caducable muy viejo).
+              `streams_checked_at.lte.${desdeLargo}`,
+            ]
+          : ['streams_checked_at.is.null', `streams_checked_at.lte.${desdeCuando}`];
+
         c = opts.visible === 'si'
-          ? this.soloPublicables(c, true, hayOculto)
+          ? this.soloPublicables(c, true, hayOculto, sello)
           : (c as any).or(
               [
                 'has_streams.is.false',
                 'has_streams.is.null',
                 'poster.is.null',
-                'streams_checked_at.is.null',
-                `streams_checked_at.lte.${desdeCuando}`,
+                ...selloVencido,
                 ...(hayOculto ? ['oculto_manual.is.true'] : []),
               ].join(',')
             );
@@ -4232,7 +4374,7 @@ export class CatalogService {
         .select('*')
         .ilike('title_normalized', `${nq}%`)
         .limit(limit);
-      query1 = this.soloPublicables(query1, hayColumna, hayOculto);
+      query1 = this.soloPublicables(query1, hayColumna, hayOculto, await this.estadoDelSello());
       const { data, error } = await query1;
       // Si la columna existe (sin error), confiar en su resultado aunque venga vacío.
       if (!error) return (data || []).map(this.mapDbItemToMediaItem);
@@ -4244,7 +4386,7 @@ export class CatalogService {
         .select('*')
         .ilike('title', `${nq}%`)
         .limit(limit);
-      query2 = this.soloPublicables(query2, hayColumna, hayOculto);
+      query2 = this.soloPublicables(query2, hayColumna, hayOculto, await this.estadoDelSello());
       const { data } = await query2;
       return (data || []).map(this.mapDbItemToMediaItem);
     } catch {}
