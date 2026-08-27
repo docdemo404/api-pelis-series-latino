@@ -41,7 +41,7 @@
  */
 import 'dotenv/config';
 import { TmdbService, TMDB_API_KEY } from '../src/services/tmdbService';
-import { ComplementoService } from '../src/services/complementoService';
+import { completarHuecos, fallosDeRed } from '../src/services/complementoService';
 import { CatalogService } from '../src/services/catalogService';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
 import { CacheStore } from '../src/cache/store';
@@ -175,35 +175,25 @@ async function rellenar(fila: any): Promise<Record<Campo, Relleno> | null> {
     }
   }
 
-  // ── Paso 2: Wikidata + Wikipedia en español ─────────────────────────────────────────────────
-  const deWiki: Campo[] = ['overview', 'runtime', 'director', 'imdb_id'];
-  if (CON_WIKI && fila.tmdb_id > 0 && sigueFaltando().some(c => deWiki.includes(c))) {
-    const wd = await ComplementoService.porTmdbId(fila.tmdb_id, tipo);
-    if (wd) {
-      const pendientes = sigueFaltando();
-      if (pendientes.includes('runtime') && wd.duracion) {
-        encontrado.runtime = { valor: wd.duracion, fuente: `wikidata:${wd.entidad}` }; anotar('wikidata');
-      }
-      if (pendientes.includes('director') && wd.director) {
-        encontrado.director = { valor: wd.director, fuente: `wikidata:${wd.entidad}` }; anotar('wikidata');
-      }
-      if (pendientes.includes('imdb_id') && wd.imdbId) {
-        encontrado.imdb_id = { valor: wd.imdbId, fuente: `wikidata:${wd.entidad}` }; anotar('wikidata');
-      }
-      if (pendientes.includes('overview') && wd.articuloEs) {
-        const sinopsis = await ComplementoService.sinopsisEnEspanol(wd.articuloEs);
-        if (sinopsis) {
-          encontrado.overview = { valor: sinopsis.texto, fuente: `wikipedia-es:${sinopsis.url}` };
-          anotar(sinopsis.esArgumento ? 'wikipedia (argumento)' : 'wikipedia (entradilla)');
-        }
-      }
+  // ── Pasos 2 y 3: lo que TMDB no tiene ─────────────────────────────────────────
+  // La cascada NO se implementa aquí: es la misma `completarHuecos` que corre en la puerta de
+  // entrada del catálogo (`enrichMediaItem` con `complementar`). Con una copia en cada sitio, un
+  // título recién rastreado y uno repasado por este barrido acabarían con criterios distintos.
+  if (CON_WIKI || CON_FANART) {
+    const pendientes = sigueFaltando();
+    // Se le pasa una ficha con los huecos que QUEDAN: los que TMDB acaba de tapar en el paso 1 ya
+    // no son huecos, y preguntar por ellos sería gastar una consulta para tirar la respuesta.
+    const conLoDeTmdb: any = { ...fila, tmdb_id: fila.tmdb_id, type: tipo };
+    for (const [campo, r] of Object.entries(encontrado)) conLoDeTmdb[campo] = r.valor;
+    const tapado = await completarHuecos(conLoDeTmdb, {
+      tmdbApiKey: TMDB_API_KEY, conFanart: CON_FANART, conWikidata: CON_WIKI,
+    });
+    for (const [campo, valor] of Object.entries(tapado.campos)) {
+      if (!pedidos.includes(campo as Campo) || !pendientes.includes(campo as Campo)) continue;
+      const fuente = tapado.fuentes[campo];
+      encontrado[campo as Campo] = { valor, fuente };
+      anotar(fuente.startsWith('wikipedia') ? 'wikipedia' : fuente.split(':')[0]);
     }
-  }
-
-  // ── Paso 3: Fanart.tv, solo para el logo ────────────────────────────────────────────────────
-  if (CON_FANART && fila.tmdb_id > 0 && sigueFaltando().includes('logo')) {
-    const logo = await ComplementoService.logoFanart(fila.tmdb_id, tipo, TMDB_API_KEY);
-    if (logo) { encontrado.logo = { valor: logo, fuente: 'fanart' }; anotar('fanart'); }
   }
 
   return Object.keys(encontrado).length > 0 ? encontrado : null;
@@ -309,6 +299,13 @@ async function purgarCache(): Promise<void> {
   for (const c of pedidos) {
     const r = rellenados[c] || 0;
     console.log(`   ${c.padEnd(16)} ${String(antes[c]).padStart(8)} ${String(r).padStart(10)} ${String(antes[c] - r).padStart(12)} ${String(enElCatalogo[c]).padStart(10)}`);
+  }
+
+  // «Sigue vacío» solo significa «no existe en ninguna fuente» si NADA falló. Con consultas caídas
+  // de por medio, parte de ese hueco es falta de respuesta, y hay que decirlo o el informe miente.
+  if (fallosDeRed.total > 0) {
+    console.log(`\n   ⚠ ${fallosDeRed.total} consulta(s) se rindieron tras reintentar: de esas fichas NO se sabe`);
+    console.log(`     si el dato existe. Vuelve a lanzar el barrido para reintentarlas.`);
   }
 
   console.log(`\n   de dónde salió:`);

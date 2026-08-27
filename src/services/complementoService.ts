@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { ContentType } from '../types';
+import { pareceIngles } from '../utils/text';
 
 /**
  * LO QUE TMDB NO TIENE.
@@ -19,8 +20,11 @@ import { ContentType } from '../types';
  *   · Fanart.tv → logos, que es el único campo donde no hay alternativa textual. Pide una clave
  *     gratuita (FANART_API_KEY); sin ella el paso se salta solo y no rompe nada.
  *
- * Lo que NO hace: elegir. Aquí se busca y se devuelve lo que haya; quién gana y qué se escribe lo
- * decide `scripts/rellenarMetadatos.ts`, que es el que sabe qué campo estaba vacío.
+ * La puerta de entrada es `completarHuecos` (abajo del todo), y la usan LOS DOS caminos por los que
+ * una ficha puede necesitar esto: el rastreo, cuando el título entra por primera vez
+ * (`enrichMediaItem` con `complementar`), y el barrido masivo sobre lo ya guardado
+ * (`scripts/rellenarMetadatos.ts`). Una sola implementación a propósito: con una copia en cada
+ * sitio, el catálogo acabaría con dos calidades de metadata según por dónde entró cada ficha.
  */
 
 const UA = 'api-pelis-latino/1.0 (catalogo de peliculas; complemento de metadata)';
@@ -59,14 +63,44 @@ export interface SinopsisEs {
 const cacheWikidata = new Map<string, DatosWikidata | null>();
 const cacheSinopsis = new Map<string, SinopsisEs | null>();
 
+/**
+ * Consultas que se rindieron después de reintentar. NO son «el dato no existe»: son «no se pudo
+ * preguntar», y confundir las dos cosas es exactamente el fallo que este contador hace visible.
+ *
+ * Costó una conclusión equivocada: el barrido de logos dio 11 de 135 y se dio por hecho que a las
+ * otras 124 no las tiene nadie. Fanart tenía el de «El Chavo del 8» en español desde el principio;
+ * lo que falló fue la petición, y al devolver `null` igual que una ausencia real, el informe dijo
+ * «no existe» con toda naturalidad.
+ */
+export const fallosDeRed = { total: 0 };
+
+const esperar = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+/**
+ * GET con dos reintentos.
+ *
+ * Un barrido son cientos de peticiones seguidas contra servidores gratuitos, y ahí un timeout
+ * suelto no es una anomalía: es el día a día. Reintentar dos veces con una espera creciente
+ * convierte casi todos en respuesta. Los 4xx no se reintentan —un 404 es una respuesta, no un
+ * fallo— salvo el 429, que es el servidor pidiendo que vayas más despacio.
+ */
 async function pedir(url: string, params: any, timeout = 20000): Promise<any> {
-  const res = await axios.get(url, {
-    params,
-    headers: { 'User-Agent': UA, Accept: 'application/json' },
-    timeout,
-    validateStatus: () => true,
-  });
-  return res.status >= 200 && res.status < 300 ? res.data : null;
+  for (let intento = 0; intento < 3; intento++) {
+    try {
+      const res = await axios.get(url, {
+        params,
+        headers: { 'User-Agent': UA, Accept: 'application/json' },
+        timeout,
+        validateStatus: () => true,
+      });
+      if (res.status >= 200 && res.status < 300) return res.data;
+      // 404/403: el servidor ha contestado y la respuesta es que no. Insistir no cambia nada.
+      if (res.status < 500 && res.status !== 429) return null;
+    } catch { /* timeout o socket caído: cae al reintento */ }
+    if (intento < 2) await esperar(600 * (intento + 1));
+  }
+  fallosDeRed.total++;
+  return null;
 }
 
 export class ComplementoService {
@@ -226,4 +260,90 @@ function recortar(texto: string, tope = 700): string {
   const cortado = limpio.slice(0, tope);
   const fin = cortado.lastIndexOf('. ');
   return (fin > tope * 0.5 ? cortado.slice(0, fin + 1) : cortado.trimEnd() + '…').trim();
+}
+
+/** Los campos que esta cascada sabe tapar. El resto solo los tiene TMDB. */
+export const CAMPOS_COMPLEMENTABLES = ['overview', 'runtime', 'director', 'imdb_id', 'logo'] as const;
+export type CampoComplementable = typeof CAMPOS_COMPLEMENTABLES[number];
+
+export interface HuecosTapados {
+  /** Solo los campos que se han podido rellenar, listos para volcar en la ficha o en un UPDATE. */
+  campos: Partial<Record<CampoComplementable, any>>;
+  /** De dónde salió cada uno, para `metadata_fuentes`. */
+  fuentes: Record<string, string>;
+}
+
+function vacio(v: any): boolean {
+  if (v === null || v === undefined) return true;
+  if (typeof v === 'string') return v.trim() === '';
+  if (Array.isArray(v)) return v.length === 0;
+  if (typeof v === 'number') return v === 0;
+  return false;
+}
+
+/**
+ * ¿Le falta este campo a la ficha?
+ *
+ * La sinopsis tiene regla propia. La cascada de TMDB acaba en inglés a propósito —una sinopsis real
+ * informa más que ninguna—, pero en una API que sirve en español eso es un hueco tapado con un
+ * trapo, no un campo relleno. Comprobado contra TMDB sobre las 27 fichas que estaban así: ninguna
+ * tenía traducción al español que rescatar, o sea que el trapo se queda hasta que lo cambie otra
+ * fuente.
+ */
+export function leFalta(ficha: any, campo: CampoComplementable): boolean {
+  if (campo === 'overview') return vacio(ficha.overview) || pareceIngles(ficha.overview);
+  return vacio(ficha[campo]);
+}
+
+/**
+ * TAPA LOS HUECOS DE UNA FICHA con lo que TMDB no tiene. Es el punto único de la cascada.
+ *
+ * Vive aquí y no en el script del barrido porque tiene DOS clientes que no pueden separarse: la
+ * pasada masiva (`scripts/rellenarMetadatos.ts`) y la puerta de entrada del catálogo
+ * (`enrichMediaItem` con `complementar`). Si cada uno llevara su copia, un título que entra hoy y
+ * un título repasado mañana acabarían con criterios distintos, y el catálogo tendría dos calidades
+ * de metadata según por dónde entró.
+ *
+ * Pregunta LO JUSTO: si a la ficha no le falta nada de lo que Wikidata sabe, no se consulta
+ * Wikidata; si no le falta el logo, no se consulta Fanart. Sobre una ficha completa esto no cuesta
+ * ni una petición.
+ */
+export async function completarHuecos(
+  ficha: { tmdb_id: number; type: ContentType; [k: string]: any },
+  opts: { tmdbApiKey: string; conFanart?: boolean; conWikidata?: boolean } = { tmdbApiKey: '' }
+): Promise<HuecosTapados> {
+  const salida: HuecosTapados = { campos: {}, fuentes: {} };
+  if (!ficha || !(ficha.tmdb_id > 0)) return salida;
+
+  const huecos = CAMPOS_COMPLEMENTABLES.filter(c => leFalta(ficha, c));
+  if (huecos.length === 0) return salida;
+
+  const poner = (campo: CampoComplementable, valor: any, fuente: string) => {
+    salida.campos[campo] = valor;
+    salida.fuentes[campo] = fuente;
+  };
+
+  // ── Wikidata + Wikipedia: sinopsis, duración, director e imdb_id ────────────────────────────
+  const deWikidata: CampoComplementable[] = ['overview', 'runtime', 'director', 'imdb_id'];
+  if (opts.conWikidata !== false && huecos.some(c => deWikidata.includes(c))) {
+    const wd = await ComplementoService.porTmdbId(ficha.tmdb_id, ficha.type);
+    if (wd) {
+      const cita = `wikidata:${wd.entidad}`;
+      if (huecos.includes('runtime') && wd.duracion) poner('runtime', wd.duracion, cita);
+      if (huecos.includes('director') && wd.director) poner('director', wd.director, cita);
+      if (huecos.includes('imdb_id') && wd.imdbId) poner('imdb_id', wd.imdbId, cita);
+      if (huecos.includes('overview') && wd.articuloEs) {
+        const sinopsis = await ComplementoService.sinopsisEnEspanol(wd.articuloEs);
+        if (sinopsis) poner('overview', sinopsis.texto, `wikipedia-es:${sinopsis.url}`);
+      }
+    }
+  }
+
+  // ── Fanart.tv: solo el logo, que es el único campo sin alternativa textual ───────────────────
+  if (opts.conFanart !== false && huecos.includes('logo')) {
+    const logo = await ComplementoService.logoFanart(ficha.tmdb_id, ficha.type, opts.tmdbApiKey);
+    if (logo) poner('logo', logo, 'fanart');
+  }
+
+  return salida;
 }

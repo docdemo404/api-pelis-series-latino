@@ -4,6 +4,7 @@ import { MediaItem, ContentType, CastMember } from '../types';
 import { OverrideService } from './overrideService';
 import { USER_AGENT } from '../utils/httpClient';
 import { canonicalTitle, normalizeTitle, dedupeTitles, yearFromSlug } from '../utils/text';
+import { completarHuecos } from './complementoService';
 
 const API_KEY = '99b8bc99e85e79fabd52b64513c9780d';
 
@@ -1144,6 +1145,23 @@ export class TmdbService {
   }
 
   /**
+   * Rellena con Wikidata/Wikipedia/Fanart lo que TMDB ha dejado vacío, y anota de dónde salió.
+   *
+   * La cascada en sí vive en `completarHuecos` (complementoService) y la comparte con el barrido
+   * masivo: aquí solo se acopla a la ficha. `metadata_fuentes` se ACUMULA sobre lo que ya hubiera
+   * —una ficha puede pasar por aquí más de una vez a lo largo de su vida— y solo lista lo prestado.
+   */
+  private static async taparHuecos(ficha: MediaItem): Promise<MediaItem> {
+    const tapado = await completarHuecos(ficha as any, { tmdbApiKey: API_KEY });
+    if (Object.keys(tapado.campos).length === 0) return ficha;
+    return {
+      ...ficha,
+      ...tapado.campos,
+      metadata_fuentes: { ...(ficha.metadata_fuentes || {}), ...tapado.fuentes },
+    };
+  }
+
+  /**
    * Los campos de una ficha que TMDB puede aportar, YA ELEGIDOS, sin tocar nada más.
    *
    * `enrichWithTmdb` construye la ficha ENTERA —título, alias, temporadas, árbol de capítulos— y
@@ -1397,7 +1415,24 @@ export class TmdbService {
     };
   }
 
-  static async enrichMediaItem(item: MediaItem, opts: { skipSeasons?: boolean } = {}): Promise<MediaItem> {
+  /**
+   * `complementar`: cuando TMDB deja huecos, taparlos con Wikidata/Wikipedia/Fanart.
+   *
+   * VA APAGADO POR DEFECTO Y NO ES UN DESCUIDO. `enrichMediaItem` está en dos caminos que no se
+   * parecen en nada: el RASTREO, donde cada título se procesa una vez en su vida y un segundo de
+   * más no le importa a nadie, y las PETICIONES EN VIVO (feedService, catalogService), donde la
+   * misma llamada se hace mientras alguien espera a que le cargue la portada — feedService llega a
+   * envolverla en un `Promise.race` con un cronómetro. Una consulta a Wikidata tarda uno o dos
+   * segundos: en el crawl es barata y en una petición es un carrusel que no aparece.
+   *
+   * Por eso lo enciende quien ingiere (`refreshCatalog`), no quien sirve. Y por eso el gasto está
+   * acotado: un título que ya se complementó no vuelve a pasar por aquí, porque el crawl se salta
+   * lo que ya está guardado.
+   */
+  static async enrichMediaItem(
+    item: MediaItem,
+    opts: { skipSeasons?: boolean; complementar?: boolean } = {}
+  ): Promise<MediaItem> {
     try {
       // El año sale de release_date; si la fuente lo dejó vacío (FuegoCine) se recupera del
       // slug (`…-2015-html`), que es donde de verdad viaja. Sin año, un homónimo de otra época
@@ -1528,7 +1563,14 @@ export class TmdbService {
         metadata_source: 'tmdb' as const
       };
 
-      return OverrideService.applyOverridesToItem(enrichedItem);
+      // Lo que TMDB no ha sabido dar, si quien llama ha pedido complemento. Va DESPUÉS de armar la
+      // ficha entera porque solo aquí se sabe qué quedó vacío, y antes de los overrides manuales,
+      // que son la última palabra por definición.
+      const completo = opts.complementar
+        ? await this.taparHuecos(enrichedItem).catch(() => enrichedItem)
+        : enrichedItem;
+
+      return OverrideService.applyOverridesToItem(completo);
     } catch (err: any) {
       console.warn(`[TMDB Enrich Error]: ${err.message}`);
       return OverrideService.applyOverridesToItem(this.fromSourceMetadata(item, item.tmdb_id));

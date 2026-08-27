@@ -53,8 +53,18 @@ son huecos de TMDB**, no fallos del emparejado: son cine argentino y venezolano 
 creada y vacía. Medido con `npx ts-node scripts/dev/diag_hueco_tmdb.ts`, que le vuelve a preguntar
 a TMDB sin filtros por cada ficha incompleta.
 
-`metadatos:rellenar` los tapa en cascada y campo por campo — TMDB otra vez → Wikidata/Wikipedia en
-español → Fanart.tv para los logos:
+**Esto ya no hay que acordarse de lanzarlo.** La cascada vive en `completarHuecos`
+(`src/services/complementoService.ts`) y corre sola en la puerta de entrada del catálogo: cada
+título que entra por el rastreo pasa por TMDB y, si TMDB lo deja incompleto, por Wikidata,
+Wikipedia y Fanart antes de guardarse. Se apaga con `refresh:catalog -- --sin-complemento` cuando
+lo que importa es el volumen y no la calidad de cada ficha.
+
+Va encendido en el rastreo y **apagado en las peticiones en vivo**, que usan la misma función:
+Wikidata tarda uno o dos segundos, que en un crawl no se notan y en una portada son un carrusel
+que no aparece.
+
+`metadatos:rellenar` es el mismo trabajo sobre lo YA guardado — para las fichas que entraron antes
+de que esto existiera:
 
 ```bash
 npm run metadatos:rellenar                    # informa (dry-run), no escribe nada

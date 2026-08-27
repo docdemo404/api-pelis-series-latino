@@ -155,6 +155,16 @@ export interface MediaItem {
   created_by?: string[];
   /** Origen de la metadata: 'tmdb' (match verificado) o 'source' (fallback al sitio scrapeado). */
   metadata_source?: 'tmdb' | 'source';
+  /**
+   * De qué fuente salió cada campo PRESTADO: `{"overview":"wikipedia-es:<url>","logo":"fanart"}`.
+   *
+   * Los campos que no aparecen vienen de TMDB, que es el caso normal y no hace falta anotarlo en
+   * cada ficha. Lo rellena `completarHuecos` y lo guarda la columna `metadata_fuentes`
+   * (migración 012). Sin este grano fino no se puede recuperar el dato propio el día que TMDB
+   * publique lo que hoy no tiene: `metadata_source` es una sola marca para toda la fila y no
+   * distingue qué parte era prestada.
+   */
+  metadata_fuentes?: Record<string, string>;
   // Solo para películas
   primary_stream?: ServerOption;
   servers?: ServerOption[];

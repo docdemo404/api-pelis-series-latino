@@ -116,6 +116,11 @@ function toRow(item: MediaItem, withNormalized: boolean, withMetadataSource: boo
   if (withMetadataSource) {
     row.metadata_source = item.metadata_source || 'tmdb';
   }
+  if (hayColumnaDeFuentes) {
+    // Solo lo PRESTADO. Una ficha entera de TMDB guarda `{}`, que es lo correcto: la ausencia de
+    // anotación es la que dice «este campo es suyo».
+    row.metadata_fuentes = item.metadata_fuentes || {};
+  }
   if (withRichMetadata) {
     row.runtime = item.runtime ?? null;
     row.director = item.director || (item.created_by || []).join(', ') || null;
@@ -714,6 +719,26 @@ async function segundaOportunidadDeSerie(conSeñales: MediaItem, enriquecida: Me
   }
   return conFicha;
 }
+
+/**
+ * `--sin-complemento`: no tapar con Wikidata/Wikipedia/Fanart lo que TMDB deje vacío.
+ *
+ * El complemento va ENCENDIDO por defecto en el crawl, que es donde tiene que estar: un título
+ * entra una vez en su vida y esa es la ocasión de completarlo. La bandera existe para la pasada en
+ * que lo que importa es el volumen —recuperar un catálogo entero, medir cuánto cunde una fuente
+ * nueva— y un segundo por ficha sí se nota. No se toca en el barrido normal.
+ */
+function complementoEncendido(argv: string[]): boolean {
+  return !argv.includes('--sin-complemento');
+}
+const COMPLEMENTAR = complementoEncendido(process.argv);
+
+/**
+ * Si la columna `metadata_fuentes` existe (migracion 012). Se resuelve una vez, al empezar a
+ * escribir, y `toRow` la lee de aqui: anadirla como parametro obligaria a tocar los seis sitios
+ * que ya se pasan banderas de columna a mano.
+ */
+let hayColumnaDeFuentes = false;
 
 /** `--verify` / `--verify=N`: cuántas fichas sin comprobar se verifican al final del crawl. */
 function parseVerifyFlag(argv: string[]): number {
@@ -2015,7 +2040,7 @@ async function main() {
     const enriched = await Promise.all(chunk.map(async (item) => {
       try {
         const conSeñales = await withSourceSignals(item, () => withSignals++);
-        const enriquecida = await TmdbService.enrichMediaItem(conSeñales, { skipSeasons: true });
+        const enriquecida = await TmdbService.enrichMediaItem(conSeñales, { skipSeasons: true, complementar: COMPLEMENTAR });
         return await segundaOportunidadDeSerie(conSeñales, enriquecida);
       } catch {
         return TmdbService.fromSourceMetadata(item);
@@ -2215,6 +2240,10 @@ async function main() {
   const withRichMetadata = await hasColumn('source_url');
   if (!withRichMetadata) {
     console.warn('   ⚠ Columnas source_url/runtime/director ausentes — ejecuta src/db/migrations/004_streams_and_rich_metadata.sql para fichas instantáneas.');
+  }
+  hayColumnaDeFuentes = await hasColumn('metadata_fuentes');
+  if (!hayColumnaDeFuentes) {
+    console.warn('   ⚠ Columna metadata_fuentes ausente — ejecuta src/db/migrations/012_metadata_fuentes.sql para saber qué campo vino prestado.');
   }
   const withMultiSource = await hasColumn('source_urls');
   if (!withMultiSource) {
