@@ -3686,10 +3686,13 @@ export class CatalogService {
     const resueltos = scraped?.servers?.length
       ? scraped.servers
       : guardados.filter(s => s && s.embed_url);
-    const manuales = guardados.filter(esServidorManual);
-    const urlsManuales = new Set(manuales.map(urlDe));
-    const propios = manuales.length
-      ? [...manuales, ...resueltos.filter(s => !urlsManuales.has(urlDe(s)))]
+    // Lo que ningún scraper puede volver a traer se conserva SIEMPRE, aunque el scrape haya
+    // devuelto otra cosa. Antes solo se salvaba lo manual, y con eso abrir un capítulo le borraba
+    // su enlace de videoapi. Ver `noLoTraeNingunScraper`.
+    const irrecuperables = guardados.filter(noLoTraeNingunScraper);
+    const urlsIrrecuperables = new Set(irrecuperables.map(urlDe));
+    const propios = irrecuperables.length
+      ? [...irrecuperables, ...resueltos.filter(s => !urlsIrrecuperables.has(urlDe(s)))]
       : resueltos;
 
     /**
@@ -4972,6 +4975,36 @@ async function enColaPorFicha<T>(id: string, tarea: () => Promise<T>): Promise<T
  */
 export function esServidorManual(sv: any): boolean {
   return String(sv?.source_id || '').toLowerCase() === 'manual';
+}
+
+/**
+ * ¿ESTE SERVIDOR SE PIERDE PARA SIEMPRE SI SE DESCARTA? — la pregunta que decide qué se conserva
+ * cuando una resolución en vivo trae algo distinto de lo guardado.
+ *
+ * `escribirServidoresDelCapitulo` se queda SOLO con lo que devuelve el scrape en cuanto devuelve
+ * algo, y hasta ahora la única excepción era `manual`. El razonamiento era correcto y la lista
+ * estaba incompleta: lo que hay que proteger no es «lo puesto a mano», es **lo que ningún scraper
+ * puede volver a producir**. Un servidor de tioplus descartado hoy vuelve mañana, porque hay un
+ * scraper que sabe ir a buscarlo. Uno de videoapi no: esa fuente no se scrapea, se DERIVA del
+ * `tmdb_id` en el importador, y el camino de servir no la conoce.
+ *
+ * Medido sobre «Woo, una abogada extraordinaria» 1x1, que el usuario reportó sin enlace:
+ *
+ *   antes de abrir el capítulo:  videoapi, moviedays
+ *   después de abrirlo UNA vez:  moviedays          ← y el de moviedays da 403
+ *
+ * O sea que abrir un capítulo lo dejaba sin la única fuente que reproducía, y el catálogo se iba
+ * vaciando solo según la gente lo usaba. Con 14.591 capítulos de videoapi recién importados, eso
+ * no es un caso raro: es el camino normal.
+ *
+ * No se salta ninguna comprobación por conservarlo: `revisarServidores` lo sondea igual unas
+ * líneas más abajo y lo degrada si hoy no entrega vídeo.
+ */
+export function noLoTraeNingunScraper(sv: any): boolean {
+  if (esServidorManual(sv)) return true;
+  const id = String(sv?.source_id || '').toLowerCase();
+  if (id === 'videoapi') return true;
+  return /(?:videoapi\.la|videoapp\.zip)\/e\//i.test(String(sv?.embed_url || ''));
 }
 
 /** La url de un servidor. El respaldo a `embed_url` importa: en los manuales van las dos iguales. */
