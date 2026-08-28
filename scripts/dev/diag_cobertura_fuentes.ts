@@ -23,10 +23,6 @@ function paginaDe(it: any): string {
   // FuegoCine: `2026-08-toy-story-5-2026-html` → /2026/08/toy-story-5-2026.html
   const fc = id.match(/^(\d{4})-(\d{2})-(.+)-html$/);
   if (fc) return `https://www.fuegocine.com/${fc[1]}/${fc[2]}/${fc[3]}.html`;
-  // Cinecalidad: `ver-serie-scrubs` → /ver-serie/scrubs/. Sus items de listado no traen
-  // `source_url`, y sin reconstruirla se cuentan como ausentes 85 títulos que sí pueden estar.
-  const cc = id.match(/^ver-(pelicula|serie)-(.+)$/);
-  if (cc) return `https://www.cinecalidad.am/ver-${cc[1]}/${cc[2]}/`;
   return '';
 }
 
@@ -61,17 +57,10 @@ async function medir(nombre: string, items: any[]) {
   // TioPlus: sus tres categorías, paginadas de verdad.
   for (const tipo of ['peliculas', 'series', 'animes'] as const) {
     const items = await RealScraperService.scrapeLatest(tipo, N).catch(() => []);
-    // scrapeLatest mezcla Cinecalidad al final; se separan por el molde del id.
-    await medir(`TIOPLUS /${tipo}`, items.filter((i: any) => !/^ver-(pelicula|serie)-/.test(i.id)));
+    await medir(`TIOPLUS /${tipo}`, items);
   }
 
   // FuegoCine, entero.
   const fuego = await (RealScraperService as any).scrapeAllFuegocine().catch(() => []);
   await medir('FUEGOCINE (todo)', fuego);
-
-  // Cinecalidad, sus dos archivos.
-  for (const [t, etiqueta] of [['movie', 'peliculas'], ['tvseries', 'series']] as const) {
-    const items = await (RealScraperService as any).scrapeCinecalidadLatest(t, 2000).catch(() => []);
-    await medir(`CINECALIDAD /${etiqueta}`, items);
-  }
 })();

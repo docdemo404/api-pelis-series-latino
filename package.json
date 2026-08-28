@@ -14,8 +14,10 @@
     "rotular:capitulos": "ts-node scripts/rotularCapitulos.ts",
     "migrar": "ts-node scripts/migrar.ts",
     "metadatos:rellenar": "ts-node scripts/rellenarMetadatos.ts",
+    "importar:videoapi": "ts-node scripts/importarVideoapi.ts",
     "check:catalog": "ts-node scripts/checkCatalog.ts",
-    "check:sources": "ts-node scripts/checkSources.ts"
+    "check:sources": "ts-node scripts/checkSources.ts",
+    "calentar:indices": "ts-node scripts/calentarIndices.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.43.5",

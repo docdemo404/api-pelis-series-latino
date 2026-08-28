@@ -1,0 +1,89 @@
+name: Traer y mantener al día el catálogo de VideoAPI
+
+# QUE SU CATÁLOGO Y EL NUESTRO NO SE SEPAREN, SIN QUE NADIE LO VIGILE.
+#
+# videoapi.la publica su catálogo entero en listas de ids de TMDB. Eso convierte «ponerse al día»
+# en una resta: lo nuevo es lo que está en su lista y no en la nuestra. No hay fechas que comparar,
+# ni un índice que recorrer buscando estrenos, ni forma de perderse una publicación — si aparece en
+# su lista, la corrida siguiente la ve.
+#
+# Por eso este trabajo NO tiene modo «carga inicial» y modo «sincronizar». Es el mismo comando
+# siempre. La primera corrida encuentra 8.891 diferencias y las siguientes encontrarán las que
+# hayan añadido, que serán unas pocas. Dos modos distintos serían dos criterios de «qué es nuevo»
+# destinados a separarse, y este repositorio ya ha pagado ese patrón varias veces.
+#
+# ── POR QUÉ CABE, SIENDO 8.891 FICHAS ──────────────────────────────────────────────────────────
+#
+# Porque cada ficha cuesta 2,4 s verificada de verdad —resolver, bajar el manifiesto y descargar un
+# segmento—, y no los ~24 s que cuesta la media del catálogo. La cadena es corta y siempre la
+# misma: un id de TMDB, una página de 15 KB con el reproductor escrito dentro, y `vimeos.net`, que
+# ya se sabía extraer. Medido sobre cinco títulos: 2.771, 2.228, 2.327, 2.317 y 2.312 ms.
+#
+#   8.891 fichas x 2,4 s / 6 a la vez  ≈  1 hora de reloj para la primera vuelta completa
+#
+# Se reparte igualmente en tandas, por lo mismo que `poblar.yml`: lo que tumba a un runner no es el
+# total sino la ráfaga, y una corrida cancelada a la mitad no debe costar el trabajo ya hecho. Lo
+# que no entre hoy entra dentro de seis horas, y el importador sabe por dónde iba porque salta lo
+# que ya tiene servidor suyo.
+#
+# ── QUÉ ENTRA PRIMERO ──────────────────────────────────────────────────────────────────────────
+#
+# Las fichas que NO existen. Añadirle a una ficha que ya se ve un segundo servidor mejora su
+# fiabilidad; traer una que no existe añade algo que antes no se podía ver. Con el presupuesto de
+# una tanda cubriendo solo una parte de la cola, lo segundo rinde más por petición gastada.
+
+on:
+  schedule:
+    # Cada 6 h, a las horas pares que quedan libres: 02, 08, 14 y 20. El crawl va a las 04,
+    # `episodios.yml` a las impares y `verificar.yml` cada dos horas; esto se mete donde no
+    # compite por la red con ninguno de los tres.
+    - cron: '0 2,8,14,20 * * *'
+  workflow_dispatch:
+    inputs:
+      limite:
+        description: 'Cuántas fichas como mucho en esta corrida'
+        required: false
+        default: '900'
+      minutos:
+        description: 'Presupuesto de reloj'
+        required: false
+        default: '40'
+      solo:
+        description: 'peliculas, series o anime. Vacío = todo.'
+        required: false
+        default: ''
+
+# Dos corridas a la vez escribirían las mismas filas y doblarían las peticiones a la fuente. La
+# nueva espera: lo que la anterior deje hecho vale, porque el importador es idempotente.
+concurrency:
+  group: videoapi
+  cancel-in-progress: false
+
+jobs:
+  importar:
+    runs-on: ubuntu-latest
+    # 50 minutos de tope contra 40 de presupuesto: el margen es para que la corrida TERMINE de
+    # escribir lo que tiene a medias en vez de morir con la última tanda sin guardar.
+    timeout-minutes: 50
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+      - run: npm ci
+
+      - name: Importar catálogo de VideoAPI
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+        run: |
+          npx ts-node scripts/importarVideoapi.ts \
+            --limite=${{ inputs.limite || 900 }} \
+            --minutos=${{ inputs.minutos || 40 }} \
+            ${{ inputs.solo && format('--solo={0}', inputs.solo) || '' }}

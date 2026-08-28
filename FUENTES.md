@@ -274,6 +274,52 @@ puede llegar a ella. Ese es el precio de la regla, y se paga a sabiendas.
 
 ---
 
+## 4 quinquies. Hay un tipo de fuente al que nada de lo anterior le aplica (2026-08-27)
+
+Todo este documento da por hecho que una fuente es **una web que hay que crawlear**: recorrer su
+índice, leer su plantilla, adivinar de qué obra habla cada página y demostrarlo. `videoapi.la` no
+lo es, y conviene saber distinguirlo porque el trabajo cambia por completo.
+
+Es un proveedor de embeds con documentación pública (`https://videoapi.la/api`) que:
+
+1. **direcciona por `tmdb_id`** — `/e/movie/550`, `/e/tv/1399/1/1`, `/e/anime/85937/1/1`;
+2. **publica su catálogo entero** en listas de ids (`/api/v1/public/wordpress/ids/*.txt`);
+3. **nombra sus capítulos uno a uno** (`1855_4x26` en `episodes.txt`).
+
+Las consecuencias, por orden de importancia:
+
+| Lo que este documento exige | Por qué aquí no aplica |
+|---|---|
+| Prueba independiente del título (§1) | No hay título. Se pregunta por un número y contesta por esa obra o por ninguna. Comprobado: `movie/999999999`, `movie/0` y `tv/1399/99/99` contestan sin embed, así que tampoco acuña ids a ciegas. |
+| `SourceSignals` (§2.1) | No hay señales que recoger: la metadata la pone TMDB entera, porque el id ya es de TMDB. |
+| La clase la dice la fuente (§2.2) | La dice la ruta, y la ponemos nosotros al construir la url. |
+| «El id de la fila ES el slug de su página» (§2.3) | **Sí aplica, y hay que registrarlo igual.** Su último tramo de ruta es un número pelado («550», «1») que no identifica nada y chocaría con cualquier slug numérico, así que el id es `va-<tmdb>` y se saca del **medio** de la ruta. Está en `candidateIdsForUrl`. |
+| No rellenar un capítulo con los enlaces de la serie (§4) | No hace falta defenderse: la fuente dice qué capítulos tiene y a los que no están en su lista no se les cuelga nada. |
+
+**Lo que sí aplica igual, y no se negocia**: que lo que se escriba REPRODUZCA. `importarVideoapi.ts`
+resuelve, baja el manifiesto y descarga un segmento antes de guardar, igual que el crawl. Cuesta
+2,4 s por ficha frente a los ~24 s de la media, porque la cadena es corta y siempre la misma.
+
+Y una trampa nueva, que costó una tarde y no se parece a ninguna de las de arriba:
+
+> **El token que parece una credencial es lo que rompe la extracción.** El iframe de videoapi
+> apunta a `vimeos.net/embed-XXXX.html?cf=<JWT>`. Con el `cf=` puesto, vimeos devuelve una
+> **cáscara de 901 bytes** —un `<title>Player</title>` y un script que espera a un navegador— y no
+> hay nada que desempaquetar. Pedida **a secas**, la misma url devuelve el reproductor entero,
+> 49 KB, con su `eval(function(p,a,c,k,e,d))` y el m3u8 dentro. Medido en 550, 1124 y 27205: con
+> `cf` → `null` en los tres; sin `cf` → HLS en los tres. Parece que el token sea el billete de
+> entrada y es justo al revés: es lo que activa el modo «me está mirando un navegador».
+
+Cómo se vigila:
+
+```bash
+npx ts-node --transpile-only scripts/dev/diag_videoapi.ts          # ¿sigue entregando vídeo?
+npx ts-node --transpile-only scripts/dev/diag_videoapi_solape.ts   # ¿cuánto suyo nos falta?
+npm run importar:videoapi -- --dry                                 # qué entraría en la próxima vuelta
+```
+
+---
+
 ## 5. Los SERVIDORES de tu fuente: extraer el vídeo y no ofrecer lo que está muerto
 
 Todo lo anterior va de que la ficha sea la correcta. Esto va de que lo que hay dentro **reproduzca**.
@@ -448,6 +494,13 @@ reproductores publica. Cinecalidad se añadió por eso y no por su tamaño (544 
 cuatro reproductores, `vimeos.net` y `goodstream.one` ya se extraían y estaba comprobado que
 entregan desde el datacenter.
 
+> **Y el epílogo de ese caso enseña la otra mitad de la lección (2026-08-27).** El criterio era
+> correcto y aun así Cinecalidad acabó retirada, porque «en qué reproductores publica» tiene una
+> pregunta detrás que no se hizo: **¿de quién los saca?** Sus enlaces de `vimeos.net` salían del
+> mismo proveedor que sirve a videoapi —para «Pelotas en juego» era literalmente el mismo fichero—,
+> así que no aportaba un reproductor nuevo: aportaba una puerta peor al que ya teníamos. Antes de
+> enchufar una web, mira si lo que publica ya te llega por otra vía más directa.
+
 La comprobación cuesta diez minutos y va ANTES del scraper:
 
 1. Abre 5-10 fichas suyas a mano y apunta los hosts de sus `<iframe>` / `data-option`.
@@ -461,10 +514,10 @@ La comprobación cuesta diez minutos y va ANTES del scraper:
 Si sus hosts caen todos en «captcha» o «sin extractor», la fuente añade carátulas que no
 reproducen — que es exactamente lo que este proyecto lleva un mes quitando.
 
-## 6 ter. Dónde engancha una fuente nueva (verificado sobre Cinecalidad)
+## 6 ter. Dónde engancha una fuente nueva
 
 Diez sitios, y el que más se olvida es el 4: **una fuente sin puerta de descubrimiento queda
-escrita y muda**. Le pasó a Cinecalidad hasta que el usuario preguntó por qué no salía Breaking
+escrita y muda**. Le pasó a una fuente entera hasta que el usuario preguntó por qué no salía Breaking
 Bad.
 
 | # | Dónde | Qué |
@@ -482,7 +535,7 @@ Bad.
 
 Y dos trampas que ya han mordido con las fuentes existentes:
 
-- **El tope de páginas sale del `limit`.** Cinecalidad tenía un `page <= 6` escrito a mano que
+- **El tope de páginas sale del `limit`.** Una de ellas tenía un `page <= 6` escrito a mano que
   contradecía en silencio al crawl —que pide 10.000 y se llevaba 96—. El freno correcto es «parar
   cuando una página no aporta nada nuevo», que además detecta los archivos que no paginan.
 - **El id de tu fuente colisiona con el de otra.** `candidateIdsForUrl` devuelve el último segmento

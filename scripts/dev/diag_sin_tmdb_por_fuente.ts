@@ -12,7 +12,6 @@ function fuenteDe(row: any): string {
   const u = urls.join(' ');
   if (/fuegocine|blogfc|repfuegocinefree/i.test(u)) return 'fuegocine';
   if (/archive\.org/i.test(u)) return 'archive';
-  if (/cinecalidad/i.test(u)) return 'cinecalidad';
   if (/moviedays|zonaaps/i.test(u)) return 'moviedays';
   if (/tioplus/i.test(u)) return 'tioplus';
   if (/^\d{4}-\d{2}-.+-html$/.test(String(row.id || ''))) return 'fuegocine';

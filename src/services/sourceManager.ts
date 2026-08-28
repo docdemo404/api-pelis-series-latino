@@ -12,12 +12,11 @@ let currentSources: SourceConfig[] = [...DEFAULT_SOURCES];
  * Esto sustituía la lista entera por la del almacén (`currentSources = cloudSources`), y con eso
  * una fuente añadida al código DESPUÉS de la última vez que alguien tocó el panel no aparecía
  * nunca. No es teórico: el 2026-08-19 producción listaba tres fuentes —tioplus, fuegocine y
- * supabase— mientras `DEFAULT_SOURCES` ponía a **Cinecalidad la primera**, con su motivo escrito
- * al lado (de sus reproductores, `vimeos` y `goodstream` se extraen y entregan desde el
- * datacenter). El almacén se había guardado antes de que existiera, y ganaba siempre.
+ * supabase— mientras `DEFAULT_SOURCES` ponía delante a una fuente añadida después, con su motivo
+ * escrito al lado. El almacén se había guardado antes de que existiera, y ganaba siempre.
  *
  * Lo que costaba: `sortServersBySourcePriority` construye su mapa de prioridades con esta lista,
- * así que los servidores de Cinecalidad no tenían prioridad asignada y la decisión de ponerla
+ * así que los servidores de la fuente nueva no tenían prioridad asignada y la decisión de ponerla
  * delante —tomada a propósito, midiendo— no llegó a aplicarse ni un solo día.
  *
  * Es el mismo patrón que ya ha mordido tres veces esta semana: un valor guardado tapando en
@@ -56,7 +55,7 @@ function fusionarConLosPorDefecto(guardadas: SourceConfig[]): SourceConfig[] {
    * Y SE RENUMERAN, para que no queden dos fuentes con la misma prioridad.
    *
    * Una fuente nueva llega con la prioridad que le puso el código y las guardadas con la suya, así
-   * que se pisan: al añadir Cinecalidad, producción quedó con `cinecalidad: 1` y `tioplus: 1` a la
+   * que se pisan: al añadir una fuente nueva, producción quedó con dos fuentes en `priority: 1` a la
    * vez. No rompe el orden de la lista —el desempate es el orden de `DEFAULT_SOURCES`— pero sí
    * empata el mapa de `sortServersBySourcePriority`, que es quien decide qué servidor intenta
    * primero el cliente. Un empate ahí deja la decisión al azar del resto de criterios.

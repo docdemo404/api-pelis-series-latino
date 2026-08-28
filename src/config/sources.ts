@@ -9,11 +9,22 @@ export interface SourceConfig {
   priority: number;
 }
 
+/**
+ * CINECALIDAD SE RETIRÓ EL 2026-08-27, y conviene saber por qué antes de que a alguien se le
+ * ocurra volver a añadirla.
+ *
+ * No estaba rota: era REDUNDANTE. Aportaba cero —cero fichas y cero servidores sobre las 8.524
+ * filas del catálogo, ni una con página suya— y encima fallaba en silencio, porque su llamada se
+ * tragaba el error dos veces. Pero lo que decidió la retirada fue mirar QUÉ HABÍA DETRÁS: publica
+ * sus reproductores en `data-option`, y el bueno es `vimeos.net` — el mismo host que ya sirve
+ * videoapi. Para «Pelotas en juego» era literalmente el mismo fichero (`embed-20ls07ugclbo`, el
+ * que videoapi devuelve para tmdb 9472).
+ *
+ * O sea: era un cliente del mismo proveedor al que ya le hablamos, solo que por una puerta peor
+ * —recorrer su índice y emparejar por slug, en vez de preguntar por `tmdb_id` y que te den la
+ * lista entera—. Se fue con su scraper, sus moldes de url y su reparto de cupo.
+ */
 export const DEFAULT_SOURCES: SourceConfig[] = [
-  // Cinecalidad va primera: de sus cuatro reproductores, `vimeos.net` y `goodstream.one` se
-  // extraen y se ha COMPROBADO que entregan vídeo desde el datacenter, que es donde upns murió y
-  // vidhideplus estrangula. La prioridad ordena los servidores de una ficha, así que ponerla
-  // delante hace que lo primero que intenta el cliente venga de la fuente que mejor se sirve.
   /**
    * La fuente propia va PRIMERA, y no por capricho: es la única que no depende de que una web
    * ajena siga viva, siga publicando y no cambie su plantilla. Si un título tiene una url puesta
@@ -49,7 +60,27 @@ export const DEFAULT_SOURCES: SourceConfig[] = [
    * tocar si algún día se monta el relé en el Worker propio.
    */
   { id: 'moviedays', name: 'MovieDays (por TMDB id)', enabled: true, priority: 3 },
-  { id: 'cinecalidad', name: 'Cinecalidad', enabled: true, priority: 4 },
+  /**
+   * VIDEOAPI va CUARTA, y es la única de la lista que no es una web que se scrapee.
+   *
+   * Comparte con moviedays lo que la puso a ella delante de las tres webs: se le pregunta por un
+   * `tmdb_id` y contesta por esa obra o por ninguna, así que no puede cometer el fallo del que
+   * salen casi todos los destrozos del catálogo. Y va un escalón MÁS allá — publica su catálogo
+   * entero en listas de ids (`/api/v1/public/wordpress/ids/*.txt`), o sea que tampoco hay que
+   * recorrer un índice ni adivinar cuándo publica algo nuevo.
+   *
+   * Detrás de moviedays y no delante por una sola razón, y no es la calidad: moviedays lleva
+   * meses midiéndose en producción y esta se enchufó el 2026-08-27. Cuando acumule vueltas puede
+   * subir — lo que decide es el histórico de reproducciones, no el entusiasmo del día que entró.
+   *
+   * Delante de las tres webs porque su url de embed es DERIVABLE del `tmdb_id` (ver
+   * `embedDeVideoapi`): no caduca, no hay que re-rastrear nada para recuperarla, y no depende de
+   * que una plantilla ajena siga igual mañana.
+   *
+   * Medido al entrar: 7.177 películas y 1.714 series/anime que el catálogo no tenía, y 23 de 23
+   * títulos probados entregando vídeo.
+   */
+  { id: 'videoapi', name: 'VideoAPI (por TMDB id)', enabled: true, priority: 4 },
   { id: 'tioplus', name: 'TioPlus / PelisPlus Latino', enabled: true, priority: 5 },
   { id: 'fuegocine', name: 'FuegoCine', enabled: true, priority: 6 },
 ];
@@ -58,7 +89,7 @@ export const DEFAULT_SOURCES: SourceConfig[] = [
  * SUPABASE NO ES UNA FUENTE, y estaba aquí como si lo fuera desde el 2026-07-22.
  *
  * Esta lista es de webs que se scrapean. Supabase es donde se GUARDA lo scrapeado, así que salía
- * en el panel con su interruptor y sus flechas de prioridad, al lado de Cinecalidad y FuegoCine,
+ * en el panel con su interruptor y sus flechas de prioridad, al lado de TioPlus y FuegoCine,
  * como si se pudiera crawlear.
  *
  * Y no era solo cosmético: `sortServersBySourcePriority` filtra por `enabled`, y a los servidores

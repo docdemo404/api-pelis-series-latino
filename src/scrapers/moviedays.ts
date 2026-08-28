@@ -237,7 +237,7 @@ export async function pedirTemporadasMoviedays(tmdbId: number): Promise<any[] | 
 /**
  * Convierte los `servers[]` de moviedays en `ServerOption[]`, resolviendo el vídeo directo.
  *
- * Es el mismo camino que Cinecalidad: inspeccionar el embed y pasarlo por `extractDirect`, que ya
+ * Es el mismo camino que videoapi: inspeccionar el embed y pasarlo por `extractDirect`, que ya
  * sabe desempaquetar el `p,a,c,k,e,d` de `vimeos.net` y sacar el m3u8. Eso no es teoría — se probó
  * con el propio extractor del repo antes de escribir esto, sobre Fight Club, Breaking Bad T1E1 y
  * Stranger Things T4E1, y los tres devolvieron un manifiesto que responde 200.

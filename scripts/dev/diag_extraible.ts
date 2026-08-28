@@ -27,9 +27,8 @@ async function esImposible(url: string): Promise<boolean> {
   }
 }
 
-function fuenteDe(id: string): 'fuegocine' | 'cinecalidad' | 'tioplus' {
+function fuenteDe(id: string): 'fuegocine' | 'tioplus' {
   if (/^fc-/.test(id) || /^\d{4}-\d{2}-/.test(id)) return 'fuegocine';
-  if (/^ver-(pelicula|serie)-/.test(id)) return 'cinecalidad';
   return 'tioplus';
 }
 

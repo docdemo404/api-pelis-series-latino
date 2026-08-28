@@ -23,8 +23,6 @@ import {
 import { yearFromSlug, slugify, canonicalTitle } from '../utils/text';
 
 const BASE_URL = 'https://tioplus.app';
-/** Cinecalidad publica en varios dominios con la misma plantilla; `.am` es el que responde hoy. */
-const CINECALIDAD_BASE = 'https://www.cinecalidad.am';
 const UA = USER_AGENT;
 const TIMEOUT = 8000;
 
@@ -167,7 +165,7 @@ const TRAILING_YEAR_RANGE = /\((\d{4})(?:\s*[-–—/]\s*(?:\d{4}|presente|actua
  */
 const ROTULOS_DE_EPISODIO: RegExp[] = [
   // "S01 E01", "s1e3"
-  // El separador es opcional: TioPlus rotula «S01 E01» y Cinecalidad «S1-E1».
+  // El separador es opcional: TioPlus rotula «S01 E01» y otras plantillas «S1-E1».
   /\bS\s*(\d{1,3})\s*[-_ ]?\s*E\s*(\d{1,3})\b/i,
   // "Temporada 1 Capítulo 1", "Season 2 Episode 7". El hueco se acota para que no empareje la
   // temporada de un título con el capítulo de otra frase tres líneas más allá.
@@ -217,81 +215,7 @@ export function esDelEpisodio(
   return rotulo.season === season && rotulo.episode === episode;
 }
 
-/**
- * El título de una obra a partir del `<title>` de Cinecalidad.
- *
- * NO USA EL MISMO ORDEN EN TODAS SUS PÁGINAS, y esa diferencia dejó la fuente muda en los
- * episodios:
- *
- *   ficha     «Ver Breaking Bad Online Gratis HD - Cinecalidad»
- *   episodio  «Ver online gratis Breaking Bad 1x1 ⚜️ Cinecalidad»
- *
- * Quitar «Ver » por delante y todo lo que empieza en «Online Gratis» funciona en la primera y se
- * come el título ENTERO en la segunda: devolvía cadena vacía, el scraper contestaba null y el
- * episodio acababa resolviéndose contra otra fuente. Seis servidores esperando detrás.
- *
- * Se recortan los adornos estén donde estén, en vez de asumir dónde van.
- */
-function tituloDeCinecalidad(raw: string | undefined): string {
-  return String(raw || '')
-    // La firma del sitio con lo que la separe. Se aceptan CUALESQUIERA caracteres no-palabra por
-    // delante y no un separador de una lista: entre el adorno y el nombre va un selector de
-    // variación invisible (U+FE0F) que no se ve al leer el título y hacía fallar la coincidencia,
-    // dejando «Breaking Bad 1x1 ⚜️ Cinecalidad» como nombre de la obra.
-    .replace(/[\s\W]*Cinecalidad\s*$/i, '')
-    .replace(/\bOnline\s+Gratis(\s+HD)?\b/gi, '')
-    .replace(/^\s*Ver\s+(Serie\s+)?/i, '')
-    .replace(/^\s*online\s+gratis\s*/i, '')
-    .replace(/\s{2,}/g, ' ')
-    .trim();
-}
 
-/**
- * Las temporadas de una serie de Cinecalidad, leídas de su lista de episodios.
- *
- * El número real está en `.numerando` con la forma `S1-E1`, no en el texto del enlace —que es
- * «Episodio 1» y se repite en todas las temporadas—. Fiarse del texto mezclaría el 1x1 con el 2x1,
- * y servir un capítulo por otro es el fallo que no da error y solo nota quien mira.
- *
- * El enlace del episodio (`…/ver-el-episodio/<slug>-1x1/`) se guarda en el propio episodio: es de
- * donde saldrán sus servidores cuando alguien lo abra, sin tener que adivinar la url.
- */
-function cinecalidadTemporadas($: cheerio.CheerioAPI): any[] {
-  const porTemporada = new Map<number, any[]>();
-
-  $('ul.episodios li').each((_, el) => {
-    // El mismo reconocedor que valida los episodios en `esDelEpisodio`, no una copia suya: es
-    // el que ya sabe leer «S1-E1», «1x1» y «Temporada 1 Capítulo 1». Escribir aquí otra regex
-    // es cómo se acaba con dos criterios que se desincronizan.
-    const rotulo = rotuloDelEpisodio($(el).find('.numerando').first().text().trim());
-    if (!rotulo) return;
-    const { season, episode } = rotulo;
-    const enlace = $(el).find('.episodiotitle a').first().attr('href') || '';
-    const nombre = $(el).find('.episodiotitle a').first().text().trim() || `Episodio ${episode}`;
-    const still = $(el).find('img').first().attr('data-src') || null;
-
-    if (!porTemporada.has(season)) porTemporada.set(season, []);
-    porTemporada.get(season)!.push({
-      episode_number: episode,
-      name: nombre,
-      overview: '',
-      still_path: still,
-      air_date: null,
-      servers: [],
-      _source_url: enlace || undefined,
-    });
-  });
-
-  return Array.from(porTemporada.entries())
-    .sort((a, b) => a[0] - b[0])
-    .map(([season_number, episodes]) => ({
-      season_number,
-      name: `Temporada ${season_number}`,
-      episodes_count: episodes.length,
-      poster: null,
-      episodes: episodes.sort((a: any, b: any) => a.episode_number - b.episode_number),
-    }));
-}
 
 /** Señales de una página de origen que el emparejado con TMDB necesita para no fallar. */
 export interface SourceSignals {
@@ -853,13 +777,6 @@ export class RealScraperService {
     }
 
     /**
-     * CINECALIDAD, que tiene su propia plantilla y no encaja con los selectores de las otras dos.
-     *
-     * Da la carátula de `image.tmdb.org` —la prueba fuerte— y el tipo desde la ruta. NO da el año
-     * ni el título original: se devuelven vacíos a propósito, porque inventarlos es peor que no
-     * tenerlos. Ver la nota de `scrapeCinecalidadDetail`.
-     */
-    /**
      * ARCHIVE.ORG no tiene página que leer: sus señales están en `/metadata/<id>`.
      *
      * Da título y AÑO —el de la obra, sacado del título o de la ficha de la descripción, nunca
@@ -890,28 +807,6 @@ export class RealScraperService {
       }
     }
 
-    if (/cinecalidad\./i.test(url)) {
-      try {
-        const res = await httpGet(url);
-        if (res.status >= 400) return null;
-        const $ = cheerio.load(String(res.data || ''));
-        const title = tituloDeCinecalidad($('title').text());
-        if (!title) return null;
-        const img = $('img[data-src*="image.tmdb.org/t/p/w342"]').first().attr('data-src')
-          || $('img[src*="image.tmdb.org/t/p/w342"]').first().attr('src') || '';
-        const ep = url.match(/-(\d{1,2})x(\d{1,3})\/?$/i);
-        return {
-          title,
-          year: '',
-          originalTitle: '',
-          imageHint: tmdbImagePath(img) || '',
-          type: /\/ver-serie\/|\/ver-el-episodio\//i.test(url) ? 'tvseries' : 'movie',
-          episode: ep ? { season: Number(ep[1]), episode: Number(ep[2]) } : null,
-        };
-      } catch {
-        return null;
-      }
-    }
 
     if (!url || !/^https?:\/\//i.test(url)) return null;
 
@@ -1174,11 +1069,6 @@ export class RealScraperService {
     // Internet Archive: no hay HTML que leer, su ficha es una llamada a `/metadata/<id>`.
     if (/archive\.org\/(details|metadata|download)\//i.test(tioplusUrl)) {
       return this.scrapeArchiveDetail(tioplusUrl);
-    }
-
-    // Cinecalidad publica en varios dominios (.am, .ec, .rs…) con la misma plantilla dooplay.
-    if (/cinecalidad\./i.test(tioplusUrl)) {
-      return this.scrapeCinecalidadDetail(tioplusUrl);
     }
 
     // Evitar hacer peticiones con IDs numéricos directos a tioplus.app (TioPlus usa slugs de texto, no IDs de TMDB)
@@ -1511,20 +1401,7 @@ export class RealScraperService {
       .filter((m): m is RegExpMatchArray => Boolean(m))
       .map(m => ({ url: `${m[1]}-${season}x${episode}${m[2]}`, adivinada: true }));
 
-    /**
-     * Y LAS DE CINECALIDAD, que sí publican el número en una ruta propia:
-     * `/ver-serie/linternas/` → `/ver-el-episodio/linternas-1x1/`.
-     *
-     * No va marcada como adivinada: el slug sale de la `source_url` real y el número es el que se
-     * pide, así que si el capítulo no existe la página contesta 404 en vez de otra cosa. Y su
-     * `.numerando` rotula «S1-E1», que `esDelEpisodio` ya sabe leer.
-     */
-    const deCinecalidad: Candidata[] = (opts.sourceUrls || [])
-      .map(u => String(u).match(/^(https?:\/\/[^/]*cinecalidad[^/]*)\/ver-serie\/([^/?#]+)/i))
-      .filter((m): m is RegExpMatchArray => Boolean(m))
-      .map(m => ({ url: `${m[1]}/ver-el-episodio/${m[2]}-${season}x${episode}/`, adivinada: false }));
-
-    desdeFuente.push(...deFuegocine, ...deCinecalidad);
+    desdeFuente.push(...deFuegocine);
 
     // Y después, a ciegas por categoría con el id, que es lo que sirve cuando el id SÍ es el slug.
     // A ciegas de verdad: el id de la fila puede no ser el slug de ninguna serie de TioPlus, así
@@ -1550,7 +1427,7 @@ export class RealScraperService {
      * Antes se cogía la primera página que diera servidores y se tiraba el resto. Con una sola
      * fuente daba igual; con tres es la diferencia entre reproducir y no: el 1x1 de «Breaking Bad»
      * salía de TioPlus con un único vídeo directo —un emturbovid cuyas variantes están muertas— y
-     * los tres directos que tenía Cinecalidad no se miraban siquiera, porque su candidata iba
+     * los tres directos de la otra fuente no se miraban siquiera, porque su candidata iba
      * detrás en la lista.
      *
      * Es lo que el camino de las PELÍCULAS lleva haciendo desde siempre (`addServers` en
@@ -1739,8 +1616,6 @@ export class RealScraperService {
       } else if (src.id === 'fuegocine') {
         const fuegocineItems = await this.scrapeFuegocine(q);
         finalResults.push(...fuegocineItems);
-      } else if (src.id === 'cinecalidad') {
-        finalResults.push(...await this.scrapeCinecalidadSearch(q, limit));
       } else if (src.id === 'archive') {
         finalResults.push(...await this.scrapeArchiveSearch(q, limit));
       } else if (src.id === 'moviedays') {
@@ -1761,256 +1636,10 @@ export class RealScraperService {
     return finalResults;
   }
 
-  /**
-   * Las fichas que aparecen en un listado de Cinecalidad (archivo, portada o búsqueda).
-   *
-   * La tarjeta trae ya la carátula de `image.tmdb.org`, que es la prueba de identidad, así que se
-   * guarda desde aquí: el emparejado con TMDB puede confirmar la obra sin abrir la ficha. Es lo
-   * que en FuegoCine costó meses descubrir —su `og:image` era un proxy que no identificaba nada— y
-   * aquí viene servido.
-   *
-   * NO se inventa el año: esta fuente no lo publica. Es preferible dejarlo vacío a deducirlo del
-   * título, que es como «Blade Runner 2049» acaba estrenándose en 2049.
-   */
-  private static parseCinecalidadCards(html: string, limit: number): MediaItem[] {
-    const $ = cheerio.load(html);
-    const items: MediaItem[] = [];
-    const vistos = new Set<string>();
-
-    $('a[href*="/ver-pelicula/"], a[href*="/ver-serie/"]').each((_, el) => {
-      if (items.length >= limit) return false;
-      const href = $(el).attr('href') || '';
-      const m = href.match(/\/ver-(pelicula|serie)\/([^/?#]+)/i);
-      if (!m) return;
-      const id = slugify(href.replace(/^https?:\/\/[^/]+/i, ''));
-      if (!id || vistos.has(id)) return;
-
-      // El título de la tarjeta: el texto del enlace no vale (suele ser «Watch Movies»), así que se
-      // busca en el bloque de la ficha o en el `alt` de su carátula.
-      /**
-       * El contenedor NO es siempre el mismo: el archivo de películas usa
-       * `<article class="post dfx fcl movies">` y el de series `<article class="item movies">`.
-       * Se busca cualquier `<article>` y, si no lo hay, el `<li>` que lo envuelva — atarse a una
-       * clase concreta dejaba las series y el buscador devolviendo cero.
-       */
-      const $card = $(el).closest('article').length ? $(el).closest('article') : $(el).closest('li');
-      if ($card.length === 0) return;
-
-      /**
-       * El TÍTULO sale del `alt` de la carátula, no del texto de la tarjeta. La tarjeta lleva
-       * dentro el año, la sinopsis y los géneros, y leerla entera producía títulos como
-       * «Batman Ninja2018Batman, junto con varios de sus aliados…». El `alt` trae el nombre y nada
-       * más; `.in_title` es el equivalente en la plantilla de series.
-       */
-      /**
-       * La carátula se busca en la tarjeta y, si no aparece, en el bloque que la envuelve: en la
-       * plantilla de series la imagen y el enlace son hermanos dentro de otro contenedor, así que
-       * mirar solo dentro del `<article>` del enlace la dejaba fuera y las series salían sin
-       * póster — perdiendo de paso su prueba de identidad.
-       */
-      const selImg = 'img[src*="image.tmdb.org"], img[data-src*="image.tmdb.org"]';
-      let poster = $card.find(selImg).first();
-      if (poster.length === 0) poster = $(el).closest('li, div').find(selImg).first();
-      if (poster.length === 0) poster = $card.parent().find(selImg).first();
-      const titulo = (poster.attr('alt')
-        || $card.find('.in_title').first().text().trim()
-        || $card.find('.entry-title').first().text().trim()
-        || '').replace(/^Ver\s+/i, '').trim();
-      if (!titulo) return;
-      vistos.add(id);
-      items.push({
-        id,
-        tmdb_id: 0,
-        imdb_id: null,
-        type: m[1].toLowerCase() === 'serie' ? 'tvseries' : 'movie',
-        title: titulo,
-        original_title: titulo,
-        aliases: [titulo],
-        overview: '',
-        rating: 0,
-        release_date: '',
-        genres: [],
-        subcategories: ['Cinecalidad'],
-        poster: (poster.attr('src') || poster.attr('data-src') || null),
-        backdrop: null,
-        logo: null,
-        trailer: null,
-        cast: [],
-        dubbing_cast: [],
-        servers: [],
-        _source_url: href,
-      } as MediaItem);
-    });
-
-    return items;
-  }
-
-  /**
-   * Los últimos títulos de Cinecalidad, por archivo y con paginación.
-   *
-   * Sus archivos son `/ver-pelicula/` y `/ver-serie/`, y pagina con `/page/N/`. Se para en cuanto
-   * una página no aporta nada nuevo: seguir pidiendo páginas vacías es lo que convertía un crawl en
-   * una hora de peticiones inútiles.
-   *
-   * EL TOPE SALE DEL `limit`, NO DE UN 6 ESCRITO AQUÍ.
-   *
-   * Había un `page <= 6` fijo, y eso contradecía en silencio al único que llama a esto de verdad:
-   * el crawl completo pide 10.000 títulos y se llevaba 96. Medido contra el sitio el 2026-08-19,
-   * `/ver-serie/` pagina de verdad hasta la 99 —cada página trae 16 tarjetas distintas y la 100
-   * responde 404—, o sea unas 1.580 series, de las que el catálogo estaba leyendo el 6 %. Es el
-   * mismo fallo que tuvo TioPlus con `/page/2`: un límite escrito a mano que convierte una fuente
-   * viva en una portada.
-   *
-   * Y no hace falta más guarda que la que ya había, porque está probada: `/ver-pelicula/` NO
-   * pagina —devuelve las mismas 16 tarjetas en la página 2 y en la 200—, y ahí el corte por
-   * «ninguna nueva» para en la segunda petición. Lo que se quita es el techo, no el freno.
-   */
-  static async scrapeCinecalidadLatest(tipo: 'movie' | 'tvseries', limit = 20): Promise<MediaItem[]> {
-    const archivo = tipo === 'tvseries' ? 'ver-serie' : 'ver-pelicula';
-    const items: MediaItem[] = [];
-    const vistos = new Set<string>();
-
-    // 16 tarjetas por página (medido), +2 de margen para que el corte lo dé el sitio y no la cuenta.
-    const maxPaginas = Math.max(2, Math.ceil(limit / 16) + 2);
-
-    for (let page = 1; items.length < limit && page <= maxPaginas; page++) {
-      const url = page === 1
-        ? `${CINECALIDAD_BASE}/${archivo}/`
-        : `${CINECALIDAD_BASE}/${archivo}/page/${page}/`;
-      let nuevos = 0;
-      try {
-        const res = await httpGet(url);
-        if (res.status >= 400) break;
-        for (const it of this.parseCinecalidadCards(String(res.data || ''), limit * 2)) {
-          if (it.type !== tipo || vistos.has(it.id) || items.length >= limit) continue;
-          vistos.add(it.id);
-          items.push(it);
-          nuevos++;
-        }
-      } catch {
-        break;
-      }
-      if (nuevos === 0) break;
-    }
-    return items;
-  }
-
-  /** Búsqueda en Cinecalidad. Su buscador es el de WordPress: `?s=`. */
-  static async scrapeCinecalidadSearch(query: string, limit = 12): Promise<MediaItem[]> {
-    const q = query.trim();
-    if (!q) return [];
-    try {
-      const res = await httpGet(`${CINECALIDAD_BASE}/?s=${encodeURIComponent(q)}`);
-      if (res.status >= 400) return [];
-      return this.parseCinecalidadCards(String(res.data || ''), limit);
-    } catch {
-      return [];
-    }
-  }
-
-  /**
-   * CINECALIDAD (cinecalidad.am) — tercera fuente.
-   *
-   * Se añade porque las dos anteriores dejaron media serie sin nada cuando murió la familia upns:
-   * un catálogo con dos fuentes no tiene a dónde caer. De sus cuatro reproductores, `vimeos.net` y
-   * `goodstream.one` YA se extraen y se ha comprobado que entregan vídeo desde el datacenter —que
-   * es la prueba que no se hizo con vidhideplus y costó 57.970 servidores inservibles—.
-   *
-   * Es el tema dooplay de WordPress, así que publica lo que hace falta y en sitios fijos:
-   *
-   *   tipo        la ruta: `/ver-pelicula/` frente a `/ver-serie/`
-   *   identidad   `image.tmdb.org/t/p/w342/…` — el hash señala UNA ficha de TMDB (FUENTES.md §1)
-   *   servidores  `<li data-option="https://host/…">`
-   *   episodios   `<ul class="episodios"> … <div class="numerando">S1-E1</div>`
-   *
-   * LO QUE NO PUBLICA ES EL AÑO, ni en la url ni en el cuerpo, y conviene saberlo: el año es lo
-   * que separa homónimos de distinta época («Sin salida» son cuatro películas). Lo compensa el
-   * hash de la imagen, que es una prueba MÁS fuerte —señala la ficha exacta— pero cuando una
-   * página no traiga imagen, esa ficha se quedará sin respaldo y caerá a metadata de la fuente con
-   * id sintético. Es la degradación prevista, no un fallo.
-   */
-  static async scrapeCinecalidadDetail(url: string): Promise<MediaItem | null> {
-    try {
-      const res = await httpGet(url);
-      const html = typeof res.data === 'string' ? res.data : '';
-      if (res.status >= 400 || !html) return null;
-      const $ = cheerio.load(html);
-
-      // El <h1> es el logotipo del sitio, así que el título sale del <title>, que trae siempre la
-      // misma envoltura: «Ver [Serie] X Online Gratis HD - Cinecalidad».
-      const title = tituloDeCinecalidad($('title').text());
-      if (!title) return null;
-
-      const esSerie = /\/ver-serie\//i.test(url);
-      // La carátula es la única `w342`: las `w185` son las miniaturas de «relacionadas» y de los
-      // episodios, y quedarse con una de ésas emparejaría la ficha con OTRA obra.
-      const poster = ($('img[data-src*="image.tmdb.org/t/p/w342"]').first().attr('data-src')
-        || $('img[src*="image.tmdb.org/t/p/w342"]').first().attr('src') || '').trim() || null;
-
-      const servers: ServerOption[] = [];
-      const opciones = $('li[data-option]').map((_, el) => $(el).attr('data-option') || '').get()
-        // El tráiler de YouTube viaja como una opción más y no es un servidor de la película.
-        .filter(u => u && !/youtube\.com|youtu\.be/i.test(u));
-
-      const vistos = await Promise.allSettled(opciones.slice(0, 6).map(async embedUrl => {
-        const { status, html: embedHtml } = await inspectEmbed(embedUrl);
-        const direct = await extractDirect(embedUrl, embedHtml);
-        return { embedUrl, status, direct };
-      }));
-
-      vistos.forEach((r, i) => {
-        if (r.status !== 'fulfilled' || !r.value?.embedUrl) return;
-        const { embedUrl, status, direct } = r.value;
-        // Igual que en las otras fuentes: a un embed recién declarado muerto no se le cuelga un
-        // vídeo directo, porque publicarlo muerto es peor que no publicarlo.
-        const directo = status === 'offline'
-          ? {}
-          : direct ? describeDirect(embedUrl, direct) : deferredDirectFields(embedUrl);
-        servers.push({
-          id: `srv_cc_${i + 1}`,
-          name: nombreConTipo(getServerName(embedUrl, ''), Boolean((directo as any).direct_stream)),
-          quality: direct?.quality || '1080p',
-          language: 'latino',
-          embed_url: embedUrl,
-          ...directo,
-          status,
-          last_checked: new Date().toISOString(),
-          source_id: 'cinecalidad',
-        });
-      });
-
-      const seasons = esSerie ? cinecalidadTemporadas($) : [];
-
-      return {
-        id: slugify(url.replace(/^https?:\/\/[^/]+/i, '')),
-        tmdb_id: 0,
-        imdb_id: null,
-        type: esSerie ? 'tvseries' : 'movie',
-        title,
-        original_title: title,
-        aliases: [],
-        overview: $('meta[name="description"]').attr('content')?.trim() || '',
-        rating: 0,
-        release_date: '',
-        genres: [],
-        subcategories: ['Cinecalidad'],
-        poster,
-        backdrop: null,
-        logo: null,
-        trailer: null,
-        cast: [],
-        dubbing_cast: [],
-        servers,
-        primary_stream: getPrimaryStream(servers),
-        seasons: seasons.length ? seasons : undefined,
-        total_seasons: seasons.length || undefined,
-        _source_url: url,
-      } as MediaItem;
-    } catch {
-      return null;
-    }
-  }
-
+  
+  
+  
+  
   /**
    * MOVIEDAYS — la ficha de una obra, pedida por su id de TMDB.
    *
@@ -3149,24 +2778,17 @@ export class RealScraperService {
      *
      * Esta función es la puerta por la que el crawl descubre títulos, y estaba atada a un solo
      * sitio. Añadir una fuente y no engancharla aquí la deja escrita pero muda: sabe leer una
-     * ficha y nadie le pasa nunca una url. Le pasó a Cinecalidad hasta que el usuario preguntó por
-     * qué no aparecía Breaking Bad —que esa fuente sí tiene— y resultó que el catálogo no la
-     * estaba recorriendo.
+     * ficha y nadie le pasa nunca una url. Es el punto 4 de FUENTES.md §6 ter.
      *
-     * Se piden en paralelo y lo de Cinecalidad va al final de la lista: no compite con lo de
-     * TioPlus, se suma. La deduplicación por id la hace quien recibe (`unifyItems`).
+     * Se piden en paralelo y cada una tiene su cupo reservado más abajo. La deduplicación por id
+     * la hace quien recibe (`unifyItems`).
      */
-    const deCinecalidad = this.scrapeCinecalidadLatest(
-      type === 'peliculas' ? 'movie' : 'tvseries',
-      Math.max(10, Math.floor(limit / 2))
-    ).catch(() => [] as MediaItem[]);
-
     /**
      * Y ARCHIVE.ORG, por la misma puerta y por la misma razón.
      *
      * Es el punto 4 de FUENTES.md §6 ter y el que más se olvida: una fuente que no se engancha
      * aquí queda escrita y muda — sabe leer una ficha y nadie le pasa nunca una url. Le pasó a
-     * Cinecalidad hasta que el usuario preguntó por qué no salía Breaking Bad.
+     * una fuente entera hasta que el usuario preguntó por qué no salía Breaking Bad.
      *
      * Los animes no se le piden: su archivo no distingue esa clase, y pedírselos devolvería
      * series etiquetadas como si fueran anime.
@@ -3281,32 +2903,27 @@ export class RealScraperService {
     }
 
     /**
-     * Y lo de Cinecalidad, con SITIO RESERVADO.
+     * CADA FUENTE CON SITIO RESERVADO, y no «lo que sobre».
      *
-     * La primera versión lo añadía solo si quedaba hueco bajo el `limit`, y como TioPlus llena el
-     * cupo por sí solo, la segunda fuente aportaba CERO: quedaba enganchada y seguía sin
-     * descubrirse ni un título suyo. Una fuente que solo entra cuando la otra falla no es una
-     * fuente, es un repuesto.
-     *
-     * Se le reserva un tercio del cupo. Si trae menos, lo que sobre se queda para la otra.
+     * La primera versión las añadía solo si quedaba hueco bajo el `limit`, y como TioPlus llena el
+     * cupo por sí solo, las demás aportaban CERO: quedaban enganchadas y seguían sin descubrirse
+     * ni un título suyo. Una fuente que solo entra cuando la otra falla no es una fuente, es un
+     * repuesto. Si alguna trae menos de su cupo, lo que sobre se reparte a las demás.
      */
-    const [extra, extraArchive, extraMoviedays] = await Promise.all([deCinecalidad, deArchive, deMoviedays]);
+    const [extraArchive, extraMoviedays] = await Promise.all([deArchive, deMoviedays]);
     const vistos = new Set(items.map(x => x.id));
-    const nuevos = extra.filter(it => !vistos.has(it.id));
     const nuevosArchive = extraArchive.filter(it => !vistos.has(it.id));
     const nuevosMoviedays = extraMoviedays.filter(it => !vistos.has(it.id));
-    const reservado = Math.min(nuevos.length, Math.max(1, Math.ceil(limit / 3)));
-    // Archive tiene su propio sitio reservado, y por la misma razón que Cinecalidad: si solo
-    // entrara con el hueco que dejen las otras, TioPlus llenaría el cupo y esta fuente aportaría
-    // cero pasada tras pasada. Un cuarto, que es lo que cabe sin ahogar a las demás.
+    // Archive tiene su propio sitio reservado: si solo entrara con el hueco que dejen las otras,
+    // TioPlus llenaría el cupo y esta fuente aportaría cero pasada tras pasada. Un cuarto, que es
+    // lo que cabe sin ahogar a las demás.
     const reservadoArchive = Math.min(nuevosArchive.length, Math.max(1, Math.ceil(limit / 4)));
     // Y moviedays, otro cuarto, por lo mismo. Con una diferencia a su favor que conviene recordar:
     // lo que trae ya ha demostrado tener un servidor publicable —`scrapeMoviedaysDetail` descarta
     // la ficha que no lo tenga—, así que su cupo no se gasta nunca en títulos que no reproducen.
     const reservadoMoviedays = Math.min(nuevosMoviedays.length, Math.max(1, Math.ceil(limit / 4)));
-    const cupoTioplus = Math.max(0, limit - reservado - reservadoArchive - reservadoMoviedays);
+    const cupoTioplus = Math.max(0, limit - reservadoArchive - reservadoMoviedays);
     return items.slice(0, cupoTioplus)
-      .concat(nuevos.slice(0, reservado))
       .concat(nuevosArchive.slice(0, reservadoArchive))
       .concat(nuevosMoviedays.slice(0, reservadoMoviedays));
   }

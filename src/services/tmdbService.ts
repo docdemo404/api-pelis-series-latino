@@ -22,7 +22,7 @@ export const TMDB_API_KEY = API_KEY;
  * con audio Latino»). No es metadata: es publicidad de la fuente, y publicada ocupa el sitio de la
  * sinopsis de verdad — ver `rotuladoPorLaWeb` y `rotularEpisodiosConTmdb`.
  */
-const PUBLICIDAD_DE_LA_WEB = /fuegocine|online gratis|tioplus|cinecalidad/i;
+const PUBLICIDAD_DE_LA_WEB = /fuegocine|online gratis|tioplus/i;
 const UA = USER_AGENT;
 
 // Regiones hispanohablantes: de aquí salen los títulos ALTERNATIVOS que de verdad busca la
@@ -458,7 +458,7 @@ export function tmdbImagePath(url: string | null | undefined): string | null {
   // nombre del servidor. La ficha se quedó sin año, sin sinopsis y con un tmdb_id sintético.
   // Las barras se admiten REPETIDAS. TMDB devuelve `poster_path` ya con su barra inicial, así
   // que quien concatena `"/t/p/w342" + poster_path` publica `/t/p/w342//hash.jpg` — y es
-  // exactamente lo que hace Cinecalidad. Con `\/` a secas, la prueba de identidad MÁS fuerte
+  // exactamente lo que hacía una de las webs. Con `\/` a secas, la prueba de identidad MÁS fuerte
   // que existe se descartaba por una barra de más.
   const m = String(url).match(/(?:image\.tmdb\.org|themoviedb\.org)\/t\/p\/[^/]+\/+([\w-]+\.(?:jpg|jpeg|png|webp|svg))/i);
   if (m) return `/${m[1]}`;

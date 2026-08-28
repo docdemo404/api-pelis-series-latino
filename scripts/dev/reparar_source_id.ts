@@ -19,7 +19,6 @@ const apply = process.argv.includes('--apply');
 
 function fuenteDe(url: string): string | null {
   if (/archive\.org/i.test(url)) return 'archive';
-  if (/cinecalidad/i.test(url)) return 'cinecalidad';
   if (/fuegocine|blogfc|repfuegocinefree/i.test(url)) return 'fuegocine';
   return null;
 }

@@ -34,7 +34,7 @@ type Fila = { id: string; tmdb_id: number; title: string; poster: string | null;
  * identidad en TMDB y con el anuncio de la web por sinopsis; no se anuncian, pero el texto se ve
  * desde el panel y viajaría entero el día que el matcher las reconozca.
  */
-const PUBLICIDAD_DE_LA_WEB = /fuegocine|online gratis|tioplus|cinecalidad/i;
+const PUBLICIDAD_DE_LA_WEB = /fuegocine|online gratis|tioplus/i;
 
 /** Los capítulos de un árbol, aplanados, para poder compararlos antes y después. */
 function capitulos(seasons: any[]): any[] {

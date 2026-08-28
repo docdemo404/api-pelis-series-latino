@@ -217,7 +217,31 @@ export function candidateIdsForUrl(url: string): string[] {
    */
   const deArchive = /archive\.org\/(?:details|metadata|download)\//i.test(String(url))
     ? [`archive-${last}`] : [];
-  return Array.from(new Set([...deArchive, last, last.toLowerCase(), slugify(path)])).filter(Boolean);
+  /**
+   * EL MOLDE DE VIDEOAPI, que es el único donde el último tramo de la ruta NO SIRVE DE NADA.
+   *
+   * Sus urls son `/e/movie/550` y `/e/tv/1399/1/1`. El tramo final es «550» y «1»: números
+   * pelados que no identifican nada y que, peor aún, chocarían con cualquier slug numérico de
+   * otra web. La identidad vive en el `tmdb_id`, que está en medio de la ruta, así que el id de
+   * la fila es `va-<tmdb>` y se saca de ahí.
+   *
+   * Con el id de la SERIE, no el del capítulo, y a propósito: la url de un episodio pertenece a
+   * la ficha de su serie, y es esa la que tiene que reconocerla como propia. Si no,
+   * `duenosDeLasPaginas` no ve estas páginas y la guarda que devuelve una ficha sin identidad a
+   * su dueña —la que FUENTES.md §4 ter documenta— se queda ciega para esta fuente.
+   */
+  const deVideoapi = String(url).match(/\/e\/(?:movie|tv|anime|novel|wwe)\/(\d+)/i);
+  /**
+   * Se devuelven LAS DOS FORMAS, y no es por comodidad: el mismo número de TMDB designa una
+   * película y una serie distintas, así que el id de una serie lleva el tipo dentro
+   * (`va-tv-<tmdb>`) para no chocar con el de la película en la clave primaria. Quien pregunta por
+   * una url no sabe cuál de las dos es —`esPaginaPropia` ya desempata con `tipoDeLaRuta`—, y
+   * devolver solo una dejaría a la otra sin reconocer su propia página.
+   */
+  const videoapi = deVideoapi ? [`va-${deVideoapi[1]}`, `va-tv-${deVideoapi[1]}`] : [];
+  return Array.from(
+    new Set([...deArchive, ...videoapi, last, last.toLowerCase(), slugify(path)])
+  ).filter(Boolean);
 }
 
 /**
@@ -241,11 +265,19 @@ export function tipoDeLaRuta(url: string): ContentType | null {
     if (/[?&]type=(pelicula|movie)\b/i.test(url)) return 'movie';
     return null;
   }
+  /**
+   * VIDEOAPI LO DECLARA EN LA RUTA: `/e/movie/…`, `/e/tv/…`, `/e/anime/…`.
+   *
+   * Va antes que todo lo demás por lo mismo que moviedays: es un dato que ponemos NOSOTROS al
+   * construir la url a partir del `tmdb_id`, no una palabra encontrada en un slug ajeno, así que
+   * no hay margen de duda. Y `/e/anime/` casaría igual con el patrón genérico de más abajo, pero
+   * `/e/movie/` no casa con ninguno — sin esta rama una película de esta fuente volvería con
+   * tipo `null` y el matcher podría buscarla en el catálogo de series.
+   */
+  if (/\/e\/(movie|tv|anime|novel|wwe)\//i.test(url)) {
+    return /\/e\/movie\//i.test(url) ? 'movie' : 'tvseries';
+  }
   if (/\/pelicula\//i.test(url)) return 'movie';
-  // Cinecalidad: `/ver-pelicula/` y `/ver-serie/`. Se comprueba ANTES que el patrón genérico de
-  // serie para que `/ver-pelicula/` no caiga en él por contener «pelicula».
-  if (/\/ver-pelicula\//i.test(url)) return 'movie';
-  if (/\/ver-serie\//i.test(url) || /\/ver-el-episodio\//i.test(url)) return 'tvseries';
   if (/\/(serie|anime|dorama)\//i.test(url)) return 'tvseries';
   /**
    * ARCHIVE.ORG NO LO DECLARA EN LA RUTA, y aquí se dice en voz alta para que nadie lo añada.
@@ -286,7 +318,7 @@ export function esPaginaPropia(id: string | undefined, url: string, type?: Conte
  *
  * POR QUÉ NO BASTA CON BUSCAR EL ID EN EL MAPA. `candidateIdsForUrl` devuelve varios moldes, y
  * el primero es el último segmento pelado —`sakamoto-days`—, que es justo la forma que usan los
- * ids de TioPlus. Así que la página de Cinecalidad `/ver-pelicula/sakamoto-days/` encontraba como
+ * ids de TioPlus. Así que una página ajena `/ver-pelicula/sakamoto-days/` encontraba como
  * «dueña» a la ficha de TioPlus `sakamoto-days`, que es OTRA obra: la serie de 2025, no la
  * película de 2026. Medido el 2026-08-19: los tres únicos cruces que denunciaba la auditoría del
  * crawl eran de esta clase —Sakamoto Days, Gintama y «Una historia real»—, cada ficha con UNA
@@ -314,13 +346,13 @@ export function duenoDeLaPagina<T extends { id: string; type?: string | null }>(
    *
    * `candidateIdsForUrl` devuelve dos formas de la misma url: el último segmento pelado
    * (`animal`) y el camino entero convertido en slug (`ver-serie-animal`). La primera es la que
-   * usan los ids de TioPlus y la segunda la de Cinecalidad — y la pelada casa con CUALQUIER sitio
+   * usan los ids de TioPlus y la segunda los de otra web — y la pelada casa con CUALQUIER sitio
    * que publique ese nombre, así que tomarla antes reparte la página de una web a la ficha de
    * otra.
    *
    * Exigir además que coincida la clase de la ruta (`esPaginaPropia`) tapa el caso fácil —una es
    * película y la otra serie— y NO el difícil: «Animal» son dos SERIES, la de 2021 en TioPlus y
-   * la de 2025 en Cinecalidad. Ahí el tipo no desempata y la pelada volvía a ganar, así que la
+   * la de 2025 en la otra. Ahí el tipo no desempata y la pelada volvía a ganar, así que la
    * auditoría del crawl seguía denunciando un cruce que no existe.
    *
    * Ordenar por longitud descendente pone delante la forma derivada del camino, que es la que
@@ -1451,7 +1483,26 @@ export class CatalogService {
    * sellado y vigente, se cae a la resolución completa, que sondea y resella.
    */
   private static hasFreshStreams(item: MediaItem): boolean {
-    if (!item.servers || item.servers.length === 0) return false;
+    /**
+     * UNA SERIE GUARDA SUS ENLACES EN LOS CAPÍTULOS, y esta salida los ignoraba.
+     *
+     * La última línea de esta función ya acepta `hasEpisodeServers` como motivo suficiente, así
+     * que la guarda de aquí arriba se contradecía con ella: una serie con todos sus capítulos
+     * resueltos y ninguno servidor a nivel de ficha —que es la forma CORRECTA de guardarla, lo
+     * dice `fichaReproducible`: «en una serie los servidores de nivel ficha NO cuentan»— salía
+     * por aquí con `false` y se iba a la resolución completa. O sea, un scrapeo en vivo contra
+     * todas las fuentes en CADA apertura de la ficha, teniendo la respuesta ya guardada.
+     *
+     * Se veía en los registros al abrir «Arrow»: cuatro «[TioPlus] Error scrapeando detalle: 404»
+     * seguidos, buscando por un slug que no es de TioPlus, para acabar entregando los enlaces que
+     * ya estaban en la fila.
+     *
+     * Era un caso raro mientras casi todas las series traían algún servidor de ficha por el
+     * scraping de su página. Con videoapi pasa a ser la norma: sus 1.800 series se guardan con los
+     * enlaces exclusivamente en los capítulos, porque la fuente los nombra uno a uno.
+     */
+    const hayAlgoGuardado = (item.servers && item.servers.length > 0) || this.hasEpisodeServers(item);
+    if (!hayAlgoGuardado) return false;
     if (!item.streams_updated_at) return false;
     const ts = Date.parse(item.streams_updated_at);
     if (!Number.isFinite(ts)) return false;
@@ -2177,7 +2228,6 @@ export class CatalogService {
       if (String(sv?.source_id || '').toLowerCase() === 'manual') return 'manual';
       const u = String(sv?.direct_stream || sv?.embed_url || '');
       if (/archive\.org/i.test(u)) return 'archive';
-      if (/cinecalidad/i.test(u)) return 'cinecalidad';
       if (/fuegocine|blogfc|repfuegocinefree/i.test(u)) return 'fuegocine';
       const id = String(sv?.source_id || '').toLowerCase();
       if (id) return id;
@@ -2351,7 +2401,7 @@ export class CatalogService {
       anunciables,
       reproducibleConPoster,
       // Las fuentes se reconocen por el molde del id, que ES el slug de su página (FUENTES.md §2.3).
-      deFuegocine, deCinecalidad, deMoviedays,
+      deFuegocine, deMoviedays, deVideoapi,
       ultimaHora, ultimas24h,
     ] = await enTandas<number>([
       () => cuantas(q => q),
@@ -2371,9 +2421,10 @@ export class CatalogService {
       // las dos exigencias que faltan —carátula o sello— está dejando fuera a cada ficha.
       () => cuantas(q => q.eq('has_streams', true).not('poster', 'is', null)),
       () => cuantas(q => q.or('id.like.fc-%,id.like.2%-%-%')),
-      () => cuantas(q => q.like('id', 'ver-%')),
       // Moviedays no tiene slug: sus ids son `md-<tmdb_id>`, que es lo único estable que da.
       () => cuantas(q => q.like('id', 'md-%')),
+      // Videoapi tampoco: `va-<tmdb>` las películas y `va-tv-<tmdb>` las series (ver `idDeFicha`).
+      () => cuantas(q => q.like('id', 'va-%')),
       // EL RITMO. Con la base recién vaciada, «última actividad» dice «nunca» y no informa de
       // nada: lo que prueba que el crawl está trabajando es que entren fichas, no que haya
       // escrito alguna vez. `updated_at` se pone al escribir, así que contarlo por ventanas es
@@ -2454,11 +2505,11 @@ export class CatalogService {
        * para no mezclar dos cambios en la misma corrida.)
        */
       fuentes: {
-        cinecalidad: deCinecalidad,
         fuegocine: deFuegocine,
         moviedays: deMoviedays,
-        tioplus: total >= 0 && deFuegocine >= 0 && deCinecalidad >= 0 && deMoviedays >= 0
-          ? total - deFuegocine - deCinecalidad - deMoviedays
+        videoapi: deVideoapi,
+        tioplus: total >= 0 && deFuegocine >= 0 && deMoviedays >= 0 && deVideoapi >= 0
+          ? total - deFuegocine - deMoviedays - deVideoapi
           : -1,
       },
       ultima_actividad: { crawl, extraccion, verificacion },

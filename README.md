@@ -132,7 +132,7 @@ ficheros están borrados (`scripts/dev/probe_entrega_host.ts`).
 ## 🎬 Un HLS sin firma es tan permanente como un mp4 (2026-08-27)
 
 `esUrlDeFicheroPermanente` decidía con `/\.(mp4|mkv|webm)$/` sobre el `pathname`, así que **ningún
-`.m3u8` podía pasar jamás**, llevara token o no. Y HLS es lo que publican tioplus, cinecalidad y la
+`.m3u8` podía pasar jamás**, llevara token o no. Y HLS es lo que publican tioplus, videoapi y la
 mayoría de las webs modernas: por eso las «fuentes probadas» acabaron siendo las dos que sirven
 ficheros sueltos.
 
@@ -212,11 +212,11 @@ node -e "require('dotenv').config();const{createClient}=require('@supabase/supab
 ```
 
 > `{ 'fuegocine.com': 353, 'archive.org': 218, 'tioplus.app': 86, 'moviedays.lat': 50 }`
-> — y **cinecalidad, cero**.
+> — y **cinecalidad, cero**. *(Cinecalidad se retiró el 2026-08-27; ver más abajo.)*
 
 Arreglado: la matriz de `poblar.yml` pasa de `[fuegocine, archive]` a las seis
-(`peliculas`/`series`/`animes` son las categorías de tioplus, y arrastran a cinecalidad y moviedays
-porque `scrapeLatest` las pide por la misma puerta), y el crawl diario lleva `--saltar-guardados`
+(`peliculas`/`series`/`animes` son las categorías de tioplus, y arrastran a las demás porque
+`scrapeLatest` las pide por la misma puerta), y el crawl diario lleva `--saltar-guardados`
 salvo que se pida lo contrario. `moviedays` recibe además un `--desde` rotado con el número de
 corrida: es la única fuente sin índice —baja por TMDB por número de votos— y sin eso repetiría
 siempre las mismas páginas.
@@ -229,6 +229,110 @@ Para ver si una corrida aportó algo, sin abrir la interfaz de GitHub:
 ```bash
 gh run view <id> --log | grep -E "recolectados|ya estaban guardados|url directa permanente|Refresh completado"
 ```
+
+## 📚 VideoAPI: la primera fuente que no se crawlea (2026-08-27)
+
+Se llegó a ella por `modocine.com`, pero **modocine no es la fuente: es un cliente**. No tiene
+catálogo propio —su portada son ~286 tarjetas que TMDB considera populares hoy— y le pinta una piel
+encima a `videoapi.la`, que es un proveedor de embeds con documentación pública
+(`https://videoapi.la/api`), panel y plugin de WordPress. Se le habla al proveedor.
+
+Lo que la hace distinta de las seis fuentes anteriores es que **publica su catálogo entero** en
+listas de ids de TMDB, sin autenticación:
+
+```bash
+curl -s https://videoapi.la/api/v1/public/wordpress/ids/movies.txt | wc -l    # 7.916
+curl -s https://videoapi.la/api/v1/public/wordpress/ids/tvshows.txt | wc -l   # 1.005
+curl -s https://videoapi.la/api/v1/public/wordpress/ids/episodes.txt | wc -l  # 34.001
+curl -s https://videoapi.la/api/v1/public/wordpress/ids/anime.txt | wc -l     # 795
+curl -s https://videoapi.la/api/v1/public/wordpress/ids/anime-episodes.txt | wc -l  # 16.863
+```
+
+O sea: no hay índice que recorrer, ni plantilla que parsear, ni identidad que demostrar. Se piden
+las listas, se restan las que ya tenemos, y lo que sobra se pide por su número. **Todo el capítulo
+1 de [FUENTES.md](FUENTES.md) —homónimos, `originalContradice`, el hash de la imagen— no es que se
+cumpla: es que no llega a aplicar, porque no hay título de por medio en ningún momento.**
+
+Cuánto aporta, calculado y no estimado (las dos partes hablan en ids de TMDB):
+
+| | ellos | nosotros | compartido | **nuevo** |
+|---|---|---|---|---|
+| Películas | 7.916 | 1.033 | 739 | **7.177** (91 %) |
+| Series y anime | 1.800 | 175 | 86 | **1.714** (95 %) |
+
+```bash
+npx ts-node --transpile-only scripts/dev/diag_videoapi_solape.ts   # la tabla de arriba, hoy
+npx ts-node --transpile-only scripts/dev/diag_videoapi.ts          # la cadena entera, de id a bytes
+npx ts-node --transpile-only scripts/dev/diag_videoapi_fondo.ts    # hasta dónde llega su fondo
+```
+
+**No hizo falta escribir extractor.** Su reproductor es `vimeos.net`, que ya se extraía y ya tenía
+perfil medido en `hostPolicy`. Lo único que se añadió a `directStream` es que `videoapi.la` es un
+agregador cuyo HTML trae el reproductor real en un `<iframe>` — y **que hay que quitarle el `cf=`**:
+con el token puesto, vimeos devuelve una cáscara de 901 bytes y no hay vídeo; a secas devuelve el
+reproductor entero de 49 KB. Es la diferencia entre que la fuente funcione y que no.
+
+### Cargarlo y mantenerlo al día es el mismo comando
+
+```bash
+npm run importar:videoapi -- --dry           # qué haría, sin escribir
+npm run importar:videoapi                    # una tanda (300 fichas, 20 min)
+npm run importar:videoapi -- --limite=900 --minutos=40
+npm run importar:videoapi -- --solo=series
+```
+
+No hay modo «carga inicial» y modo «sincronizar», **y eso es el diseño, no un atajo**: lo nuevo es,
+por definición, lo que está en su lista y no en la nuestra. La primera corrida encuentra 8.891
+diferencias; la de dentro de seis horas encontrará las que hayan publicado. Dos modos serían dos
+criterios de «qué es nuevo» destinados a separarse.
+
+Lo automatiza [`videoapi.yml`](.github/workflows/videoapi.yml), cada 6 h (02, 08, 14 y 20), 900
+fichas por tanda. Cabe porque **cada ficha cuesta 2,4 s verificada de verdad** —resolver, bajar el
+manifiesto y descargar un segmento— frente a los ~24 s de la media del catálogo: la cadena es corta
+y siempre la misma. Unas 8.891 fichas a 6 a la vez son ~1 h de reloj para la primera vuelta.
+
+Y se escribe con la regla de la puerta de siempre: **lo que no reproduce no entra**. Sin eso el
+catálogo crecería en títulos y no en cosas que se puedan ver.
+
+La sincronización cubre **lo que aparece**, y eso incluye los capítulos: cuando publican el 4x27 de
+una serie que ya tenemos, la corrida siguiente lo ve porque no está en nuestro árbol
+(`capitulosPendientes`), y solo resuelve ese.
+
+Lo que **no** hace es enterarse de lo que RETIRAN. Si mañana quitan un título, su fila se queda con
+un servidor que ya no resuelve. No hace falta código nuevo para eso y es a propósito: el sello de
+`verified_at` caduca a las 6 h, `verificar.yml` lo intenta, falla, y la ficha deja de anunciarse
+sola. Retirar es barato y reversible por el mismo camino que el resto del catálogo — añadir una
+purga propia sería un segundo criterio de «esto está muerto» compitiendo con el que ya existe.
+
+### Lo que queda por medir
+
+**No está comprobado desde Vercel.** Todo lo de arriba se midió desde una IP residencial y desde los
+runners de GitHub (que sí son datacenter). `vimeos.net` está medido y entrega desde Vercel —es lo
+que sostiene a moviedays—, pero `videoapi.la` está detrás de Cloudflare y no se ha probado desde
+allí. Importa porque el segundo salto se da al REPRODUCIR, o sea en una función de Vercel: si esa
+puerta está cerrada, las fichas se anuncian y no se ven. Se comprueba abriendo una y dándole a
+reproducir.
+
+## 🗑️ Cinecalidad se retiró (2026-08-27)
+
+No por estar rota: por **redundante**. Aportaba cero —cero fichas y cero servidores sobre 8.524
+filas, ni una con página suya— y encima fallaba en silencio, porque su llamada se tragaba el error
+dos veces (`catch { break }` dentro y `.catch(() => [])` fuera): no aparecía ni una vez en el
+registro del crawl.
+
+Lo que decidió la retirada fue mirar **qué había detrás**. Publica sus reproductores a la vista, en
+`data-option`, y el bueno es `vimeos.net` — el mismo host que ya sirve videoapi. Para «Pelotas en
+juego» era literalmente el mismo fichero (`embed-20ls07ugclbo`, el que videoapi devuelve para tmdb
+9472). Era un cliente del mismo proveedor al que ya le hablamos, por una puerta peor.
+
+Se fue entera: su scraper (`scrapeCinecalidadLatest`, `…Search`, `…Detail`, `parseCinecalidadCards`,
+`tituloDeCinecalidad`, `cinecalidadTemporadas`), sus moldes de url en `tipoDeLaRuta`, su cupo
+reservado en `scrapeLatest`, su contador del panel y sus dos sondas de `scripts/dev`.
+
+> **Y de paso salió otro fallo**: `SourceManager.isEnabled` existía y **no lo llamaba nadie**.
+> Apagar una fuente desde el panel escondía sus servidores (`sortServersBySourcePriority` sí mira
+> `enabled`) pero el crawl seguía saliendo a rastrearla en cada tanda para tirar lo que trajera. Un
+> interruptor que apagaba la luz y no el motor. Ahora tiene su primer llamador.
 
 ## ☁️ Despliegue en Vercel (Gratis $0/mes)
 

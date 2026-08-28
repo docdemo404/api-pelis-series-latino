@@ -1340,9 +1340,9 @@ async function guardarFilas(
  * urls que caducan, justo lo contrario de lo que archive.org es.
  */
 function fuenteDeLaUrl(url: string): string {
+  if (/videoapi\.la|videoapp\.zip/i.test(url)) return 'videoapi';
   if (/moviedays\.lat/i.test(url)) return 'moviedays';
   if (/archive\.org/i.test(url)) return 'archive';
-  if (/cinecalidad/i.test(url)) return 'cinecalidad';
   if (/fuegocine|blogfc|repfuegocinefree/i.test(url)) return 'fuegocine';
   return 'tioplus';
 }
@@ -2068,8 +2068,8 @@ async function main() {
        * `mergeIntoExisting` ya sabía hacer esto, pero corre al ESCRIBIR y solo para filas que
        * chocan contra la base; una copia descartada aquí no llega nunca hasta allí. Medido en la
        * corrida del 2026-08-19: 17.767 títulos recolectados y 14.791 escritos — casi 3.000 copias
-       * evaporadas con sus páginas dentro. Se ve en la cobertura: de Cinecalidad solo constaba el
-       * 62-69 %, y lo que faltaba era justo lo que TioPlus ya traía.
+       * evaporadas con sus páginas dentro. Se vio en la cobertura de una de las webs: solo constaba
+       * el 62-69 %, y lo que faltaba era justo lo que TioPlus ya traía.
        *
        * Y NO SE FUNDE NADA SIN COMPROBAR EL AÑO, la misma llave que exige `mergeIntoExisting`: el
        * tmdb_id no lo publica la fuente, lo DEDUCE el matcher, y cuando se equivoca esto pegaría

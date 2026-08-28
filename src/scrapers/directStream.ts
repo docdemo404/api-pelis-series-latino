@@ -740,6 +740,44 @@ function extraerUnlimplay(html: string): { directo: DirectStream | null; candida
   return { directo: remux ? { url: normalizeUrl(remux), kind: 'mp4' } : null, candidatos };
 }
 
+/**
+ * videoapi.la tampoco es un host de vídeo: es un agregador, y de los fáciles.
+ *
+ * Su `/e/movie/<tmdb>` devuelve HTML plano —15 KB, sin una sola llamada extra— con el reproductor
+ * real ya escrito dentro:
+ *
+ *   <iframe id="frame" src="https://vimeos.net/embed-bm1dluypa6jn.html?cf=<JWT>" …>
+ *
+ * O sea que el trabajo aquí es UNA expresión regular, y el vídeo lo saca el extractor de
+ * `vimeos.net` que ya existía. No se devuelve un directo: se devuelve el candidato para que
+ * `seguirAnidado` haga el único salto que hace falta.
+ *
+ * POR QUÉ ESTA RAMA ES OBLIGATORIA Y NO UNA OPTIMIZACIÓN. Sin ella la cadena entera se cae, y en
+ * silencio: medido, `extractDirect` sobre `videoapi.la/e/movie/550` devuelve `null` en los tres
+ * títulos probados. El genérico no encuentra nada porque esta página no lleva vídeo propio, y el
+ * `<iframe>` no es ninguno de los moldes que `urlEnvueltaEnParametro` ni `destinoDeRedireccionJs`
+ * reconocen — no hay parámetro `link=` ni redirección por JS, hay un iframe a secas.
+ *
+ * SE LE QUITA EL `cf=`, Y ESTO NO ES LIMPIEZA COSMÉTICA: SIN QUITARLO NO HAY VÍDEO.
+ *
+ * El `cf=` es un JWT de 6 h que lleva dentro el tmdb, el título y los orígenes autorizados. Con él
+ * puesto, `vimeos.net` contesta una CÁSCARA de 901 bytes —un `<title>Player</title>` y un script
+ * que espera a un navegador de verdad—, y el desempaquetador no encuentra nada porque no hay nada.
+ * Pedida a secas, la misma url devuelve el reproductor entero, 49 KB, con su
+ * `eval(function(p,a,c,k,e,d))` y el m3u8 dentro.
+ *
+ * Medido en tres títulos (550, 1124, 27205): con `cf` → 901 bytes y `null`; sin `cf` → ~49.700
+ * bytes y HLS en los tres. Es la diferencia entre que esta fuente funcione y que no.
+ *
+ * Vale la pena saber por qué, porque invita a un error: parece que el token sea una credencial que
+ * hay que conservar, y es justo al revés — es lo que activa el modo «me está mirando un navegador».
+ */
+function extraerVideoapi(html: string): string | null {
+  const m = html.match(/<iframe[^>]+src=["'](https:\/\/[^"']*vimeos\.[a-z]+\/[^"']+)["']/i);
+  if (!m) return null;
+  return m[1].replace(/&amp;/g, '&').split('?')[0];
+}
+
 /** Calidades de Google Drive, de mejor a peor. El itag lo dice todo: no hay que adivinar nada. */
 const ITAG_DRIVE: Array<{ itag: string; quality: ServerOption['quality'] }> = [
   { itag: '37', quality: '1080p' },
@@ -969,6 +1007,13 @@ async function extraer(
       return extraerVidsonic(html);
     }
 
+    // videoapi.la (y su piel videoapp.zip) llevan el reproductor real en un `<iframe>`. Va ANTES
+    // del desempaquetado por lo mismo que unlimplay: su página no tiene vídeo propio.
+    if (host.includes('videoapi.la') || host.includes('videoapp.zip')) {
+      const dentro = extraerVideoapi(html);
+      return dentro ? seguirAnidado(dentro, opts, profundidad) : null;
+    }
+
     // unlimplay es un agregador: su HTML lista los hosts reales. Se mira ANTES del desempaquetado
     // porque su página no lleva vídeo propio y el genérico no encontraría nada.
     if (host.includes('unlimplay')) {
@@ -1150,6 +1195,7 @@ const HOSTS_CON_EXTRACTOR = [
   'dropload', 'streamwish', 'filelions', 'lulustream', // P.A.C.K.E.R.
   'ok.ru', 'odnoklassniki',                          // `data-options` con la ficha entera
   'unlimplay', 'vimeos',                             // agregador con `remux` propio
+  'videoapi.la', 'videoapp.zip',                     // agregador: el reproductor real va en un iframe
   'drive.google',                                    // `get_video_info`
   'ahvsh', 'streamlare',                             // alcanzables desde que se arregló el TLS
   'vidsonic',                                        // url del revés y en hexadecimal en su HTML
