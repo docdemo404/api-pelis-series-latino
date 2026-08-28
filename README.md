@@ -334,6 +334,38 @@ reservado en `scrapeLatest`, su contador del panel y sus dos sondas de `scripts/
 > `enabled`) pero el crawl seguía saliendo a rastrearla en cada tanda para tirar lo que trajera. Un
 > interruptor que apagaba la luz y no el motor. Ahora tiene su primer llamador.
 
+## ☁️ UN SOLO DESPLIEGUE, y por qué se llegó a eso (2026-08-28)
+
+Este repositorio llegó a estar conectado a **dos proyectos de Vercel, en dos cuentas distintas**, y
+acabaron cruzados de la peor forma posible. Medido pidiéndoles `/api/v1/panel` a los dos:
+
+| | código | escritura Supabase | Redis |
+|---|---|---|---|
+| `...-gilt.vercel.app` | viejo | ✅ | ✅ |
+| `api-pelis-series-latino.vercel.app` | nuevo | ❌ | ❌ |
+
+El que tenía las claves no sabía reproducir lo nuevo —502 en las 7.200 fichas de videoapi— y el que
+sí sabía perdía en silencio todo lo que aprendía al servir: sin `SUPABASE_SERVICE_ROLE_KEY`, un
+UPDATE bloqueado por RLS **no da error**, contesta 204 y cero filas.
+
+Y con dos nombres casi iguales, mirar el panel equivocado y sacar conclusiones falsas era cuestión
+de tiempo. Pasó.
+
+**Ahora hay uno: `api-catalogo-latino.vercel.app`.** Los dos viejos se borran.
+
+Cambiar de dominio no obligó a migrar nada: los `direct_stream` se guardan **relativos**
+(`/api/v1/stream/direct/…`) y se absolutizan al servir. Comprobado sobre 2.247: ninguno llevaba un
+dominio dentro.
+
+> **La pregunta que destapa este problema en diez segundos**, y hay que hacérsela al host al que
+> apunta la app, no al del nombre más bonito:
+>
+> ```bash
+> curl -s https://<host>/api/v1/panel | grep -oE '"catalog_writable":[a-z]+|"shared_counter":[a-z]+'
+> ```
+>
+> Si sale `false`, ese despliegue está sordo: sirve, pero no aprende.
+
 ## ☁️ Despliegue en Vercel (Gratis $0/mes)
 
 ```bash
