@@ -76,36 +76,52 @@ async function setVercelEnv(key: string, value: string): Promise<void> {
 
 // ─── CloudStore principal ────────────────────────────────────────────────────
 
+/**
+ * EL VALOR VIVO DE UN AJUSTE — la API PRIMERO, el entorno del proceso como red de seguridad.
+ *
+ * El orden estaba al revés (`process.env` primero) y eso hacía que **el panel no pudiera cambiar
+ * nada de verdad**, que es justamente para lo que existe. Vercel inyecta las variables en el
+ * proceso al desplegar y ahí se quedan congeladas: quien guardaba desde el panel escribía bien en
+ * la API, veía el cambio aplicado en su respuesta —porque la instancia que le atendió también
+ * actualiza su caché— y a la petición siguiente le contestaba otra instancia con el valor viejo
+ * horneado. El cambio parecía revertirse solo.
+ *
+ * Se descubrió el 2026-08-27 intentando poner `videoapi` en su prioridad: el POST contestaba con el
+ * orden nuevo y las tres lecturas siguientes devolvían el viejo. La configuración guardada tenía
+ * 37 días y aún nombraba a Cinecalidad.
+ *
+ * EL COSTE, que es real y por eso se acota: una llamada a la API de Vercel por instancia fría. Se
+ * paga UNA vez —lo que salga se queda en la caché en memoria del proceso— y solo en los caminos
+ * que de verdad piden esto (el panel y la búsqueda). Si la API no contesta, se cae al valor del
+ * proceso, que es lo que había antes: nunca se queda sin respuesta por esto.
+ */
+async function leerAjusteVivo(clave: string): Promise<string | null> {
+  try {
+    const deLaApi = await getVercelEnv(clave);
+    if (deLaApi) return deLaApi;
+  } catch {}
+  return process.env[clave] || null;
+}
+
 export class CloudStore {
   /**
-   * Carga fuentes — prioridad: memoria → env del proceso → Vercel API
+   * Carga fuentes — prioridad: memoria → Vercel API → env del proceso.
+   *
+   * Ver `leerAjusteVivo` para por qué la API va antes que el entorno.
    */
   static async getSources(): Promise<SourceConfig[]> {
     if (cachedSources) return [...cachedSources];
 
-    // 1. Env var inyectada por Vercel en runtime (tras redeploy)
-    const envVal = process.env.APP_SOURCES_CONFIG;
-    if (envVal) {
+    const raw = await leerAjusteVivo('APP_SOURCES_CONFIG');
+    if (raw) {
       try {
-        const parsed = JSON.parse(envVal);
+        const parsed = JSON.parse(raw);
         if (Array.isArray(parsed) && parsed.length > 0) {
           cachedSources = parsed.sort((a: SourceConfig, b: SourceConfig) => a.priority - b.priority);
           return [...cachedSources];
         }
       } catch {}
     }
-
-    // 2. Leer desde la Vercel API (no requiere redeploy, siempre actualizado)
-    try {
-      const raw = await getVercelEnv('APP_SOURCES_CONFIG');
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          cachedSources = parsed.sort((a: SourceConfig, b: SourceConfig) => a.priority - b.priority);
-          return [...cachedSources];
-        }
-      }
-    } catch {}
 
     cachedSources = [...DEFAULT_SOURCES];
     return [...cachedSources];
@@ -114,18 +130,12 @@ export class CloudStore {
   /**
    * Un ajuste suelto del panel, leído de donde ya se leen las fuentes.
    *
-   * `getSources` y `getOverrides` hacían cada uno su propia cadena «memoria → env del proceso →
-   * API de Vercel», idéntica salvo por la clave. Esto es esa misma cadena con la clave como
-   * parámetro, para que el ajuste siguiente no traiga una tercera copia.
+   * `getSources` y `getOverrides` hacían cada uno su propia cadena, idéntica salvo por la clave.
+   * Ahora los tres llaman a `leerAjusteVivo`, para que el ajuste siguiente no traiga una cuarta
+   * copia — y para que invertir el orden, como hubo que hacer, se hiciera en UN sitio.
    */
   static async getAjuste(clave: string): Promise<string | null> {
-    const delProceso = process.env[clave];
-    if (delProceso) return delProceso;
-    try {
-      return await getVercelEnv(clave);
-    } catch {
-      return null;
-    }
+    return leerAjusteVivo(clave);
   }
 
   /** Guarda ese ajuste. Persiste entre despliegues, como el resto de la configuración. */
@@ -143,36 +153,32 @@ export class CloudStore {
   static async saveSources(sources: SourceConfig[]): Promise<void> {
     const sorted = [...sources].sort((a, b) => a.priority - b.priority);
     cachedSources = sorted;
-    await setVercelEnv('APP_SOURCES_CONFIG', JSON.stringify(sorted));
+    // También en el proceso, igual que `guardarAjuste`: si la API tarda en propagar, esta misma
+    // instancia debe seguir leyendo lo que acaba de guardar y no el valor del despliegue.
+    const json = JSON.stringify(sorted);
+    process.env.APP_SOURCES_CONFIG = json;
+    await setVercelEnv('APP_SOURCES_CONFIG', json);
   }
 
   /**
-   * Carga overrides — prioridad: memoria → env del proceso → Vercel API
+   * Carga overrides — prioridad: memoria → Vercel API → env del proceso.
+   *
+   * Mismo orden y misma razón que `getSources`: un override puesto desde el panel tiene que valer
+   * desde la siguiente petición, no desde el siguiente despliegue. Ver `leerAjusteVivo`.
    */
   static async getOverrides(): Promise<Record<string, MediaOverride>> {
     if (cachedOverrides) return { ...cachedOverrides };
 
-    const envVal = process.env.APP_OVERRIDES_CONFIG;
-    if (envVal) {
+    const raw = await leerAjusteVivo('APP_OVERRIDES_CONFIG');
+    if (raw) {
       try {
-        const parsed = JSON.parse(envVal);
+        const parsed = JSON.parse(raw);
         if (parsed && typeof parsed === 'object') {
           cachedOverrides = parsed as Record<string, MediaOverride>;
           return { ...cachedOverrides };
         }
       } catch {}
     }
-
-    try {
-      const raw = await getVercelEnv('APP_OVERRIDES_CONFIG');
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (parsed && typeof parsed === 'object') {
-          cachedOverrides = parsed as Record<string, MediaOverride>;
-          return { ...cachedOverrides };
-        }
-      }
-    } catch {}
 
     cachedOverrides = {};
     return {};
