@@ -119,10 +119,34 @@ function extraerDeTexto(texto) {
 }
 
 /**
+ * EL SALTO DE VIDEOAPI, que aquí hay que repetir aunque ya esté en la API.
+ *
+ * `videoapi.la` (y su piel `videoapp.zip`) no llevan vídeo propio: su HTML trae el reproductor
+ * real escrito en un `<iframe>` que apunta a `vimeos.net`. Sin dar ese salto, `extraerDeTexto` no
+ * encuentra nada y el Worker contesta «no se pudo extraer el vídeo de este embed» — que es
+ * exactamente lo que devolvía para las 7.200 fichas importadas de esa fuente.
+ *
+ * SÍ, ESTO ES UNA COPIA de `extraerVideoapi` (src/scrapers/directStream.ts), y este repositorio
+ * tiene escrito en varios sitios que lo que se copia se desincroniza. No hay alternativa: el
+ * Worker corre en Cloudflare, en otro runtime, y no puede importar el TypeScript de la API. Lo que
+ * sí se puede es dejar dicho dónde está el gemelo — si se toca uno, se toca el otro.
+ *
+ * Y SE LE QUITA EL `cf=`, que es la parte que no se adivina: con ese token puesto, vimeos devuelve
+ * una cáscara de 901 bytes que espera a un navegador de verdad; pedida a secas devuelve el
+ * reproductor entero con su `eval(function(p,a,c,k,e,d))` y el m3u8 dentro. Medido en tres
+ * títulos: con `cf` → nada; sin `cf` → HLS en los tres.
+ */
+function saltoDeVideoapi(embedUrl, html) {
+  if (!/(?:videoapi\.la|videoapp\.zip)\/e\//i.test(embedUrl)) return null;
+  const m = html.match(/<iframe[^>]+src=["'](https:\/\/[^"']*vimeos\.[a-z]+\/[^"']+)["']/i);
+  return m ? m[1].replace(/&amp;/g, '&').split('?')[0] : null;
+}
+
+/**
  * Acuña la URL real del vídeo DESDE AQUÍ. Es el punto entero del Worker: el CDN tiene que ver la
  * misma IP acuñando y descargando.
  */
-async function acunar(embedUrl) {
+async function acunar(embedUrl, saltos = 1) {
   const origin = new URL(embedUrl).origin;
   const res = await fetch(embedUrl, {
     headers: { 'User-Agent': UA, Referer: `${origin}/` },
@@ -130,6 +154,15 @@ async function acunar(embedUrl) {
   });
   if (!res.ok) return null;
   const html = await res.text();
+
+  // Un agregador no tiene vídeo propio: se sigue a su reproductor real. UN salto, igual que el
+  // `SALTOS_MAXIMOS` de la API — basta para todo lo medido y evita que una cadena de redirectores
+  // convierta una reproducción en una ráfaga de peticiones.
+  if (saltos > 0) {
+    const dentro = saltoDeVideoapi(embedUrl, html);
+    if (dentro) return acunar(dentro, saltos - 1);
+  }
+
   const url = extraerDeTexto(unpackPacker(html) || '') || extraerDeTexto(html);
   return url ? { url, referer: `${origin}/` } : null;
 }
