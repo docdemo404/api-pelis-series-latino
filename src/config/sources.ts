@@ -59,7 +59,7 @@ export const DEFAULT_SOURCES: SourceConfig[] = [
    * `PROVEEDORES_ALCANZABLES` (src/scrapers/moviedays.ts), que es el único sitio que habría que
    * tocar si algún día se monta el relé en el Worker propio.
    */
-  { id: 'moviedays', name: 'MovieDays (por TMDB id)', enabled: true, priority: 3 },
+  { id: 'moviedays', name: 'MovieDays (por TMDB id)', enabled: true, priority: 4 },
   /**
    * VIDEOAPI va CUARTA, y es la única de la lista que no es una web que se scrapee.
    *
@@ -69,9 +69,18 @@ export const DEFAULT_SOURCES: SourceConfig[] = [
    * entero en listas de ids (`/api/v1/public/wordpress/ids/*.txt`), o sea que tampoco hay que
    * recorrer un índice ni adivinar cuándo publica algo nuevo.
    *
-   * Detrás de moviedays y no delante por una sola razón, y no es la calidad: moviedays lleva
-   * meses midiéndose en producción y esta se enchufó el 2026-08-27. Cuando acumule vueltas puede
-   * subir — lo que decide es el histórico de reproducciones, no el entusiasmo del día que entró.
+   * SUBE POR DELANTE DE MOVIEDAYS EL MISMO DÍA (2026-08-27), y no por entusiasmo: por medición.
+   * Entró detrás con el argumento de que moviedays llevaba meses en producción, y el usuario
+   * reportó títulos que no reproducían. Los dos casos que dio —«Woo, una abogada extraordinaria»
+   * 1x1 y «Coraje, el perro cobarde» 1x1— tenían la MISMA forma:
+   *
+   *     servidor 1 (Vimeos, de moviedays)  →  403
+   *     servidor 2 (VideoAPI)              →  200, reproduce
+   *
+   * O sea que el orden ponía delante al que no entrega. Y no es mala suerte, es estructural:
+   * moviedays guarda una url de `vimeos.net` YA ACUÑADA, que caduca; videoapi guarda un embed
+   * DERIVABLE del `tmdb_id`, que se vuelve a acuñar en cada reproducción. Lo que caduca no puede
+   * ir por delante de lo que no caduca.
    *
    * Delante de las tres webs porque su url de embed es DERIVABLE del `tmdb_id` (ver
    * `embedDeVideoapi`): no caduca, no hay que re-rastrear nada para recuperarla, y no depende de
@@ -80,7 +89,7 @@ export const DEFAULT_SOURCES: SourceConfig[] = [
    * Medido al entrar: 7.177 películas y 1.714 series/anime que el catálogo no tenía, y 23 de 23
    * títulos probados entregando vídeo.
    */
-  { id: 'videoapi', name: 'VideoAPI (por TMDB id)', enabled: true, priority: 4 },
+  { id: 'videoapi', name: 'VideoAPI (por TMDB id)', enabled: true, priority: 3 },
   { id: 'tioplus', name: 'TioPlus / PelisPlus Latino', enabled: true, priority: 5 },
   { id: 'fuegocine', name: 'FuegoCine', enabled: true, priority: 6 },
 ];
