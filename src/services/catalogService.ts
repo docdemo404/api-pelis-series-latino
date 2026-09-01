@@ -9,6 +9,7 @@ import { normalizeTitle, slugify, yearFromSlug, searchIndexKey } from '../utils/
 import { httpClient } from '../utils/httpClient';
 import { CacheStore } from '../cache/store';
 import { unwrapRedirector, canonicalArchiveOrg } from '../scrapers/directStream';
+import { pelicula as netmirrorPelicula, episodio as netmirrorEpisodio, FuenteNetmirror } from '../scrapers/netmirror';
 import { revisarServidores, aplicarVeredictosRecordados } from './playbackHealth';
 import {
   LedgerManual,
@@ -3708,8 +3709,16 @@ export class CatalogService {
      * Presupuesto de petición (4 s, 3 sondas, parando en el primero útil): el mismo que usa el
      * detalle de una película, para no cambiar la latencia de pulsar Reproducir.
      */
+    // NetMirror para capitulos: server virtual por (tmdbSerie, s, e). No persiste; se resuelve
+    // fresco descartando el que hubiera con sello viejo.
+    const propiosMasNm = propios.filter(s => String((s as any)?.source_id || '').toLowerCase() !== 'netmirror');
+    if (serie.tmdb_id) {
+      const nm = await serverDeNetmirror(serie.tmdb_id, { tipo: 'tv', s: season, e: episode });
+      if (nm) propiosMasNm.push(nm.server);
+    }
+
     const revisados = await revisarServidores(
-      sortServersBySourcePriority(aplicarVeredictosRecordados(propios)),
+      sortServersBySourcePriority(aplicarVeredictosRecordados(propiosMasNm)),
       // Un episodio trae 4-6 servidores y a menudo la mitad están caídos, así que el cupo de sondas
       // cubre la lista entera: con tope de 3 se gastaban en los muertos y el último se entregaba
       // SIN comprobar, conservando su `online` viejo. Manda el presupuesto de TIEMPO, que se queda
@@ -4052,7 +4061,19 @@ export class CatalogService {
     const cached = await CacheStore.get<MediaItem>(`byid:${cacheKey}`);
     if (cached && !opts.deep) {
       const alDia = this.conSaludAlDia(cached);
-      if (paraElCliente(alDia.servers).length > 0 || this.hasEpisodeServers(alDia)) return alDia;
+      if (paraElCliente(alDia.servers).length > 0 || this.hasEpisodeServers(alDia)) {
+        // NetMirror se re-resuelve incluso en el atajo del cache. El mp4 firmado caduca en
+        // pocas horas, y el `verified_at` viejo lo hundiria en el sorter — mejor un server
+        // recien acunado. Idempotente: se quita el que hubiera antes de anadir.
+        if (alDia.type === 'movie' && alDia.tmdb_id) {
+          const sinViejo = (alDia.servers || []).filter(s => String((s as any)?.source_id || '').toLowerCase() !== 'netmirror');
+          const nm = await serverDeNetmirror(alDia.tmdb_id, { tipo: 'movie' });
+          alDia.servers = nm ? [...sinViejo, nm.server] : sinViejo;
+          alDia.servers = sortServersBySourcePriority(alDia.servers);
+          alDia.primary_stream = getPrimaryStream(alDia.servers);
+        }
+        return alDia;
+      }
     }
 
     const result = await this.getMetadata(q, typeHint);
@@ -4076,8 +4097,17 @@ export class CatalogService {
      * Lo comprobado se resella, se reordena y se persiste: la siguiente apertura ya sale barata.
      */
     if (!opts.deep && this.hasFreshStreams(result)) {
+      // NetMirror: se pega tambien en el atajo de enlaces frescos, o el server virtual solo
+      // saldria cuando toca resolver de cero. Idempotente: si ya viniera uno del cache
+      // (persistencia accidental), no metemos otro.
+      // Se elimina el que hubiera (persistencia accidental con sello viejo) y se resuelve fresco.
+      const conNm = (result.servers || []).filter(s => String((s as any)?.source_id || '').toLowerCase() !== 'netmirror');
+      if (result.type === 'movie' && result.tmdb_id) {
+        const nm = await serverDeNetmirror(result.tmdb_id, { tipo: 'movie' });
+        if (nm) conNm.push(nm.server);
+      }
       const revisados = await revisarServidores(
-        sortServersBySourcePriority(aplicarVeredictosRecordados(result.servers || [])),
+        sortServersBySourcePriority(aplicarVeredictosRecordados(conNm)),
         // Tres demostrados, no uno: sin alternativas un atasco no tiene salida. Ver `objetivoSellados`.
         { presupuestoMs: 9000, maximo: 8, objetivoSellados: 3 }
       );
@@ -4327,6 +4357,16 @@ export class CatalogService {
      * cabeza está muerta, que es justo cuando merece la pena pagarlo. Y se paga una vez: el
      * resultado queda sellado y cacheado.
      */
+    // NetMirror: server virtual por tmdb_id, sin persistir. Se elimina el que hubiera y se
+    // resuelve de cero, para que el `verified_at` sea de ahora y no del cache viejo.
+    for (let i = allServers.length - 1; i >= 0; i--) {
+      if (String((allServers[i] as any)?.source_id || '').toLowerCase() === 'netmirror') allServers.splice(i, 1);
+    }
+    if (result.type === 'movie' && result.tmdb_id) {
+      const nm = await serverDeNetmirror(result.tmdb_id, { tipo: 'movie' });
+      if (nm) allServers.push(nm.server);
+    }
+
     const revisados = await revisarServidores(sortServersBySourcePriority(allServers), opts.deep
       ? { presupuestoMs: 20000, maximo: 8, hastaElPrimeroUtil: false, resucitar: 2 }
       : { presupuestoMs: 9000, maximo: 8, objetivoSellados: 3 });
@@ -5003,13 +5043,70 @@ export function esServidorManual(sv: any): boolean {
 export function noLoTraeNingunScraper(sv: any): boolean {
   if (esServidorManual(sv)) return true;
   const id = String(sv?.source_id || '').toLowerCase();
-  if (id === 'videoapi') return true;
+  if (id === 'videoapi' || id === 'netmirror') return true;
   return /(?:videoapi\.la|videoapp\.zip)\/e\//i.test(String(sv?.embed_url || ''));
 }
 
 /** La url de un servidor. El respaldo a `embed_url` importa: en los manuales van las dos iguales. */
 function urlDe(sv: any): string {
   return String(sv?.direct_stream || sv?.embed_url || '');
+}
+
+/**
+ * NETMIRROR — se pega como server virtual cuando la ficha tiene tmdb_id.
+ *
+ * No se guarda en la DB porque su mp4 caduca cada pocas horas (query firmada por CDN). El server
+ * apunta a `/api/v1/netmirror/stream/<tmdbId>[?...]`, que es una url ESTABLE para el cliente:
+ * cada reproduccion re-consulta la API por dentro y hace proxy con la cabecera Referer que la
+ * CDN exige. Prioridad la fija `sources.ts` — hoy `1`, encima de todo.
+ */
+async function serverDeNetmirror(
+  tmdbId: number,
+  contexto: { tipo: 'movie' } | { tipo: 'tv'; s: number; e: number },
+): Promise<{ server: ServerOption; fuente: FuenteNetmirror } | null> {
+  const fuente = contexto.tipo === 'movie'
+    ? await netmirrorPelicula(tmdbId).catch(() => null)
+    : await netmirrorEpisodio(tmdbId, contexto.s, contexto.e).catch(() => null);
+  if (!fuente) return null;
+  const query = contexto.tipo === 'tv' ? `?type=tv&s=${contexto.s}&e=${contexto.e}` : '';
+  const ruta = `/api/v1/netmirror/stream/${tmdbId}${query}`;
+  const calidad: ServerOption['quality'] =
+    fuente.meta.resolution === '1080' ? '1080p' :
+    fuente.meta.resolution === '720'  ? '720p'  :
+    fuente.meta.resolution === '4K'   ? '4K'    : '480p';
+  const ahora = new Date().toISOString();
+  const altura =
+    fuente.meta.resolution === '2160' || fuente.meta.resolution === '4K' ? 2160 :
+    fuente.meta.resolution === '1080' ? 1080 :
+    fuente.meta.resolution === '720'  ? 720  :
+    fuente.meta.resolution === '360'  ? 360  : 480;
+  const server: ServerOption = {
+    id: `nm-${tmdbId}${contexto.tipo === 'tv' ? `-${contexto.s}-${contexto.e}` : ''}`,
+    name: 'NetMirror',
+    quality: calidad,
+    // Marcamos latino: la API devuelve audio original con subs es; nuestro proxy inyecta la pista
+    // subtitulada latina como default (ver `filtrarYordenarEsp` en scraper). El cliente lo trata
+    // como "latino disponible" a efectos de ordenacion — es lo que ve el espectador.
+    language: 'latino',
+    embed_url: ruta,
+    direct_stream: ruta,
+    direct_kind: 'mp4',
+    direct_mode: 'proxy',
+    direct_host: 'bcdnxw.hakunaymatata.com',
+    status: 'online',
+    last_checked: ahora,
+    // Sello reciente: acabamos de resolver el mp4 contra la API oficial. Sin esto,
+    // `revisarServidores` intenta comprobar el embed_url (una ruta relativa al Worker) y lo
+    // marca offline porque la sonda no sabe resolverla.
+    verified_at: ahora,
+    max_height: altura,
+    // TTFB observado en la CDN: ~300-500 ms. Sin este valor el sorter le asigna infinito y lo
+    // hunde por debajo de cualquier server con TTFB medido.
+    ttfb_ms: 400,
+    source_id: 'netmirror',
+    source_name: 'NetMirror',
+  } as any;
+  return { server, fuente };
 }
 
 /**

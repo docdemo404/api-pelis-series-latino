@@ -452,6 +452,17 @@ export async function revisarServidores(
     if (!servidor?.embed_url) continue;
 
     /**
+     * NetMirror es un server VIRTUAL creado en `catalogService` con sello reciente. Su embed_url
+     * es una ruta al propio Worker (`/api/v1/netmirror/stream/<tmdb>`) que no acuna nada por si
+     * misma: el sondeo intentaria mint sobre esa ruta, fallaria y marcaria el server como
+     * `sinVideoDirecto`, tirandolo. La regla aqui es la misma que aplica a los ficheros
+     * permanentes: si el sello del catalogo es reciente, no se re-sondea.
+     */
+    if (String((servidor as any)?.source_id || '').toLowerCase() === 'netmirror' && verificadoVigente(servidor)) {
+      continue;
+    }
+
+    /**
      * UN FICHERO NO SE JUZGA CON LAS REGLAS DE UN REPRODUCTOR.
      *
      * Un servidor `public` no lleva detrás una página con un reproductor: su `embed_url` ES el

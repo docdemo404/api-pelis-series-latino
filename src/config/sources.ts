@@ -90,8 +90,17 @@ export const DEFAULT_SOURCES: SourceConfig[] = [
    * títulos probados entregando vídeo.
    */
   { id: 'videoapi', name: 'VideoAPI (por TMDB id)', enabled: true, priority: 3 },
-  { id: 'tioplus', name: 'TioPlus / PelisPlus Latino', enabled: true, priority: 5 },
-  { id: 'fuegocine', name: 'FuegoCine', enabled: true, priority: 6 },
+  /**
+   * NETMIRROR va JUNTO a videoapi y moviedays, no en el fondo con las scrapeadas.
+   * Es otro proveedor indexado por `tmdb_id` que responde por la obra concreta y
+   * no puede cometer el fallo de adoptar homónimo. Sin scraping: hay endpoint REST
+   * publico (`net27.cc/api/embed-tmdb/{tmdbId}`) que devuelve mp4 directo. Requiere
+   * cabecera `Referer: https://videodownloader.site/` para pasar el anti-hotlinking
+   * del CDN. Ver `src/scrapers/netmirror.ts`.
+   */
+  { id: 'netmirror', name: 'NetMirror (por TMDB id)', enabled: true, priority: 1 },
+  { id: 'tioplus', name: 'TioPlus / PelisPlus Latino', enabled: true, priority: 6 },
+  { id: 'fuegocine', name: 'FuegoCine', enabled: true, priority: 7 },
 ];
 
 /**

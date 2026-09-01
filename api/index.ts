@@ -8,6 +8,7 @@ import catalogRoutes from '../src/routes/catalog.routes';
 import searchRoutes from '../src/routes/search.routes';
 import mediaRoutes from '../src/routes/media.routes';
 import streamRoutes from '../src/routes/stream.routes';
+import netmirrorRoutes from '../src/routes/netmirror.routes';
 import subtitulosRoutes from '../src/routes/subtitulos.routes';
 import { sendErrorResponse } from '../src/utils/apiHelpers';
 import { publicOrigin, withAbsoluteDirectStreams } from '../src/utils/publicUrl';
@@ -194,6 +195,7 @@ app.use(mediaRoutes);
 // cambia nunca. Ver `subtitulos.routes.ts`.
 app.use(subtitulosRoutes);
 app.use(streamRoutes);
+app.use(netmirrorRoutes);
 
 // Manejador global de errores inesperados (Zero 500 HTML Pages)
 app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
