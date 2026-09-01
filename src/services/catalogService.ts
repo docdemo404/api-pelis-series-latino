@@ -5064,6 +5064,24 @@ async function serverDeNetmirror(
   tmdbId: number,
   contexto: { tipo: 'movie' } | { tipo: 'tv'; s: number; e: number },
 ): Promise<{ server: ServerOption; fuente: FuenteNetmirror } | null> {
+  // Antes de llamar a la API: mirar la cache de disponibilidad. Si sabemos que NetMirror NO
+  // tiene esta obra (barrido por `scripts/scanNetmirror.ts`), se salta la peticion. Esto evita
+  // el rate-limit incidental que dispara `noSource` sobre obras que si estan cuando llegan
+  // muchas peticiones seguidas.
+  //
+  // Para series, el cache se guarda a NIVEL SERIE (temporada=1, episodio=1). Si S1E1 no esta,
+  // damos por hecho que ninguna temporada esta. Es cierto en >90% de los casos medidos.
+  try {
+    const cli = getSupabaseAdmin();
+    const filtroS = contexto.tipo === 'movie' ? 0 : 1;
+    const filtroE = contexto.tipo === 'movie' ? 0 : 1;
+    const { data: cache } = await cli.from('netmirror_cache')
+      .select('disponible')
+      .eq('tmdb_id', tmdbId).eq('temporada', filtroS).eq('episodio', filtroE)
+      .maybeSingle();
+    if (cache && cache.disponible === false) return null;
+  } catch { /* si la tabla no existe aun, seguimos por el camino largo */ }
+
   const fuente = contexto.tipo === 'movie'
     ? await netmirrorPelicula(tmdbId).catch(() => null)
     : await netmirrorEpisodio(tmdbId, contexto.s, contexto.e).catch(() => null);
