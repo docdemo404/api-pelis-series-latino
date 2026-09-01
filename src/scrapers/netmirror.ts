@@ -119,15 +119,26 @@ async function llamar(tmdbId: number, extra: string): Promise<RespuestaNetmirror
 
 function empaquetar(j: RespuestaNetmirror): FuenteNetmirror | null {
   if (!j.ok || !j.mp4 || j.noSource || j.mode === 'none') return null;
+  // La API devuelve `mp4` con la calidad por defecto (habitualmente 480p) y `streams` con las
+  // demas. Escogemos la MEJOR de streams si supera a la default: sin esto, netmirror siempre se
+  // publica en 480p aunque tenga 1080p disponible, y el sorter (que preordena por max_height) lo
+  // hunde al fondo. Medido: Oppenheimer default 480p, streams incluye 1080p.
+  const alturaMp4 = Number(j.resolution) || 0;
+  let mejorUrl = j.mp4;
+  let mejorRes = alturaMp4;
+  for (const s of j.streams || []) {
+    const r = Number(s.resolution) || 0;
+    if (r > mejorRes && s.url) { mejorUrl = s.url; mejorRes = r; }
+  }
   return {
-    mp4: j.mp4,
+    mp4: mejorUrl,
     referer: REFERER_MP4,
     subtitulosEs: filtrarYordenarEsp(j.captions),
     meta: {
       title: j.title || '',
       year: j.year || '',
       imdb: j.imdb || '',
-      resolution: j.resolution,
+      resolution: mejorRes > 0 ? String(mejorRes) : j.resolution,
       otrosStreams: (j.streams || []).length,
     },
   };
