@@ -208,35 +208,43 @@ export interface MasterNetmirror {
  * titulo": exige año). Cuando NetMirror devuelve varios resultados, se queda con el primero cuyo
  * titulo normalizado coincida.
  */
-export async function buscarNetflixId(titulo: string, anio?: string | number): Promise<string | null> {
-  if (!titulo) return null;
-  const q = encodeURIComponent(titulo.trim());
-  try {
-    const r = await fetch(`${NM_SITE_ORIGEN}/search.php?s=${q}&t=${Date.now()}`, {
-      headers: { 'User-Agent': UA, Accept: 'application/json' },
-    });
-    if (!r.ok) return null;
-    const j = await r.json() as { searchResult?: Array<{ id: string; t: string }> };
-    const items = Array.isArray(j?.searchResult) ? j.searchResult : [];
-    if (items.length === 0) return null;
+export async function buscarNetflixId(
+  titulo: string,
+  anio?: string | number,
+  tituloOriginal?: string,
+): Promise<string | null> {
+  // NetMirror indexa en INGLES. Nuestro catalogo guarda `title` en espanol y `original_title`
+  // como TMDB lo publica (habitualmente el nombre original en ingles). Se prueban los dos: "La
+  // guerra de las galaxias" no aparece nunca, pero "Star Wars: A New Hope" si.
+  const candidatos: string[] = [];
+  if (tituloOriginal && tituloOriginal.trim() && tituloOriginal.trim() !== (titulo || '').trim()) {
+    candidatos.push(tituloOriginal.trim());
+  }
+  if (titulo && titulo.trim()) candidatos.push(titulo.trim());
+  if (candidatos.length === 0) return null;
 
-    const normalizar = (s: string) => String(s || '').toLowerCase()
-      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-      .replace(/[^a-z0-9]+/g, ' ').trim();
-    const buscado = normalizar(titulo);
+  const normalizar = (s: string) => String(s || '').toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ').trim();
 
-    // Preferir match exacto del titulo normalizado; si no, el primer resultado.
-    const exacto = items.find(x => normalizar(x.t) === buscado);
-    const candidato = exacto ?? items[0];
-
-    // Si nos dieron año, NO validamos aquí (el search no devuelve año). La validación por año se
-    // hace en el escaneo consultando el propio master (que lleva metadatos), o simplemente
-    // aceptamos: NetMirror es un catálogo específico, los homónimos son raros. Ver
-    // `nunca-fusionar-por-titulo`: si algún dia se detecta un problema, se añade prueba por año.
-    void anio;
-
-    return candidato?.id || null;
-  } catch { return null; }
+  for (const q of candidatos) {
+    try {
+      const r = await fetch(`${NM_SITE_ORIGEN}/search.php?s=${encodeURIComponent(q)}&t=${Date.now()}`, {
+        headers: { 'User-Agent': UA, Accept: 'application/json' },
+      });
+      if (!r.ok) continue;
+      const j = await r.json() as { searchResult?: Array<{ id: string; t: string }> };
+      const items = Array.isArray(j?.searchResult) ? j.searchResult : [];
+      if (items.length === 0) continue;
+      const buscado = normalizar(q);
+      const exacto = items.find(x => normalizar(x.t) === buscado) ?? items[0];
+      if (exacto?.id) {
+        void anio; // el search no devuelve ano; homonimos son raros en el catalogo netflix
+        return exacto.id;
+      }
+    } catch { /* siguiente candidato */ }
+  }
+  return null;
 }
 
 /**

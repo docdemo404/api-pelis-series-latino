@@ -37,7 +37,7 @@ const NM_TOKEN = process.env.NM_TOKEN_ESCANEO || '';
 
 const sb = getSupabaseAdmin();
 
-interface Ficha { id: string; tmdb_id: number; type: 'movie' | 'tvseries'; title: string; release_date?: string }
+interface Ficha { id: string; tmdb_id: number; type: 'movie' | 'tvseries'; title: string; original_title?: string; release_date?: string }
 
 async function yaCacheado(tmdbId: number, temporada: number, episodio: number): Promise<boolean> {
   const { data } = await sb.from('netmirror_cache')
@@ -84,9 +84,10 @@ async function comprobarFicha(f: Ficha, s: number, e: number): Promise<{
     salida.resolucion = r ? Number(r.meta.resolution) || null : null;
   }
 
-  // Paso 2 — netflix_id via /search.php. Barato, sin token.
+  // Paso 2 — netflix_id via /search.php. Barato, sin token. Prueba original_title primero
+  // (NetMirror indexa en ingles) y luego title (por si es una peli hispanohablante).
   const anio = f.release_date ? f.release_date.slice(0, 4) : undefined;
-  salida.netflix_id = await buscarNetflixId(f.title, anio).catch(() => null);
+  salida.netflix_id = await buscarNetflixId(f.title, anio, f.original_title).catch(() => null);
 
   // Paso 3 — si hay netflix_id + token de sesión, poblamos idiomas_audio.
   if (salida.netflix_id && NM_TOKEN) {
@@ -126,7 +127,7 @@ async function main() {
     let offset = 0;
     for (;;) {
       const { data, error } = await sb.from('media_items')
-        .select('id,tmdb_id,type,title,release_date')
+        .select('id,tmdb_id,type,title,original_title,release_date')
         .eq('type', tipo).gt('tmdb_id', 0)
         .order('tmdb_id')
         .range(offset, offset + 999);
