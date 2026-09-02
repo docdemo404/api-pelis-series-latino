@@ -54,10 +54,16 @@ async function yaCacheado(tmdbId: number, temporada: number, episodio: number): 
 }
 
 async function guardar(row: Record<string, unknown>) {
-  await sb.from('netmirror_cache').upsert({
-    ...row,
-    comprobado_at: new Date().toISOString(),
-  }, { onConflict: 'tmdb_id,temporada,episodio' });
+  const marca = { ...row, comprobado_at: new Date().toISOString() };
+  // En modo `--solo-idiomas` NO se pasa `disponible`, y el upsert cae como INSERT que viola el
+  // NOT NULL — todas estas filas ya existen del escaneo previo, asi que un UPDATE puro va bien.
+  if (soloIdiomas) {
+    const { tmdb_id, temporada, episodio, ...set } = marca as any;
+    await sb.from('netmirror_cache').update(set)
+      .eq('tmdb_id', tmdb_id).eq('temporada', temporada).eq('episodio', episodio);
+    return;
+  }
+  await sb.from('netmirror_cache').upsert(marca, { onConflict: 'tmdb_id,temporada,episodio' });
 }
 
 async function comprobarFicha(f: Ficha, s: number, e: number): Promise<{
