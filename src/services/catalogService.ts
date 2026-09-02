@@ -5147,10 +5147,13 @@ async function serverDeNetmirror(
     // master HLS (poblados por el escaneo o por un cliente previo), se los damos aqui para que
     // Media3 pueda montar el HLS con multi-audio en vez del mp4 mono-audio. Sin idiomas, el
     // campo va ausente y el cliente cae al mp4 como hoy.
-    netmirror_hls: (netflixIdCache && idiomasCache && idiomasCache.length > 0) ? {
+    // Con netflix_id basta para armar el master; los idiomas vienen del propio master al
+    // reproducir. Si el cache ya los tiene, se envian tambien como hint (permite al cliente
+    // pintar el menu antes de descargar el m3u8 real). Sin netflix_id, no hay HLS que servir.
+    netmirror_hls: netflixIdCache ? {
       netflix_id: netflixIdCache,
       dominio_hls: dominioHls || 'net52.cc',
-      idiomas: idiomasCache,
+      idiomas: idiomasCache || [],
     } : undefined,
   } as any;
   return { server, fuente };
