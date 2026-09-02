@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
 import { pelicula, episodio, buscarNetflixId, masterHls } from '../src/scrapers/netmirror';
 import { traducirYNormalizar } from '../src/utils/idiomas';
+import { TMDB_API_KEY, OTRO_ALFABETO } from '../src/services/tmdbService';
 
 /**
  * Escaneo del catálogo contra NetMirror.
@@ -28,6 +29,16 @@ const args = process.argv.slice(2);
 const soloTipo = args.find(a => a.startsWith('--tipo='))?.split('=')[1] as 'movie' | 'tvseries' | undefined;
 const refrescar = args.includes('--refrescar');
 const soloIdiomas = args.includes('--solo-idiomas');
+// Rematch: solo fichas con disponible=true y netflix_id NULL. Usa el matcher agresivo con
+// titulo en ingles de TMDB. Rescata las 5.000 fichas que el matcher viejo dejaba fuera por
+// tener original_title en coreano/chino/japones/ruso/arabe y title en espanol.
+const soloSinId = args.includes('--solo-sin-id');
+// Rematch mas amplio: toca las que tienen netflix_id pero NO idiomas (probablemente el id que
+// tenian era bogus — se colo durante el bug del search sin Referer, ver netmirror.ts).
+// Cubre tambien las que directamente no tenian netflix_id. En resumen: cualquier ficha con
+// mp4 disponible y sin audios reales poblados. Ejemplo: El Camino (Breaking Bad) tenia
+// netflix_id 81437051 en cache pero el correcto es 81078819; con este modo se sobrescribe.
+const sinAudios = args.includes('--sin-audios');
 const LIMITE = Number(args.find(a => a.startsWith('--limite='))?.split('=')[1] || 0) || Infinity;
 const CONCURRENCIA = 3;
 const PAUSA_LOTE_MS = 100;
@@ -39,6 +50,24 @@ const sb = getSupabaseAdmin();
 
 interface Ficha { id: string; tmdb_id: number; type: 'movie' | 'tvseries'; title: string; original_title?: string; release_date?: string }
 
+// Cache en memoria del titulo en INGLES por (tipo, tmdb). Solo se pregunta a TMDB si
+// original_title esta en otro alfabeto o esta vacio. TMDB da title/name en en-US inequivoco.
+const cacheTituloEn = new Map<string, string | null>();
+async function tituloIngles(tipo: 'movie' | 'tvseries', tmdbId: number, originalTitle?: string): Promise<string | null> {
+  if (originalTitle && !OTRO_ALFABETO.test(originalTitle) && originalTitle.trim().length > 0) return null;
+  const key = `${tipo}:${tmdbId}`;
+  if (cacheTituloEn.has(key)) return cacheTituloEn.get(key)!;
+  try {
+    const ruta = tipo === 'movie' ? 'movie' : 'tv';
+    const r = await fetch(`https://api.themoviedb.org/3/${ruta}/${tmdbId}?api_key=${TMDB_API_KEY}&language=en-US`);
+    if (!r.ok) { cacheTituloEn.set(key, null); return null; }
+    const j = await r.json() as { title?: string; name?: string };
+    const t = (j.title || j.name || '').trim() || null;
+    cacheTituloEn.set(key, t);
+    return t;
+  } catch { cacheTituloEn.set(key, null); return null; }
+}
+
 async function yaCacheado(tmdbId: number, temporada: number, episodio: number): Promise<boolean> {
   const { data } = await sb.from('netmirror_cache')
     .select('comprobado_at,netflix_id,idiomas_audio')
@@ -49,6 +78,12 @@ async function yaCacheado(tmdbId: number, temporada: number, episodio: number): 
   // En modo `--solo-idiomas` decidimos con criterios distintos: se salta si ya tiene
   // netflix_id + idiomas.
   if (soloIdiomas) return Boolean((data as any).netflix_id && (data as any).idiomas_audio);
+  // En modo `--solo-sin-id` se salta si YA tiene netflix_id (ya se rescato o nunca lo perdio).
+  if (soloSinId) return Boolean((data as any).netflix_id);
+  // En modo `--sin-audios` se salta si YA tiene idiomas poblados. Cualquier fila con idiomas
+  // reales ya funciona; las que tengan netflix_id pero sin idiomas se reprocesan por si su id
+  // fue bogus. Solo si hay token — sin token no se puede poblar audios y no vale la pena.
+  if (sinAudios) return Boolean((data as any).idiomas_audio);
   const dias = (Date.now() - Date.parse(data.comprobado_at)) / 86_400_000;
   return dias < REFRESCAR_TRAS_DIAS;
 }
@@ -57,7 +92,7 @@ async function guardar(row: Record<string, unknown>) {
   const marca = { ...row, comprobado_at: new Date().toISOString() };
   // En modo `--solo-idiomas` NO se pasa `disponible`, y el upsert cae como INSERT que viola el
   // NOT NULL — todas estas filas ya existen del escaneo previo, asi que un UPDATE puro va bien.
-  if (soloIdiomas) {
+  if (soloIdiomas || soloSinId || sinAudios) {
     const { tmdb_id, temporada, episodio, ...set } = marca as any;
     await sb.from('netmirror_cache').update(set)
       .eq('tmdb_id', tmdb_id).eq('temporada', temporada).eq('episodio', episodio);
@@ -81,8 +116,8 @@ async function comprobarFicha(f: Ficha, s: number, e: number): Promise<{
     dominio_hls: null as string | null,
   };
 
-  // Paso 1 — disponibilidad via embed-tmdb (mp4 mono-audio). Solo si no estamos en `--solo-idiomas`.
-  if (!soloIdiomas) {
+  // Paso 1 — disponibilidad via embed-tmdb (mp4 mono-audio). Solo si estamos escaneando.
+  if (!soloIdiomas && !soloSinId && !sinAudios) {
     const r = f.type === 'movie'
       ? await pelicula(f.tmdb_id).catch(() => null)
       : await episodio(f.tmdb_id, 1, 1).catch(() => null);
@@ -90,10 +125,15 @@ async function comprobarFicha(f: Ficha, s: number, e: number): Promise<{
     salida.resolucion = r ? Number(r.meta.resolution) || null : null;
   }
 
-  // Paso 2 — netflix_id via /search.php. Barato, sin token. Prueba original_title primero
-  // (NetMirror indexa en ingles) y luego title (por si es una peli hispanohablante).
+  // Paso 2 — netflix_id via /search.php. Barato, sin token. Se prueban en orden:
+  //   1. Titulo en INGLES traido de TMDB si original_title esta en otro alfabeto o vacio.
+  //      Rescata coreano ("오징어 게임" -> "Squid Game"), japones, chino, ruso, arabe.
+  //   2. original_title si es alfabeto latino ("Star Wars: A New Hope").
+  //   3. title (traducido al espanol) por si es peli hispanohablante.
+  // Y el matcher aplica variantes agresivas (sin subtitulo, sin sufijo numerico, sin articulo).
   const anio = f.release_date ? f.release_date.slice(0, 4) : undefined;
-  salida.netflix_id = await buscarNetflixId(f.title, anio, f.original_title).catch(() => null);
+  const enIngles = await tituloIngles(f.type, f.tmdb_id, f.original_title).catch(() => null);
+  salida.netflix_id = await buscarNetflixId(f.title, anio, f.original_title, enIngles || undefined).catch(() => null);
 
   // Paso 3 — si hay netflix_id + token de sesión, poblamos idiomas_audio.
   if (salida.netflix_id && NM_TOKEN) {
@@ -123,11 +163,43 @@ async function pool<T>(items: T[], concurr: number, fn: (x: T) => Promise<void>)
 }
 
 async function main() {
-  console.log(`Escaneo NetMirror  concurr=${CONCURRENCIA}  refrescar=${refrescar}  soloIdiomas=${soloIdiomas}  tipo=${soloTipo || 'todos'}  token=${NM_TOKEN ? 'sí' : 'no'}`);
+  console.log(`Escaneo NetMirror  concurr=${CONCURRENCIA}  refrescar=${refrescar}  soloIdiomas=${soloIdiomas}  soloSinId=${soloSinId}  tipo=${soloTipo || 'todos'}  token=${NM_TOKEN ? 'sí' : 'no'}`);
 
   const tipos: Array<'movie' | 'tvseries'> = soloTipo ? [soloTipo] : ['movie', 'tvseries'];
   const stats = { procesadas: 0, pelisOk: 0, pelisNo: 0, seriesOk: 0, seriesNo: 0, saltadas: 0, netflix: 0, conIdiomas: 0 };
   const t0 = Date.now();
+
+  // Cuando `--solo-sin-id`, precargamos los tmdb_id que estan en netmirror_cache con
+  // disponible=true y netflix_id NULL. Sin este filtro recorreriamos las 10k+ filas del
+  // catalogo entero. Se pagina en trozos de 1000 respetando [[range-sin-order-miente]].
+  const tmdbIdsRematch = new Set<number>();
+  if (soloSinId) {
+    let off = 0;
+    for (;;) {
+      const { data } = await sb.from('netmirror_cache')
+        .select('tmdb_id')
+        .eq('disponible', true).is('netflix_id', null)
+        .order('tmdb_id').range(off, off + 999);
+      const filas = data || [];
+      for (const f of filas) tmdbIdsRematch.add((f as any).tmdb_id);
+      if (filas.length < 1000) break;
+      off += 1000;
+    }
+    console.log(`  rematch sobre ${tmdbIdsRematch.size} fichas sin netflix_id`);
+  } else if (sinAudios) {
+    let off = 0;
+    for (;;) {
+      const { data } = await sb.from('netmirror_cache')
+        .select('tmdb_id')
+        .eq('disponible', true).is('idiomas_audio', null)
+        .order('tmdb_id').range(off, off + 999);
+      const filas = data || [];
+      for (const f of filas) tmdbIdsRematch.add((f as any).tmdb_id);
+      if (filas.length < 1000) break;
+      off += 1000;
+    }
+    console.log(`  rematch sobre ${tmdbIdsRematch.size} fichas sin audios`);
+  }
 
   for (const tipo of tipos) {
     let offset = 0;
@@ -143,6 +215,9 @@ async function main() {
 
       await pool(filas, CONCURRENCIA, async f => {
         if (stats.procesadas >= LIMITE) return;
+        // En modos de rescate filtramos las que no estan en la lista precalculada. Esto reduce
+        // el trabajo real de 10k a los ~5k que faltan.
+        if ((soloSinId || sinAudios) && !tmdbIdsRematch.has(f.tmdb_id)) { stats.saltadas++; return; }
         const s = tipo === 'movie' ? 0 : 1;
         const e = tipo === 'movie' ? 0 : 1;
         if (await yaCacheado(f.tmdb_id, s, e)) { stats.saltadas++; return; }

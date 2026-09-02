@@ -212,36 +212,74 @@ export async function buscarNetflixId(
   titulo: string,
   anio?: string | number,
   tituloOriginal?: string,
+  tituloIngles?: string,
 ): Promise<string | null> {
-  // NetMirror indexa en INGLES. Nuestro catalogo guarda `title` en espanol y `original_title`
-  // como TMDB lo publica (habitualmente el nombre original en ingles). Se prueban los dos: "La
-  // guerra de las galaxias" no aparece nunca, pero "Star Wars: A New Hope" si.
-  const candidatos: string[] = [];
-  if (tituloOriginal && tituloOriginal.trim() && tituloOriginal.trim() !== (titulo || '').trim()) {
-    candidatos.push(tituloOriginal.trim());
-  }
-  if (titulo && titulo.trim()) candidatos.push(titulo.trim());
-  if (candidatos.length === 0) return null;
-
-  const normalizar = (s: string) => String(s || '').toLowerCase()
+  // NetMirror indexa SIEMPRE en INGLES. TMDB nos da:
+  //   - title (traducido al idioma de la region \u2014 aqui, espa\u00f1ol)
+  //   - original_title (idioma nativo: puede ser ingles, coreano '\uc624\uc9d5\uc5b4 \uac8c\uc784', ruso, arabe...)
+  //   - tituloIngles (traduccion ingles pedida aparte \u2014 el mas fiable)
+  //
+  // Orden de intento: ingles > original si es latino > title en espa\u00f1ol > romanizacion cruda del
+  // original. La primera coincidencia gana. Ejemplo Squid Game: original=\ucf54\ub9ac\uc544, es="El juego del
+  // calamar", ingles="Squid Game" -> matchea via ingles con id 81040344.
+  const norm = (s: string) => String(s || '').toLowerCase()
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-z0-9]+/g, ' ').trim();
+  // Otro alfabeto (coreano, japones, chino, ruso, arabe, hebreo, thai, devanagari, hangul):
+  // si original_title lo tiene, no sirve buscar por el en NetMirror (indexa alfabeto latino).
+  const otroAlfabeto = (s: string) => /[\u0400-\u04ff\u0590-\u05ff\u0600-\u06ff\u0900-\u097f\u0e00-\u0e7f\u3040-\u309f\u30a0-\u30ff\u3400-\u9fff\uac00-\ud7af]/.test(s || '');
+
+  const candidatos: string[] = [];
+  const push = (s: string | undefined) => {
+    const t = (s || '').trim();
+    if (!t) return;
+    if (candidatos.some(c => norm(c) === norm(t))) return;
+    candidatos.push(t);
+  };
+  push(tituloIngles);
+  if (tituloOriginal && !otroAlfabeto(tituloOriginal)) push(tituloOriginal);
+  push(titulo);
+  // Variantes agresivas: sin subtitulo tras dos puntos, sin sufijo numerico romano/arabigo,
+  // sin articulos iniciales espanoles. Cubre "Vengadores: Endgame" -> "Vengadores"; "Rocky II" ->
+  // "Rocky"; "Los Vengadores" -> "Vengadores".
+  const base = [tituloIngles, tituloOriginal, titulo].filter(Boolean) as string[];
+  for (const b of base) {
+    const sinSub = b.split(':')[0].trim();
+    if (sinSub && sinSub !== b) push(sinSub);
+    const sinSufNum = b.replace(/\s+(?:[ivx]+|\d+)\s*$/i, '').trim();
+    if (sinSufNum && sinSufNum !== b) push(sinSufNum);
+    const sinArt = b.replace(/^(?:el|la|los|las|un|una|the|le|la|les)\s+/i, '').trim();
+    if (sinArt && sinArt !== b) push(sinArt);
+  }
+  if (candidatos.length === 0) return null;
 
   for (const q of candidatos) {
     try {
+      // OJO: sin Referer, NetMirror devuelve `type:1, head:"Top Searches"` con una lista
+      // canned que es igual para toda consulta y con `t:""` vacios. Medido en produccion:
+      // rescatar Squid Game requiere este header sin excepciones.
       const r = await fetch(`${NM_SITE_ORIGEN}/search.php?s=${encodeURIComponent(q)}&t=${Date.now()}`, {
-        headers: { 'User-Agent': UA, Accept: 'application/json' },
+        headers: { 'User-Agent': UA, Accept: 'application/json', Referer: `${NM_SITE_ORIGEN}/home` },
       });
       if (!r.ok) continue;
-      const j = await r.json() as { searchResult?: Array<{ id: string; t: string }> };
-      const items = Array.isArray(j?.searchResult) ? j.searchResult : [];
+      const j = await r.json() as { head?: string; type?: number; searchResult?: Array<{ id: string; t: string }> };
+      // Descartar la lista "Top Searches" bogus: aparece cuando falta el Referer o similar,
+      // trae ids reales pero `t` vacio, distinto para cada usuario y NO refleja la consulta.
+      if (j?.head === 'Top Searches' || j?.type === 1) continue;
+      const items = Array.isArray(j?.searchResult) ? j.searchResult.filter(x => x && x.t) : [];
       if (items.length === 0) continue;
-      const buscado = normalizar(q);
-      const exacto = items.find(x => normalizar(x.t) === buscado) ?? items[0];
-      if (exacto?.id) {
-        void anio; // el search no devuelve ano; homonimos son raros en el catalogo netflix
-        return exacto.id;
-      }
+      const buscado = norm(q);
+      // 1) Match exacto normalizado.
+      const exacto = items.find(x => norm(x.t) === buscado);
+      if (exacto?.id) { void anio; return exacto.id; }
+      // 2) Contencion estricta en ambos sentidos (p.ej. "Squid Game" contenido en "Squid Game:
+      // The Challenge"). Requiere que el mas corto sea al menos 5 chars para evitar matches
+      // basura tipo "The" contenido en cualquier cosa.
+      const contenido = items.find(x => {
+        const t = norm(x.t);
+        return (t.length >= 5 && buscado.length >= 5) && (t.includes(buscado) || buscado.includes(t));
+      });
+      if (contenido?.id) { void anio; return contenido.id; }
     } catch { /* siguiente candidato */ }
   }
   return null;
