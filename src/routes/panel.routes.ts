@@ -10,6 +10,7 @@ import { CatalogService } from '../services/catalogService';
 import { refrescarHostsConCache, ponerHostConCache, hostsConCache } from '../services/hostsConCache';
 import { leerAjuste } from '../utils/ajustesRemotos';
 import { hostsDelCatalogo } from '../services/catalogService';
+import { medidaDeAparatos, refrescarMedidasDeAparatos } from '../services/medidasDeAparatos';
 
 /**
  * Panel de administración: página estática + API de fuentes y overrides.
@@ -233,6 +234,21 @@ router.post('/api/v1/panel/manual', async (req: Request, res: Response, next: Ne
 });
 
 // Actualizar fuentes y su orden de prioridad
+/**
+ * Purga los cachés de listados y búsquedas del catálogo.
+ *
+ * Existe para desbloquear escenarios como el de una migracion que cambia has_streams en batch:
+ * la BD se actualiza pero las busquedas y la portada llevan una hora de cache y siguen sirviendo
+ * lo viejo (los usuarios no llegan a ver los titulos rescatados). Este endpoint borra las claves
+ * `searchp:*` y `home:*` de Redis para forzar reconstruccion.
+ */
+router.post('/api/v1/panel/invalidate-listings', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    await CatalogService.invalidateListings();
+    res.json({ status: 'success', message: 'Listings cache purgado' });
+  } catch (err) { next(err); }
+});
+
 router.post('/api/v1/panel/sources', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { sources } = req.body;
@@ -321,10 +337,29 @@ router.get('/api/v1/panel/hosts', async (_req: Request, res: Response, next: Nex
     const [hosts, encendidos] = await Promise.all([
       hostsDelCatalogo(),
       refrescarHostsConCache(),
+      // Se refresca de paso: es la misma pantalla donde se decide qué host pasa por la caché, y
+      // ese es justo el dato con el que hay que decidirlo.
+      refrescarMedidasDeAparatos().catch(() => 0),
     ]);
     res.json({
       status: 'success',
-      hosts: hosts.map((h: { host: string; servidores: number; titulos: number }) => ({ ...h, worker: encendidos.includes(h.host) })),
+      hosts: hosts.map((h: { host: string; servidores: number; titulos: number }) => {
+        /*
+         * Y LO QUE HAN MEDIDO LOS APARATOS, que es lo único honesto que hay sobre si un host va
+         * rápido. Hasta ahora la decisión de encender la caché de un host se tomaba mirando
+         * cuántos servidores tenía, o sea a bulto. Con esto se ve lo que de verdad da, y sobre
+         * todo `reconexiones`: un host que obliga a reconectar mucho está estrangulando a sus
+         * clientes, y ése es exactamente el que gana algo pasando por la caché.
+         */
+        const medido = medidaDeAparatos(h.host);
+        return {
+          ...h,
+          worker: encendidos.includes(h.host),
+          kbps_dispositivos: medido?.kbps ?? null,
+          muestras: medido?.muestras ?? 0,
+          reconexiones: medido?.reconexiones ?? null,
+        };
+      }),
     });
   } catch (err) {
     next(err);
