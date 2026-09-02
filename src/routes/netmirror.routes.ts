@@ -48,6 +48,16 @@ router.get('/api/v1/netmirror/stream/:tmdbId', async (req: Request, res: Respons
     const r = await resolver(req);
     if (!r) return sendErrorResponse(res, 404, 'NOT_FOUND', 'NetMirror no tiene este titulo.');
 
+    // Modo redirect: 302 al mp4. Pensado para clientes que pueden fijar Referer y lo propagan
+    // al seguir la redireccion (Android Media3 con DefaultHttpDataSource, VLC, curl con -L).
+    // Sin este modo el proxy bombea todos los bytes por el Worker, que en gru1 esta lejos del
+    // CDN de hakunaymatata; medido: Spider-Man y Kung Fu Panda tardaban 5-10s en cargar.
+    if (req.query.mode === 'redirect') {
+      res.setHeader('Referrer-Policy', 'unsafe-url'); // que el cliente vea el destino
+      return res.redirect(302, r.mp4);
+    }
+
+    // Modo proxy (defecto): el Worker inyecta Referer, para navegadores y clientes sin headers.
     const upstream = await fetch(r.mp4, {
       headers: {
         'User-Agent': UA,

@@ -5098,6 +5098,16 @@ async function serverDeNetmirror(
     fuente.meta.resolution === '1080' ? 1080 :
     fuente.meta.resolution === '720'  ? 720  :
     fuente.meta.resolution === '360'  ? 360  : 480;
+  // El `direct_stream` apunta a nuestro endpoint con `?mode=redirect`: para el cliente Android
+  // (Media3) esto es un 302 al CDN, propaga los headers `Referer` y descarga direct del CDN sin
+  // que ningun byte pase por el Worker. Antes el proxy duplicaba latencia y ancho de banda:
+  // Spider-Man y Kung Fu Panda 4 tardaban 5-10s en empezar. Los clientes sin headers pueden
+  // pedir la misma URL sin `?mode=redirect` y el endpoint hace proxy.
+  //
+  // El `?mode=redirect` sobre nuestro endpoint tiene otra ventaja sobre la URL directa CDN:
+  // aqui el 302 se emite en el momento del play (con firma FRESCA), no cuando se cacheo la
+  // ficha 10 min atras. Asi el CDN nunca ve una firma caducada.
+  const rutaRedirect = ruta + (ruta.includes('?') ? '&' : '?') + 'mode=redirect';
   const server: ServerOption = {
     id: `nm-${tmdbId}${contexto.tipo === 'tv' ? `-${contexto.s}-${contexto.e}` : ''}`,
     name: 'NetMirror',
@@ -5106,16 +5116,20 @@ async function serverDeNetmirror(
     // subtitulada latina como default (ver `filtrarYordenarEsp` en scraper). El cliente lo trata
     // como "latino disponible" a efectos de ordenacion — es lo que ve el espectador.
     language: 'latino',
-    embed_url: ruta,
-    direct_stream: ruta,
+    embed_url: rutaRedirect,
+    direct_stream: rutaRedirect,
     direct_kind: 'mp4',
-    direct_mode: 'proxy',
+    direct_mode: 'redirect',
     direct_host: 'bcdnxw.hakunaymatata.com',
+    // Cabeceras que el CDN exige. Media3 las fija y las propaga al seguir el 302 (comprobado).
+    headers: {
+      Referer: 'https://videodownloader.site/',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    },
     status: 'online',
     last_checked: ahora,
     // Sello reciente: acabamos de resolver el mp4 contra la API oficial. Sin esto,
-    // `revisarServidores` intenta comprobar el embed_url (una ruta relativa al Worker) y lo
-    // marca offline porque la sonda no sabe resolverla.
+    // `revisarServidores` intenta comprobar el embed_url y lo puede marcar offline.
     verified_at: ahora,
     max_height: altura,
     // TTFB observado en la CDN: ~300-500 ms. Sin este valor el sorter le asigna infinito y lo
