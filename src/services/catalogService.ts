@@ -5147,13 +5147,15 @@ async function serverDeNetmirror(
     // master HLS (poblados por el escaneo o por un cliente previo), se los damos aqui para que
     // Media3 pueda montar el HLS con multi-audio en vez del mp4 mono-audio. Sin idiomas, el
     // campo va ausente y el cliente cae al mp4 como hoy.
-    // Con netflix_id basta para armar el master; los idiomas vienen del propio master al
-    // reproducir. Si el cache ya los tiene, se envian tambien como hint (permite al cliente
-    // pintar el menu antes de descargar el m3u8 real). Sin netflix_id, no hay HLS que servir.
-    netmirror_hls: netflixIdCache ? {
+    // Con netflix_id basta para armar el master, PERO el cliente arma un `MergingMediaSource`
+    // que usa el mp4 mono-audio como video base y adjunta cada pista de audio como HLS externo.
+    // Sin URIs de audio poblados en cache, el cliente no puede montar nada — asi que solo se
+    // envia `netmirror_hls` cuando el escaneo ya midio el master con NM_TOKEN_ESCANEO y guardo
+    // las URIs. Ver `scanNetmirror.ts` y la nota del descubrimiento del video placeholder.
+    netmirror_hls: (netflixIdCache && idiomasCache && idiomasCache.length > 0) ? {
       netflix_id: netflixIdCache,
       dominio_hls: dominioHls || 'net52.cc',
-      idiomas: idiomasCache || [],
+      idiomas: idiomasCache,
     } : undefined,
   } as any;
   return { server, fuente };
