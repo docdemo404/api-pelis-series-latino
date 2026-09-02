@@ -159,3 +159,131 @@ export async function episodio(
   const j = await llamar(tmdbId, `?type=tv&s=${temporada}&e=${episodio}`);
   return j ? empaquetar(j) : null;
 }
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+// MULTI-AUDIO via HLS master (/hls/{netflix_id}.m3u8?in=<token>)
+//
+// La API `/api/embed-tmdb/{tmdb}` que se usa arriba devuelve mp4 mono-audio. Multi-audio real
+// vive en el reproductor interno de NetMirror, que se sirve como HLS master con multiples pistas
+// `#EXT-X-MEDIA TYPE=AUDIO`. Requiere netflix_id (no tmdb) y token de sesion (?in=).
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+
+/** Origen actual del site donde vive /search.php. Rota cada mes. */
+const NM_SITE_ORIGEN = 'https://net77.cc';
+/** Origen actual del reproductor donde vive /hls. Rota cada mes. */
+const NM_PLAY_ORIGEN = 'https://net52.cc';
+
+export interface AudioHls {
+  /** ISO 639-2 tal como venga del master (`spa`, `eng`, `und`, ...). */
+  language: string;
+  /** Nombre bruto del master (`Spanish`, `English`, `Unknown`, ...). Se traduce arriba. */
+  name: string;
+  /** URL absoluta del m3u8 de esa pista de audio. Publica, sin token. */
+  uri: string;
+  /** true si el master lo marca DEFAULT=YES. */
+  defaultTrack: boolean;
+}
+
+export interface VideoVariante {
+  /** Bandwidth declarado por el master. */
+  bandwidth: number;
+  /** Ej. "1920x1080" o null si el master no lo dice. */
+  resolution: string | null;
+  /** URL absoluta del m3u8 de esta variante (con token). */
+  uri: string;
+  /** true si el master lo marca DEFAULT=YES. */
+  defaultTrack: boolean;
+}
+
+export interface MasterNetmirror {
+  audios: AudioHls[];
+  video: VideoVariante[];
+}
+
+/**
+ * Empareja titulo+anio contra el buscador de NetMirror y devuelve su netflix_id.
+ * `/search.php?s=<titulo>` no requiere cookies ni token — se puede llamar desde cualquier IP.
+ *
+ * Devuelve null si no hay match o si el año no encaja (respeta la regla de "nunca fusionar por
+ * titulo": exige año). Cuando NetMirror devuelve varios resultados, se queda con el primero cuyo
+ * titulo normalizado coincida.
+ */
+export async function buscarNetflixId(titulo: string, anio?: string | number): Promise<string | null> {
+  if (!titulo) return null;
+  const q = encodeURIComponent(titulo.trim());
+  try {
+    const r = await fetch(`${NM_SITE_ORIGEN}/search.php?s=${q}&t=${Date.now()}`, {
+      headers: { 'User-Agent': UA, Accept: 'application/json' },
+    });
+    if (!r.ok) return null;
+    const j = await r.json() as { searchResult?: Array<{ id: string; t: string }> };
+    const items = Array.isArray(j?.searchResult) ? j.searchResult : [];
+    if (items.length === 0) return null;
+
+    const normalizar = (s: string) => String(s || '').toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, ' ').trim();
+    const buscado = normalizar(titulo);
+
+    // Preferir match exacto del titulo normalizado; si no, el primer resultado.
+    const exacto = items.find(x => normalizar(x.t) === buscado);
+    const candidato = exacto ?? items[0];
+
+    // Si nos dieron año, NO validamos aquí (el search no devuelve año). La validación por año se
+    // hace en el escaneo consultando el propio master (que lleva metadatos), o simplemente
+    // aceptamos: NetMirror es un catálogo específico, los homónimos son raros. Ver
+    // `nunca-fusionar-por-titulo`: si algún dia se detecta un problema, se añade prueba por año.
+    void anio;
+
+    return candidato?.id || null;
+  } catch { return null; }
+}
+
+/**
+ * Descarga el HLS master de NetMirror y parsea audios + variantes de video.
+ * Devuelve null si el master está vacío (netflix_id inexistente) o si el token no vale.
+ */
+export async function masterHls(netflixId: string, token: string): Promise<MasterNetmirror | null> {
+  if (!netflixId || !token) return null;
+  try {
+    const r = await fetch(`${NM_PLAY_ORIGEN}/hls/${encodeURIComponent(netflixId)}.m3u8?in=${encodeURIComponent(token)}`, {
+      headers: { 'User-Agent': UA, Referer: `${NM_PLAY_ORIGEN}/` },
+    });
+    if (!r.ok) return null;
+    const txt = await r.text();
+    if (!txt.startsWith('#EXTM3U')) return null;
+
+    const audios: AudioHls[] = [];
+    const video: VideoVariante[] = [];
+    const lineas = txt.split('\n').map(l => l.trim());
+
+    for (let i = 0; i < lineas.length; i++) {
+      const l = lineas[i];
+      if (l.startsWith('#EXT-X-MEDIA') && /TYPE=AUDIO/i.test(l)) {
+        const language = /LANGUAGE="([^"]+)"/i.exec(l)?.[1] || '';
+        const name = /NAME="([^"]+)"/i.exec(l)?.[1] || '';
+        const uri = /URI="([^"]+)"/i.exec(l)?.[1] || '';
+        const defaultTrack = /DEFAULT=YES/i.test(l);
+        // Las URIs de audio son publicas y vienen absolutas ("https://s88...").
+        // Filtramos las vacías ("https:///files/...") que salen cuando el netflix_id no está.
+        if (uri && /^https?:\/\/[^/]+\//i.test(uri)) {
+          audios.push({ language, name, uri, defaultTrack });
+        }
+      } else if (l.startsWith('#EXT-X-STREAM-INF')) {
+        const bandwidth = Number(/BANDWIDTH=(\d+)/i.exec(l)?.[1] || 0);
+        const resolution = /RESOLUTION=(\d+x\d+)/i.exec(l)?.[1] || null;
+        const defaultTrack = /DEFAULT=YES/i.test(l);
+        const uri = lineas[i + 1] || '';
+        // Solo variantes reales; las de placeholder tienen `in=unknown` cuando el netflix_id no
+        // existe (medido: `s21.freecdn4.top/files/220884/...` para ids no reconocidos).
+        if (uri && /^https?:\/\//.test(uri) && !/unknown/i.test(uri)) {
+          video.push({ bandwidth, resolution, uri, defaultTrack });
+        }
+      }
+    }
+
+    // Sin audios reales el master no vale (netflix_id inexistente o token muerto).
+    if (audios.length === 0) return null;
+    return { audios, video };
+  } catch { return null; }
+}

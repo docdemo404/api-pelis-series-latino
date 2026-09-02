@@ -5071,15 +5071,21 @@ async function serverDeNetmirror(
   //
   // Para series, el cache se guarda a NIVEL SERIE (temporada=1, episodio=1). Si S1E1 no esta,
   // damos por hecho que ninguna temporada esta. Es cierto en >90% de los casos medidos.
+  let netflixIdCache: string | null = null;
+  let idiomasCache: Array<{ lang: string; name_es: string; default?: boolean }> | null = null;
+  let dominioHls: string | null = null;
   try {
     const cli = getSupabaseAdmin();
     const filtroS = contexto.tipo === 'movie' ? 0 : 1;
     const filtroE = contexto.tipo === 'movie' ? 0 : 1;
     const { data: cache } = await cli.from('netmirror_cache')
-      .select('disponible')
+      .select('disponible,netflix_id,idiomas_audio,dominio_hls')
       .eq('tmdb_id', tmdbId).eq('temporada', filtroS).eq('episodio', filtroE)
       .maybeSingle();
     if (cache && cache.disponible === false) return null;
+    netflixIdCache = (cache as any)?.netflix_id ?? null;
+    idiomasCache = (cache as any)?.idiomas_audio ?? null;
+    dominioHls = (cache as any)?.dominio_hls ?? null;
   } catch { /* si la tabla no existe aun, seguimos por el camino largo */ }
 
   const fuente = contexto.tipo === 'movie'
@@ -5137,6 +5143,15 @@ async function serverDeNetmirror(
     ttfb_ms: 400,
     source_id: 'netmirror',
     source_name: 'NetMirror',
+    // Metadata multi-audio para el cliente Android. Cuando el cache tiene los idiomas del
+    // master HLS (poblados por el escaneo o por un cliente previo), se los damos aqui para que
+    // Media3 pueda montar el HLS con multi-audio en vez del mp4 mono-audio. Sin idiomas, el
+    // campo va ausente y el cliente cae al mp4 como hoy.
+    netmirror_hls: (netflixIdCache && idiomasCache && idiomasCache.length > 0) ? {
+      netflix_id: netflixIdCache,
+      dominio_hls: dominioHls || 'net52.cc',
+      idiomas: idiomasCache,
+    } : undefined,
   } as any;
   return { server, fuente };
 }
