@@ -1,5 +1,6 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { getSupabaseAdmin } from '../services/supabaseService';
+import { pelicula as netmirrorPelicula, episodio as netmirrorEpisodio, CaptionNetmirror } from '../scrapers/netmirror';
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -38,8 +39,68 @@ const episodioDe = (req: Request): string =>
  */
 const CACHE_DEL_FICHERO = 'public, max-age=86400, s-maxage=604800, immutable';
 
-/** La lista sí cambia: hoy no hay nada y mañana hay dos pistas. */
-const CACHE_DE_LA_LISTA = 'public, max-age=60, s-maxage=300, stale-while-revalidate=600';
+/**
+ * LA LISTA CAMBIA, Y CUANDO CAMBIA HAY QUE ENTERARSE YA.
+ *
+ * Estaba en `s-maxage=300, stale-while-revalidate=600`: hasta cinco minutos servida desde el borde
+ * y diez más sirviéndola caducada mientras se refresca. O sea que un subtítulo recién generado
+ * podía tardar un cuarto de hora en aparecer en la app.
+ *
+ * Eso se cargaba lo único que hace útil todo esto — que lo que pides se atienda primero. Medido
+ * en vivo: la app seguía viendo una sola pista cuando en la base ya había dos, con `Age: 266` y
+ * `X-Vercel-Cache: HIT`.
+ *
+ * Treinta segundos en el borde son suficientes para que cien reproductores no se conviertan en
+ * cien consultas, y bastante poco para que nadie note la espera. El FICHERO en cambio sigue
+ * cacheado para siempre: ese no cambia nunca.
+ */
+const CACHE_DE_LA_LISTA = 'public, max-age=0, s-maxage=30, stale-while-revalidate=60';
+
+/**
+ * Trae las pistas que ofrece NetMirror para esta ficha/episodio, si tiene tmdb_id.
+ * El catalogo guarda tmdb_id en `media_items`; consultamos la API por el id y devolvemos las
+ * captions ya con la URL que sirve nuestro endpoint (`nm-<lang>.vtt`, que hace proxy y convierte).
+ */
+async function pistasDeNetmirror(mediaId: string, epQuery: string): Promise<CaptionNetmirror[]> {
+  try {
+    const { data } = await getSupabaseAdmin()
+      .from('media_items')
+      .select('tmdb_id, type')
+      .eq('id', mediaId).maybeSingle();
+    if (!data?.tmdb_id) return [];
+    const tmdb = Number(data.tmdb_id);
+    if (data.type === 'movie') {
+      const r = await netmirrorPelicula(tmdb);
+      return r?.subtitulosEs ? await todosLosCaptionsNetmirror(tmdb, 0, 0) : [];
+    }
+    // Serie: episodio N-M viene en `epQuery` como 'N-M' o '1-3' segun formato.
+    const m = /^(\d+)[-x](\d+)$/.exec(epQuery);
+    if (!m) return [];
+    const s = Number(m[1]), e = Number(m[2]);
+    const r = await netmirrorEpisodio(tmdb, s, e);
+    return r?.subtitulosEs ? await todosLosCaptionsNetmirror(tmdb, s, e) : [];
+  } catch { return []; }
+}
+
+/**
+ * Devuelve TODOS los captions (no solo espanol) que NetMirror publica para la ficha.
+ * Los reproductores del cliente aceptan multiples pistas — el usuario elige la que quiera.
+ */
+async function todosLosCaptionsNetmirror(tmdb: number, s: number, e: number): Promise<CaptionNetmirror[]> {
+  const url = s === 0
+    ? `https://net27.cc/api/embed-tmdb/${tmdb}`
+    : `https://net27.cc/api/embed-tmdb/${tmdb}?type=tv&s=${s}&e=${e}`;
+  const r = await fetch(url, { headers: { Referer: 'https://videodownloader.site/', 'User-Agent': 'Mozilla/5.0' } });
+  const j = await r.json();
+  const raw: CaptionNetmirror[] = Array.isArray(j?.captions) ? j.captions : [];
+  // Absolutizar y quedarse con lang/name/url/source
+  return raw.map(c => ({
+    lang: String(c.lang || ''),
+    name: String(c.name || ''),
+    url: c.url?.startsWith('http') ? c.url : `https://net27.cc${c.url}`,
+    source: c.source,
+  })).filter(c => c.url);
+}
 
 router.get('/api/v1/subtitles/:id', async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -54,35 +115,72 @@ router.get('/api/v1/subtitles/:id', async (req: Request, res: Response, next: Ne
 
     const consulta = episodio ? `?episodio=${encodeURIComponent(episodio)}` : '';
     res.setHeader('Cache-Control', CACHE_DE_LA_LISTA);
+    const propias = (data || []).map(fila => ({
+      idioma: fila.idioma,
+      etiqueta: fila.etiqueta,
+      /*
+       * DE DÓNDE SALIÓ, y esto se entrega al cliente a propósito.
+       *
+       * 'transcrito' es lo que se habla, palabra por palabra. 'publico' es un fichero escrito
+       * por una persona y comprobado contra este audio: mejor redactado, pero condensado. No
+       * son la misma promesa y quien lee tiene derecho a saber cuál está leyendo.
+       */
+      origen: fila.origen,
+      url: `/api/v1/subtitles/${encodeURIComponent(req.params.id)}/${fila.idioma}.vtt${consulta}`,
+    }));
+
+    // NetMirror: si la API tiene la ficha, sus captions se sirven via proxy /nm-<lang>.vtt para
+    // que el reproductor las vea junto a las de nuestra BD. Sin esto, la pista de audio ingles del
+    // mp4 salia sola, sin ninguna traduccion.
+    const captions = await pistasDeNetmirror(req.params.id, episodio);
+    const netmirror = captions.map(c => ({
+      idioma: c.lang,
+      etiqueta: c.name || c.lang,
+      origen: 'netmirror',
+      url: `/api/v1/subtitles/${encodeURIComponent(req.params.id)}/nm-${encodeURIComponent(c.lang)}.vtt${consulta}`,
+    }));
+
     // `{ status, data }` como el resto de la API: un cliente no tiene por qué aprenderse dos
     // formas de leer la misma cosa según la ruta.
     res.json({
       status: 'success',
-      data: {
-        pistas: (data || []).map(fila => ({
-          idioma: fila.idioma,
-          etiqueta: fila.etiqueta,
-          /*
-           * DE DÓNDE SALIÓ, y esto se entrega al cliente a propósito.
-           *
-           * 'transcrito' es lo que se habla, palabra por palabra. 'publico' es un fichero escrito
-           * por una persona y comprobado contra este audio: mejor redactado, pero condensado. No
-           * son la misma promesa y quien lee tiene derecho a saber cuál está leyendo.
-           */
-          origen: fila.origen,
-          url: `/api/v1/subtitles/${encodeURIComponent(req.params.id)}/${fila.idioma}.vtt${consulta}`,
-        })),
-      },
+      data: { pistas: [...propias, ...netmirror] },
     });
   } catch (err) {
     next(err);
   }
 });
 
+/** Convierte SRT a WebVTT: cabecera y `,` -> `.` en timestamps. */
+function srtAVtt(srt: string): string {
+  const cuerpo = srt
+    .replace(/\r\n/g, '\n')
+    .replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
+  return 'WEBVTT\n\n' + cuerpo;
+}
+
 router.get(
   '/api/v1/subtitles/:id/:idioma.vtt',
   async (req: Request, res: Response, next: NextFunction) => {
     try {
+      // Pistas de NetMirror: se identifican con prefijo `nm-` y se sirven via proxy al CDN.
+      // Convertimos SRT -> VTT porque el reproductor solo entiende VTT nativamente.
+      if (req.params.idioma.startsWith('nm-')) {
+        const lang = req.params.idioma.slice(3);
+        const captions = await pistasDeNetmirror(req.params.id, episodioDe(req));
+        const c = captions.find(x => x.lang === lang);
+        if (!c) return res.status(404).json({ error: 'NetMirror ya no ofrece este idioma' });
+        const upstream = await fetch(c.url, { headers: { Referer: 'https://videodownloader.site/', 'User-Agent': 'Mozilla/5.0' } });
+        if (!upstream.ok) return res.status(502).json({ error: `subtitulo netmirror ${upstream.status}` });
+        const srt = await upstream.text();
+        const vtt = /^WEBVTT/.test(srt) ? srt : srtAVtt(srt);
+        res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
+        // Los captions del CDN llevan Policy/Signature con caducidad de dias, no persiste; cache
+        // corto por si el URL rota.
+        res.setHeader('Cache-Control', 'public, max-age=3600');
+        return res.send(vtt);
+      }
+
       const { data, error } = await getSupabaseAdmin()
         .from('subtitulos')
         .select('contenido')
