@@ -5103,11 +5103,12 @@ async function serverDeNetmirror(
     dominioHls = (cache as any)?.dominio_hls ?? null;
   } catch { /* si la tabla no existe aun, seguimos por el camino largo */ }
 
-  const fuente = contexto.tipo === 'movie'
-    ? await netmirrorPelicula(tmdbId).catch(() => null)
-    : await netmirrorEpisodio(tmdbId, contexto.s, contexto.e).catch(() => null);
+  // A partir de aqui `contexto.tipo === 'movie'` es la unica rama posible (el corte para 'tv'
+  // esta arriba), pero se conserva la logica de series en el resto para que reactivarla en el
+  // futuro sea quitar el `return null` sin tocar nada mas.
+  const fuente = await netmirrorPelicula(tmdbId).catch(() => null);
   if (!fuente) return null;
-  const query = contexto.tipo === 'tv' ? `?type=tv&s=${contexto.s}&e=${contexto.e}` : '';
+  const query = '';
   const ruta = `/api/v1/netmirror/stream/${tmdbId}${query}`;
   const calidad: ServerOption['quality'] =
     fuente.meta.resolution === '1080' ? '1080p' :
@@ -5130,7 +5131,7 @@ async function serverDeNetmirror(
   // ficha 10 min atras. Asi el CDN nunca ve una firma caducada.
   const rutaRedirect = ruta + (ruta.includes('?') ? '&' : '?') + 'mode=redirect';
   const server: ServerOption = {
-    id: `nm-${tmdbId}${contexto.tipo === 'tv' ? `-${contexto.s}-${contexto.e}` : ''}`,
+    id: `nm-${tmdbId}`,
     name: 'NetMirror',
     quality: calidad,
     // Marcamos latino: la API devuelve audio original con subs es; nuestro proxy inyecta la pista
