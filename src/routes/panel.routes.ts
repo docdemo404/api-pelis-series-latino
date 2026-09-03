@@ -8,7 +8,9 @@ import { BandwidthService } from '../services/bandwidthService';
 import { externalProxyEnabled } from '../utils/externalProxy';
 import { CatalogService } from '../services/catalogService';
 import { refrescarHostsConCache, ponerHostConCache, hostsConCache } from '../services/hostsConCache';
-import { leerAjuste } from '../utils/ajustesRemotos';
+import { leerAjuste, guardarAjuste } from '../utils/ajustesRemotos';
+import { traducirYNormalizar } from '../utils/idiomas';
+import { getSupabaseAdmin } from '../services/supabaseService';
 import { hostsDelCatalogo } from '../services/catalogService';
 import { medidaDeAparatos, refrescarMedidasDeAparatos } from '../services/medidasDeAparatos';
 
@@ -246,6 +248,80 @@ router.post('/api/v1/panel/invalidate-listings', async (_req: Request, res: Resp
   try {
     await CatalogService.invalidateListings();
     res.json({ status: 'success', message: 'Listings cache purgado' });
+  } catch (err) { next(err); }
+});
+
+/**
+ * TOKEN DE NETMIRROR PARA EL ESCANEO DEL BACKEND.
+ *
+ * El backend en Vercel no puede pasar el `/verify2` de Cloudflare de NetMirror (IP de datacenter,
+ * fingerprints, etc.). El cliente Android sí puede — su TV tiene IP residencial y renueva un
+ * token de sesión cada 24 h con un WebView oculto (ver `NetmirrorSesion.kt`). Este endpoint es
+ * el otro extremo: cuando el cliente renueva, sube el token aquí y `scanNetmirror.ts` puede
+ * usarlo para poblar `netmirror_cache.idiomas_audio` de fichas nuevas sin intervención manual.
+ *
+ * Sube tambien la marca `emitido_at` en el mismo blob — el scan la usa para decidir si el token
+ * sigue vigente o si es tan viejo que ya no vale la pena intentar.
+ */
+router.post('/api/v1/panel/nm-token', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { token, emitido_at } = req.body || {};
+    if (!token || typeof token !== 'string' || token.length < 20) {
+      return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'Se requiere `token` (string > 20 chars).');
+    }
+    const emitido = typeof emitido_at === 'string' && emitido_at ? emitido_at : new Date().toISOString();
+    const ok = await guardarAjuste('nm-token', { token, emitido_at: emitido });
+    if (!ok) return sendErrorResponse(res, 500, 'STORE_FAILED', 'No se pudo guardar el token.');
+    res.json({ status: 'success', message: 'Token NM guardado.', emitido_at: emitido });
+  } catch (err) { next(err); }
+});
+
+/**
+ * IDIOMAS DESCUBIERTOS POR UN CLIENTE PARA UNA FICHA.
+ *
+ * Cuando un TV abre una ficha que aun no tiene `idiomas_audio` en cache, su `NetmirrorSesion`
+ * puede pedir el master con su propio token y descubrir las pistas al vuelo. En vez de que ese
+ * trabajo se pierda al terminar la reproduccion, lo sube aquí: la proxima persona que abra la
+ * misma ficha ya la encuentra poblada y todos los demas usuarios se benefician.
+ *
+ * El cliente envia `{tmdb_id, netflix_id, audios: [{language, name, uri, defaultTrack}]}`. Aqui
+ * se traducen los nombres al español (regla spa Latino/Castellano) y se guarda en la fila
+ * correspondiente de `netmirror_cache`.
+ */
+router.post('/api/v1/panel/nm-idiomas', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { tmdb_id, netflix_id, audios, temporada, episodio } = req.body || {};
+    if (!Number.isInteger(tmdb_id) || tmdb_id <= 0) {
+      return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'Se requiere `tmdb_id` entero positivo.');
+    }
+    if (!Array.isArray(audios) || audios.length === 0) {
+      return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'Se requiere `audios` no vacio.');
+    }
+    const normalizados = traducirYNormalizar(
+      audios.map((a: any) => ({
+        language: String(a?.language || a?.lang || ''),
+        name: String(a?.name || a?.name_es || ''),
+        uri: String(a?.uri || ''),
+      })).filter((a: any) => a.uri),
+    );
+    if (normalizados.length === 0) {
+      return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'Ningun audio con URI valida.');
+    }
+    let dominio_hls: string | null = null;
+    try { dominio_hls = new URL(normalizados[0].uri).hostname; } catch { /* ignore */ }
+    const s = Number.isInteger(temporada) ? temporada : 0;
+    const e = Number.isInteger(episodio) ? episodio : 0;
+    const sb = getSupabaseAdmin();
+    const patch: Record<string, unknown> = {
+      idiomas_audio: normalizados,
+      dominio_hls,
+      comprobado_at: new Date().toISOString(),
+    };
+    if (netflix_id && typeof netflix_id === 'string') patch.netflix_id = netflix_id;
+    const { error } = await sb.from('netmirror_cache').update(patch)
+      .eq('tmdb_id', tmdb_id).eq('temporada', s).eq('episodio', e);
+    if (error) return sendErrorResponse(res, 500, 'STORE_FAILED', error.message);
+    res.json({ status: 'success', message: 'Idiomas guardados.', audios: normalizados.length });
   } catch (err) { next(err); }
 });
 

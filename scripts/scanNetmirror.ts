@@ -3,6 +3,7 @@ import { getSupabaseAdmin } from '../src/services/supabaseService';
 import { pelicula, episodio, buscarNetflixId, masterHls } from '../src/scrapers/netmirror';
 import { traducirYNormalizar } from '../src/utils/idiomas';
 import { TMDB_API_KEY, OTRO_ALFABETO } from '../src/services/tmdbService';
+import { leerAjuste } from '../src/utils/ajustesRemotos';
 
 /**
  * Escaneo del catálogo contra NetMirror.
@@ -44,7 +45,22 @@ const CONCURRENCIA = 3;
 const PAUSA_LOTE_MS = 100;
 const REFRESCAR_TRAS_DIAS = 14;
 
-const NM_TOKEN = process.env.NM_TOKEN_ESCANEO || '';
+// El token de sesion de NetMirror puede venir en env (`NM_TOKEN_ESCANEO`) o del ajuste
+// remoto `nm-token` que el cliente Android sube cada vez que renueva su propia sesion
+// (ver `NetmirrorSesion.kt`). Sin token de ningun sitio, el scan solo puede poblar
+// `netflix_id` — no `idiomas_audio`. Con token vigente puebla todo.
+let NM_TOKEN = process.env.NM_TOKEN_ESCANEO || '';
+async function cargarTokenSiFalta(): Promise<void> {
+  if (NM_TOKEN) return;
+  try {
+    const ajuste = await leerAjuste<{ token: string; emitido_at?: string }>('nm-token');
+    if (ajuste?.token) {
+      const edadH = ajuste.emitido_at ? (Date.now() - Date.parse(ajuste.emitido_at)) / 3_600_000 : 0;
+      NM_TOKEN = ajuste.token;
+      console.log(`  token NM cargado del ajuste remoto (edad ${edadH.toFixed(1)} h)`);
+    }
+  } catch { /* sin token, se sigue sin poblar idiomas */ }
+}
 
 const sb = getSupabaseAdmin();
 
@@ -163,7 +179,8 @@ async function pool<T>(items: T[], concurr: number, fn: (x: T) => Promise<void>)
 }
 
 async function main() {
-  console.log(`Escaneo NetMirror  concurr=${CONCURRENCIA}  refrescar=${refrescar}  soloIdiomas=${soloIdiomas}  soloSinId=${soloSinId}  tipo=${soloTipo || 'todos'}  token=${NM_TOKEN ? 'sí' : 'no'}`);
+  await cargarTokenSiFalta();
+  console.log(`Escaneo NetMirror  concurr=${CONCURRENCIA}  refrescar=${refrescar}  soloIdiomas=${soloIdiomas}  soloSinId=${soloSinId}  sinAudios=${sinAudios}  tipo=${soloTipo || 'todos'}  token=${NM_TOKEN ? 'sí' : 'no'}`);
 
   const tipos: Array<'movie' | 'tvseries'> = soloTipo ? [soloTipo] : ['movie', 'tvseries'];
   const stats = { procesadas: 0, pelisOk: 0, pelisNo: 0, seriesOk: 0, seriesNo: 0, saltadas: 0, netflix: 0, conIdiomas: 0 };
