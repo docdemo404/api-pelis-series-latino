@@ -5168,10 +5168,16 @@ async function serverDeNetmirror(
     // Sin URIs de audio poblados en cache, el cliente no puede montar nada — asi que solo se
     // envia `netmirror_hls` cuando el escaneo ya midio el master con NM_TOKEN_ESCANEO y guardo
     // las URIs. Ver `scanNetmirror.ts` y la nota del descubrimiento del video placeholder.
-    netmirror_hls: (netflixIdCache && idiomasCache && idiomasCache.length > 0) ? {
+    // Se envia SIEMPRE que haya netflix_id — aunque no haya idiomas todavia. Con idiomas
+    // vacios el cliente cae al mp4 mono-audio como antes, PERO ademas dispara un
+    // descubrimiento oportunista en background: baja el master con su propio token de
+    // sesion, extrae audios, y los sube via POST /api/v1/panel/nm-idiomas para que la
+    // proxima persona que abra la ficha ya la encuentre poblada. Ver
+    // NetmirrorSesion.descubrirYSubirIdiomas() en el cliente Android.
+    netmirror_hls: netflixIdCache ? {
       netflix_id: netflixIdCache,
       dominio_hls: dominioHls || 'net52.cc',
-      idiomas: idiomasCache,
+      idiomas: idiomasCache || [],
     } : undefined,
   } as any;
   return { server, fuente };
