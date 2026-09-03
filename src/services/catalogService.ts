@@ -5064,6 +5064,21 @@ async function serverDeNetmirror(
   tmdbId: number,
   contexto: { tipo: 'movie' } | { tipo: 'tv'; s: number; e: number },
 ): Promise<{ server: ServerOption; fuente: FuenteNetmirror } | null> {
+  // NETMIRROR PARA SERIES ESTA ROTO EN ORIGEN, y no se puede arreglar desde aqui.
+  //
+  // `/api/embed-tmdb/{tmdbSerie}?type=tv&s=X&e=Y` devuelve el MISMO fichero mp4 para todos
+  // los capitulos de la serie, ignorando `s` y `e`. Comprobado en 2026-09-03:
+  //
+  //   Breaking Bad tmdb 1396   S1E1, S1E2, S2E1, S3E5, S5E16
+  //                         → todos: 500b601be87cc510e4eacb91e369d4a2.mp4
+  //   House of the Dragon 94997 S5E1, S5E2 → 8912630729ee6cfc054a0231673958af.mp4
+  //
+  // O sea que anunciar NetMirror como server de una serie engaña al espectador: elige S5E16
+  // y se le reproduce el piloto. Peor que no ofrecerlo. Cuando NetMirror arregle la API para
+  // `type=tv` o encontremos otra ruta (p.ej. netflix_id por capitulo → HLS master), se
+  // quita este corte.
+  if (contexto.tipo === 'tv') return null;
+
   // Antes de llamar a la API: mirar la cache de disponibilidad. Si sabemos que NetMirror NO
   // tiene esta obra (barrido por `scripts/scanNetmirror.ts`), se salta la peticion. Esto evita
   // el rate-limit incidental que dispara `noSource` sobre obras que si estan cuando llegan
