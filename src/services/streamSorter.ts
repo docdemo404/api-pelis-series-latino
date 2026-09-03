@@ -352,16 +352,22 @@ const VIGENCIA_PERMANENTE_MS = 30 * 24 * 60 * 60 * 1000;
  * catalogo por caidas del comprobador). El resto: sin caducidad temporal.
  */
 export function verificadoVigente(s: ServerOption): boolean {
-  if (!s?.verified_at) return false;
-  const t = Date.parse(s.verified_at);
-  if (!Number.isFinite(t)) return false;
+  if (!s) return false;
 
-  // Proxy interno: URL de reproduccion la reacuña la API en cada Play; no hay firma que caduque.
-  // Solo el comprobador puede retirar este sello (marcandolo `offline` o borrando `direct_stream`).
+  // Proxy interno: URL de reproduccion la reacuña la API en cada Play; no hay firma que caduque
+  // ni ventana temporal que perseguir. La retirada la da el comprobador (`status: offline` o
+  // borrando `direct_stream`) o el aviso de la app en `/api/v1/report`. Vale aunque nunca se
+  // haya sellado: sin `verified_at` el crawl lo dejo pendiente de primera prueba, no lo condeno.
   const url = s.direct_stream || '';
   const esProxyInterno = url.startsWith('/api/v1/stream/direct/');
   if (esProxyInterno) return true;
 
+  // URL firmada directa o `public`: si NUNCA se sello, el catalogo no lo publica (se mantiene
+  // la garantia historica de "no anunciamos lo que nadie ha demostrado abrir"). En cuanto el
+  // comprobador le da su primera vuelta, entra con ventana amplia — 30 dias.
+  if (!s.verified_at) return false;
+  const t = Date.parse(s.verified_at);
+  if (!Number.isFinite(t)) return false;
   const ventana = s.direct_mode === 'public' ? VIGENCIA_PERMANENTE_MS : VERIFICADO_VIGENTE_MS;
   return Date.now() - t < ventana;
 }
