@@ -3,6 +3,7 @@ import { SourceManager, SourceConfig } from './sourceManager';
 import { bestMode } from '../scrapers/hostPolicy';
 import { directEndpointUrl, isPubliclyShareable, esFicheroDirecto, ficheroPermanenteDentroDelEmbed } from '../scrapers/directStream';
 import { cacheUrlFor, ficheroDentroDeNuestraCache } from '../utils/externalProxy';
+import { medidaDeAparatos } from './medidasDeAparatos';
 
 /**
  * ¿Esta URL se puede entregar TAL CUAL, sin pasar por esta API?
@@ -18,6 +19,27 @@ import { cacheUrlFor, ficheroDentroDeNuestraCache } from '../utils/externalProxy
  * `isPubliclyShareable` ya exige las dos condiciones —ni marca efímera (`hasVolatileToken`) ni
  * host que ate por IP—, así que no hay que repetir ninguna aquí.
  */
+/**
+ * EL CAUDAL DE ESTE HOST, PREFIRIENDO LO QUE MIDEN LOS APARATOS.
+ *
+ * `servers.kbps` lo escribe el crawl descargando 64 KB desde una función de Vercel: una vez, desde
+ * un centro de datos. Es el mejor dato que había y **no describe al host** — este mismo fichero ya
+ * lo dice unas líneas más abajo: «archive.org daba 1,33 MB/s por la mañana y 35 KB/s por la
+ * tarde». Y se comprobó: el catálogo declara 82 kbps de un fichero que un aparato se bajó a
+ * 2,0 MB/s.
+ *
+ * La mediana de lo que dio en reproducciones reales sí lo describe, porque son muchas medidas
+ * desde muchas redes. Cuando existe, manda; cuando no —hosts nuevos, o con menos de cinco
+ * reproducciones— se sigue con el sondeo de siempre, que es mejor que nada.
+ *
+ * Ver `medidasDeAparatos`.
+ */
+function kbpsDeEsteHost(s: ServerOption): number {
+  const deAparatos = medidaDeAparatos((s as any).direct_host)?.kbps;
+  if (deAparatos && deAparatos > 0) return deAparatos;
+  return Number((s as any).kbps) || 0;
+}
+
 function seEntregaTalCual(url: string | undefined | null): boolean {
   return Boolean(url) && /^https?:\/\//i.test(url as string) && isPubliclyShareable(url as string);
 }
@@ -225,7 +247,15 @@ const MARCADOR_TIPO = /\s*\[(?:v[íi]deo\s+directo|embed)\]\s*$/i;
  * cada vez que alguien abre una ficha, `revisarServidores` comprueba la cabeza de la lista y la
  * vuelve a sellar, así que lo que más se ve es lo que más fresco está.
  */
-export const VERIFICADO_VIGENTE_MS = 6 * 60 * 60 * 1000;
+// 30 dias. Antes eran 6 h, calculadas para perseguir la caducidad de una firma. Pero ahora
+// casi todos los servers son o `direct_mode: public` o proxy interno (`/api/v1/stream/direct/`)
+// — ver `verificadoVigente` — y para esos la ventana no aplica; la retirada la da el
+// comprobador. Solo queda con reloj el caso residual de URL firmada directa que se le pasa
+// al reproductor. Para esos, 30 dias sobra: si el comprobador esta sano no llegan a caducar
+// (se re-sellan mucho antes), y si el comprobador se cae el catalogo aguanta un mes antes
+// de encogerse — margen mas que suficiente para arreglarlo. La otra proteccion —el aviso
+// de la app en /api/v1/report— sigue retirando sellos en el momento cuando algo falla.
+export const VERIFICADO_VIGENTE_MS = 30 * 24 * 60 * 60 * 1000;
 
 /**
  * Lo que dura el sello de un título servido por un enlace PERMANENTE (`direct_mode: 'public'`).
@@ -290,17 +320,48 @@ function costeDeEntrega(s: ServerOption): number {
  * semana después; con doce horas, el catálogo se vacía solo en medio día en vez de seguir
  * anunciando lo que ya nadie ha comprobado. Prefiere encogerse a mentir.
  */
-const VIGENCIA_PERMANENTE_MS = 12 * 60 * 60 * 1000;
+// 30 dias, alineado con `VERIFICADO_VIGENTE_MS`. Eran 12 h por la razon del comentario de
+// arriba: "prefiere encogerse a mentir". Pero encogerse cuando el comprobador esta bien
+// funcionando NO paso — paso cuando el compilador de types tiro la corrida entera. La
+// verdadera senal de que algo se cayo la da el propio comprobador (marcar `offline` +
+// borrar `direct_stream`), no el reloj.
+const VIGENCIA_PERMANENTE_MS = 30 * 24 * 60 * 60 * 1000;
 
 /**
  * Se exporta porque `revisarServidores` necesita saber a QUIÉN le falta la prueba antes de gastar
  * una sonda en conseguirla. Copiar la comparación allí era volver a tener dos criterios sobre lo
  * mismo, y de eso este proyecto ya se ha llevado cinco golpes.
+ *
+ * ─── QUE EL SELLO NO SE PIERDA POR RELOJ, SOLO PORQUE EL COMPROBADOR DIGA QUE NO ──────────
+ *
+ * El diseño de arriba tenia una debilidad estructural: cuando el comprobador falla el catalogo
+ * se vacia solo. Ocurrio en 2026-09-03 con `verificar.yml` roto 5 corridas seguidas → 35.855
+ * caps con sello caducado, 1.864 de 1.987 series sin caps anunciables.
+ *
+ * La ventana temporal solo protege de UN caso: URL firmada directa (`?e=...`, `?expires=...`)
+ * que se le entrega tal cual al reproductor, y que caduca sola aunque nadie la retire. Para
+ * TODO lo demas la unica retirada legitima la da el comprobador cuando ve que ya no funciona:
+ *
+ *   · `direct_stream` que empieza por `/api/v1/stream/direct/` → PROXY INTERNO que re-extrae
+ *     del embed en CADA request. La URL firmada del backend se genera fresh cada vez, no
+ *     caduca. Aplicarle ventana era retirar sellos de urls que seguian sirviendo perfectamente.
+ *   · `direct_mode: 'public'` → URL sin firma (archive.org, rumble.cloud, gumlet). No caduca.
+ *   · `direct_stream` directo (https://…) con firma dentro → si caduca sola. Ventana necesaria.
+ *
+ * Ese ultimo caso queda con `VERIFICADO_VIGENTE_MS` (que se subio a 30 dias para no vaciar el
+ * catalogo por caidas del comprobador). El resto: sin caducidad temporal.
  */
 export function verificadoVigente(s: ServerOption): boolean {
   if (!s?.verified_at) return false;
   const t = Date.parse(s.verified_at);
   if (!Number.isFinite(t)) return false;
+
+  // Proxy interno: URL de reproduccion la reacuña la API en cada Play; no hay firma que caduque.
+  // Solo el comprobador puede retirar este sello (marcandolo `offline` o borrando `direct_stream`).
+  const url = s.direct_stream || '';
+  const esProxyInterno = url.startsWith('/api/v1/stream/direct/');
+  if (esProxyInterno) return true;
+
   const ventana = s.direct_mode === 'public' ? VIGENCIA_PERMANENTE_MS : VERIFICADO_VIGENTE_MS;
   return Date.now() - t < ventana;
 }
@@ -541,7 +602,7 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
      * dos cifras — sin duración no hay `kbps_necesarios` y aquí no se inventa nada.
      */
     const alcanza = (s: ServerOption): boolean => {
-      const da = Number((s as any).kbps) || 0;
+      const da = kbpsDeEsteHost(s);
       const pide = Number((s as any).kbps_necesarios) || 0;
       if (da <= 0 || pide <= 0) return true;
       return da >= pide * 1.2;
@@ -564,8 +625,8 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
      * mediciones hechas en momentos distintos no significa nada — sin margen, el orden bailaría
      * en cada crawl por ruido.
      */
-    const kbpsA = Number((a as any).kbps) || 0;
-    const kbpsB = Number((b as any).kbps) || 0;
+    const kbpsA = kbpsDeEsteHost(a);
+    const kbpsB = kbpsDeEsteHost(b);
     if (kbpsA > 0 && kbpsB > 0) {
       const mejor = Math.max(kbpsA, kbpsB);
       const peor = Math.min(kbpsA, kbpsB);
@@ -720,6 +781,21 @@ export function paraElCliente<T extends ServerOption>(servers: T[] | undefined |
       // `__riesgo` es una anotación interna para ordenar (ver `sortServersBySourcePriority`);
       // fuera de aquí no significa nada y no tiene por qué viajar al reproductor.
       const { embed_url, __riesgo, ...resto } = s as ServerOption & { __riesgo?: number };
+
+      /*
+       * Y SE PUBLICA LO QUE HAN MEDIDO LOS APARATOS, cuando lo hay.
+       *
+       * La app lo usa como punto de partida para su propia escalera de calidad: saber de entrada
+       * que un host suele dar 16 000 kbps y otro 400 le ahorra descubrirlo atascándose. Sigue sin
+       * ser un veredicto —la red de quien mira ahora manda sobre cualquier mediana— pero es un
+       * prior mucho mejor que el sondeo desde Vercel.
+       */
+      const medido = medidaDeAparatos((s as any).direct_host);
+      if (medido) {
+        (resto as Record<string, unknown>).kbps_dispositivos = medido.kbps;
+        (resto as Record<string, unknown>).muestras_dispositivos = medido.muestras;
+      }
+
       return resto as T;
     });
 }
