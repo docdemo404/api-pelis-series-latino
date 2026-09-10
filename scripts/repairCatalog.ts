@@ -2565,6 +2565,32 @@ async function hideOrphanRows(apply: boolean): Promise<void> {
  */
 async function hideRowsWithoutDirect(apply: boolean): Promise<void> {
   console.log(`🚫 Buscando fichas cuyos servidores son todos embed${apply ? '' : ' (dry-run)'}...`);
+  /**
+   * ESTA ES LA ÚNICA DE LAS TRES QUE SIGUE ABRIENDO EL CATÁLOGO, y hay motivo.
+   *
+   * Las otras dos pasadas de `verificar.yml` preguntaban por servidores, y eso Postgres lo sabe
+   * contestar. Esta aplica `veredictoDisponibilidad`, que es LA regla que decide qué se publica
+   * en la app, y esa regla no se puede reescribir en SQL: duplicar un criterio es apostar a que
+   * nadie lo cambiará nunca, y este proyecto ya pagó esa apuesta —lo cuenta `hayDirecto` aquí
+   * abajo, con Breaking Bad visible y sus 62 capítulos sin poder anunciarse.
+   *
+   * Se probaron dos atajos y los dos se cayeron, medidos contra la base:
+   *
+   *   · Acotar candidatas por SQL. La condición NECESARIA para que un servidor sea publicable la
+   *     cumplen 10.368 de las 10.375 fichas, así que habría que abrirlas casi todas igual.
+   *
+   *   · Mirar solo lo movido desde la vuelta anterior (`updated_at` + los sellos que caducan en
+   *     la ventana). La idea es correcta y recortaría a 5,6 MB, PERO no se sostiene hoy: no hay
+   *     ningún disparador en `media_items` y varios escritores cambian `servers` sin tocar
+   *     `updated_at` —`purgeDeadServers` y `reconcilePolicyDirects`, entre otros—. El filtro
+   *     dejaría fichas fuera sin decirlo, que es la peor forma de fallar que tiene este archivo.
+   *     Para habilitarlo hace falta antes una columna que se mueva sola cuando cambien los
+   *     servidores; mientras no exista, se abre el catálogo.
+   *
+   * Lo que sí se hizo es bajarle el ritmo: era cada dos horas y ahora va una vez al día (ver
+   * `verificar.yml`). Es una red contra la deriva, no una comprobación en caliente — las otras
+   * dos pasadas ya escriben `has_streams` cuando cambian algo.
+   */
   const rows = await fetchAllRows(['servers', 'seasons', 'has_streams']);
 
   /** Todo lo reproducible de la ficha: sus servidores y los de cada episodio. */

@@ -38,6 +38,18 @@ on:
     # concurrencia impide que dos se pisen — si una tarda más de dos horas, la siguiente espera
     # en vez de duplicar las peticiones a los hosts.
     - cron: '0 */2 * * *'
+    # ── Y UNA VUELTA DIARIA APARTE, SOLO PARA `--sin-directo` ────────────────────────────────
+    #
+    # Ese paso es el único de los tres que necesita abrir fichas: aplica
+    # `veredictoDisponibilidad`, la regla que decide qué se publica, y esa regla no se puede
+    # preguntar en SQL sin duplicarla. Corriéndolo cada dos horas se bajaba el catálogo doce
+    # veces al día para reconciliar una columna que los otros dos pasos ya escriben cuando
+    # cambian algo. Es una red de seguridad contra la deriva, no una comprobación en caliente:
+    # con una vez al día sobra.
+    #
+    # A las 5:30 porque no coincide con ninguna hora par (el cron de arriba), ni con el crawl
+    # completo de las 04:00, ni con `permanentes.yml`, que va a y cuarenta.
+    - cron: '30 5 * * *'
   workflow_dispatch:
 
 concurrency:
@@ -96,7 +108,8 @@ jobs:
       # Y que el catálogo diga lo que se acaba de demostrar. Va en los dos sentidos: esconde lo que
       # se quedó sin nada y devuelve lo que ha vuelto a reproducir.
       - name: Ajustar qué se anuncia
-        if: always()
+        # Solo en la vuelta diaria (o a mano). Ver la nota del segundo `cron`.
+        if: always() && (github.event.schedule == '30 5 * * *' || github.event_name == 'workflow_dispatch')
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
