@@ -2867,29 +2867,69 @@ async function purgeBorrowedEpisodeServers(apply: boolean): Promise<void> {
  */
 async function verifyPlayableServers(apply: boolean, limitArg?: number, soloHost?: string): Promise<void> {
   console.log(`🎬 Comprobando que lo publicado entrega vídeo${apply ? '' : ' (dry-run)'}...`);
-  const rows = await fetchAllRows(['servers', 'seasons', 'has_streams']);
   const hostDe = (u: string) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return '(ilegible)'; } };
 
-  /** Todos los servidores de una ficha: los suyos y los de cada episodio. */
-  const servidoresDe = (r: any): any[] => [
-    ...(r.servers || []),
-    ...(r.seasons || []).flatMap((t: any) => (t.episodes || []).flatMap((e: any) => e.servers || [])),
-  ];
-
   /**
-   * Un mismo embed aparece en muchas fichas y en muchos episodios: se comprueba UNA vez. Se
-   * guarda además su sello MÁS FRESCO, que es lo que decide si hoy se puede publicar.
+   * A QUIÉN PREGUNTAR SE LO PREGUNTAMOS A POSTGRES, y esto era el mayor gasto del proyecto.
+   *
+   * Esto empezaba con `fetchAllRows(['servers','seasons','has_streams'])`: las 10.375 fichas con
+   * todos sus servidores y todos sus capítulos dentro, 92 MB, para acabar con una lista de urls
+   * ordenada por sello. Y lo hacía tres veces por vuelta —`--verificar`, `--entrega` y
+   * `--sin-directo`— doce veces al día. Unos 100 GB al mes contra un plan de 5 GB. El proyecto
+   * acabó restringido por `exceed_egress_quota`, la API REST contestando 402 a todo, y la app
+   * enseñando un catálogo vacío sin dar un solo error.
+   *
+   * La vista `embeds_publicados` (migración 018) da un embed por fila con su sello más fresco y
+   * las fichas que lo llevan. Medido: los 400 más atrasados son 41 KB, y un pool de 12.000 son
+   * 1,2 MB. Antes: 92.400 KB para lo mismo.
+   *
+   * Y sale ya ordenado de Postgres, que es lo que este barrido necesitaba —lo más atrasado
+   * delante, lo nunca comprobado el primero de todo—. Antes ese orden se calculaba en memoria
+   * DESPUÉS de bajarse el catálogo.
    */
+  const lote = Number.isFinite(limitArg as number) && (limitArg as number) > 0 ? (limitArg as number) : 0;
+  /**
+   * Cuántos candidatos se traen. No hacen falta los 79.141: la corrida se muere por tiempo mucho
+   * antes. Con 32 en vuelo y ~24 s cada comprobación, en las dos horas largas que da el runner
+   * caben unos 10.000, así que 12.000 es holgura de sobra y sigue costando 1,2 MB.
+   *
+   * Con `--limit` se pide un poco más de lo que se va a usar, no lo justo: el reparto por turnos
+   * entre hosts de más abajo necesita variedad para poder repartir.
+   */
+  const POOL = 12000;
+  const pool = lote > 0 ? Math.min(POOL, lote * 4) : POOL;
+
+  let consulta = db
+    .from('embeds_publicados')
+    .select('embed_url,sello,fichas')
+    // Lo más atrasado delante y lo que no se ha mirado nunca el primero de todos.
+    .order('sello', { ascending: true, nullsFirst: true })
+    .limit(pool);
+  /**
+   * `--host=` se acota TAMBIÉN en la consulta, no solo al recibir. Filtrar después del `limit`
+   * sería pedir los 12.000 más atrasados del catálogo entero y quedarse con los tres que son de
+   * ese host. El `like` recorta de más (mira la url entera, no solo el dominio); el filtro exacto
+   * de siempre sigue aplicándose debajo, así que el resultado es el mismo.
+   */
+  if (soloHost) consulta = consulta.like('embed_url', `%${soloHost}%`);
+
+  const { data: candidatos, error: errEmbeds } = await consulta;
+  if (errEmbeds) {
+    console.error(`   ✗ no se pudo leer embeds_publicados: ${errEmbeds.message}`);
+    console.error('     ¿está aplicada la migración 018? Sin ella este barrido no puede correr.');
+    return;
+  }
+
+  /** Sello más fresco de cada embed, y en qué fichas aparece. */
   const pendientes = new Map<string, number>();
-  for (const row of rows) {
-    for (const s of servidoresDe(row)) {
-      if (!s?.embed_url || !s.direct_stream) continue;
-      if (soloHost && !hostDe(s.embed_url).includes(soloHost)) continue;
-      const sello = s.verified_at ? Date.parse(s.verified_at) : 0;
-      const previo = pendientes.get(s.embed_url);
-      const valido = Number.isFinite(sello) ? sello : 0;
-      if (previo === undefined || valido > previo) pendientes.set(s.embed_url, valido);
-    }
+  const fichasDe = new Map<string, string[]>();
+  for (const c of (candidatos || []) as any[]) {
+    const url = String(c.embed_url || '');
+    if (!url) continue;
+    if (soloHost && !hostDe(url).includes(soloHost)) continue;
+    const ms = c.sello ? Date.parse(c.sello) : 0;
+    pendientes.set(url, Number.isFinite(ms) ? ms : 0);
+    fichasDe.set(url, Array.isArray(c.fichas) ? c.fichas.map(String) : []);
   }
   console.log(`   ${pendientes.size} embeds distintos publicados como vídeo directo`);
 
@@ -2927,7 +2967,7 @@ async function verifyPlayableServers(apply: boolean, limitArg?: number, soloHost
     for (const cola of porHostCola.values()) if (fila < cola.length) todos.push(cola[fila]);
   }
 
-  const lote = Number.isFinite(limitArg as number) ? (limitArg as number) : 0;
+  // `lote` ya se calculó arriba, junto al tamaño del pool que se le pide a Postgres.
   let lista = todos;
   if (lote > 0 && lote < todos.length) {
     /**
@@ -2958,8 +2998,51 @@ async function verifyPlayableServers(apply: boolean, limitArg?: number, soloHost
   const veredictos = new Map<string, 'vivo' | 'muerto'>();
   let vivos = 0, muertos = 0, dudosos = 0;
 
+  /**
+   * Fichas ya traídas, por id. Se reutilizan entre tandas: una misma ficha suele llevar varios
+   * embeds, y sin esto se pediría otra vez con cada veredicto nuevo.
+   */
+  const fichasEnMano = new Map<string, any>();
+  /** Embeds cuyo veredicto ya provocó una traída de fichas. */
+  const yaTraidos = new Set<string>();
+
+  /**
+   * SE REESCRIBEN SOLO LAS FICHAS QUE LLEVAN ALGO DECIDIDO, no las 10.375.
+   *
+   * Esto recorría `rows` entero en cada pasada —y se llama cada 200 comprobaciones— porque tenía
+   * el catálogo en memoria de todas formas. Ya no lo tiene, y tampoco hace falta: `fichasDe` dice
+   * qué fichas lleva cada embed, así que se piden esas y nada más. Medido: los 400 embeds más
+   * atrasados viven en 149 fichas.
+   */
   async function escribirLoDecidido(): Promise<void> {
-    for (const row of rows) {
+    const recienDecididos = [...veredictos.keys()].filter(u => !yaTraidos.has(u));
+    if (recienDecididos.length === 0) return;
+
+    const idsQueTocar = new Set<string>();
+    for (const url of recienDecididos) {
+      yaTraidos.add(url);
+      for (const id of fichasDe.get(url) || []) idsQueTocar.add(id);
+    }
+
+    // Solo las que no estén ya en mano, y en tandas: `in` viaja dentro de la url.
+    const porTraer = [...idsQueTocar].filter(id => !fichasEnMano.has(id));
+    for (let i = 0; i < porTraer.length; i += 100) {
+      const { data, error } = await db
+        .from('media_items')
+        // `tmdb_id` va dentro porque `marcarTocada` lo necesita: sin él, `cacheKeysFor` genera
+        // menos claves y la ficha se queda en caché con los servidores viejos después de retirarlos.
+        .select('id,tmdb_id,type,title,servers,seasons,has_streams')
+        .in('id', porTraer.slice(i, i + 100));
+      if (error) { console.warn(`   ⚠ no se pudieron traer fichas: ${error.message}`); return; }
+      for (const f of (data || []) as any[]) fichasEnMano.set(String(f.id), f);
+    }
+
+    /**
+     * Se repasan TODAS las fichas en mano, no solo las recién traídas. Una ficha que ya estaba
+     * aquí puede llevar además un embed que se acaba de decidir en esta tanda, y si no se repasa
+     * ese veredicto no llegaría a escribirse nunca.
+     */
+    for (const row of fichasEnMano.values()) {
       let cambio = false;
       const sello = new Date().toISOString();
 
