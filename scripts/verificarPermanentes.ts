@@ -108,8 +108,14 @@ function meToca(id: string): boolean {
   return Math.abs(h) % deCuantas === parte;
 }
 
-/** Filas por página. Ni tan pocas que la lectura domine, ni tantas que la memoria importe. */
+/** Filas por página al pedir la ficha entera. Ni tan pocas que la lectura domine, ni tantas que la memoria importe. */
 const PAGINA = 500;
+
+/**
+ * Filas por página en la pasada de ids. Va mucho más alta a propósito: un id son unas decenas de
+ * bytes, así que barrer la tabla entera pidiendo solo eso cuesta menos de medio mega.
+ */
+const PAGINA_DE_IDS = 2000;
 
 /** Con menos de esto por delante no se empieza otra url: mejor terminar de escribir lo aprendido. */
 const MARGEN_PARA_ESCRIBIR_MS = 30_000;
@@ -477,21 +483,28 @@ async function tieneLibro(): Promise<boolean> {
 
   /** Va llenando la cola mientras los obreros la vacían. */
   const leer = (async () => {
-    let desde = 0;
-    for (;;) {
-      if (seAcaba()) break;
-      const { data, error } = await db
-        .from('media_items')
-        .select(`id,title,type,servers,seasons,has_streams${hayLibro ? ',manual_servers' : ''}`)
-        // Lo más viejo primero: cada corrida ataca lo que está más cerca de caducar.
-        .order('streams_checked_at', { ascending: true, nullsFirst: true })
-        .range(desde, desde + PAGINA - 1);
-      if (error) { console.error('   ✗ no se pudo leer:', error.message); break; }
-      if (!data?.length) break;
+    /**
+     * DOS PASADAS, Y EL MOTIVO ES LA FACTURA DE SUPABASE.
+     *
+     * Esto corre en OCHO runners a la vez (ver `permanentes.yml`) y cada uno se ocupa de una
+     * octava parte de las fichas. Pero el reparto lo decide `meToca`, que es JavaScript: la
+     * consulta no se entera. Así que cada runner se descargaba la tabla ENTERA —con `servers` y
+     * `seasons` dentro, que son las columnas gordas— y tiraba siete de cada ocho filas nada más
+     * leerlas.
+     *
+     * Medido en la base: `servers` + `seasons` pesan 89 MB entre todas las fichas, unos 9 KB cada
+     * una. Ocho runners por 89 MB son ~712 MB por corrida, y esto corre cada 20 minutos. El
+     * proyecto acabó restringido por `exceed_egress_quota`, la API REST empezó a contestar 402 a
+     * todo, y como los listados se tragan el error en silencio, la app enseñaba el catálogo vacío.
+     *
+     * El arreglo es preguntar en dos veces: primero los ids, que no pesan nada, y ya sabiendo
+     * cuáles son los míos, las columnas gordas SOLO de esos. Baja de 89 MB a unos 12 MB por
+     * runner sin cambiar en nada qué ficha le toca a quién.
+     */
 
-      for (const fila of data as any[]) {
-        if (!meToca(String(fila.id))) continue;
-
+    /** El trabajo de siempre sobre una hornada de filas ya completas y ya filtradas. */
+    const procesar = async (filas: any[]) => {
+      for (const fila of filas) {
         /**
          * ANTES DE NADA, QUE LA FILA TENGA LO SUYO. Esta pasada es la red que cubre lo que la API
          * no ve: la restauración desde el libro vive en la lectura de una ficha, y una ficha que
@@ -533,13 +546,118 @@ async function tieneLibro(): Promise<boolean> {
         pendientes.set(fila.id, suyas.length);
         for (const s of suyas) cola.push({ fila, sv: s.sv, donde: s.donde });
       }
+    };
 
-      desde += PAGINA;
-      if (data.length < PAGINA) break;
+    /** Trae las columnas gordas de un puñado de ids que ya se sabe que son míos. */
+    const traerYProcesar = async (ids: string[]): Promise<boolean> => {
+      const { data, error } = await db
+        .from('media_items')
+        .select(`id,title,type,servers,seasons,has_streams${hayLibro ? ',manual_servers' : ''}`)
+        .in('id', ids);
+      if (error) { console.error('   ✗ no se pudo leer:', error.message); return false; }
+      await procesar((data || []) as any[]);
+      return true;
+    };
+
+    /**
+     * QUÉ FICHAS SE PIDEN, Y POR QUÉ NO TODAS.
+     *
+     * De las 10.375 fichas del catálogo solo 1.562 tienen alguna url permanente que revisar. Las
+     * otras ocho mil y pico no le dan ni un minuto de trabajo a este barrido, y aun así se
+     * descargaban enteras. La regla de `permanentesDe` es `direct_mode === 'public'`, y eso
+     * Postgres sí sabe mirarlo: `cs` es contención de jsonb, que compara estructura y entra sola
+     * en lo anidado, así que vale igual para la url de una película que para la de un capítulo.
+     *
+     * COMPROBADO ANTES DE FIARSE. Se recorrieron las 10.375 filas en JavaScript con la regla de
+     * verdad y se comparó con lo que saca el filtro: las mismas 1.562, cero escapadas. Que sean
+     * cero es lo único que importa aquí, porque una ficha que este barrido no mire es un vídeo
+     * caído que se sigue anunciando.
+     *
+     * Van en DOS consultas y no en un `.or(...)` porque el valor lleva comas dentro, y la coma es
+     * justo lo que separa condiciones en un `.or` de PostgREST. Dos consultas y se juntan aquí.
+     */
+    const CON_URL_EN_LA_FICHA = '[{"direct_mode":"public"}]';
+    const CON_URL_EN_UN_CAPITULO = '[{"episodes":[{"servers":[{"direct_mode":"public"}]}]}]';
+
+    type Candidata = { id: string; visto: string | null };
+
+    /** Nulos primero y luego lo más viejo. Se rehace aquí porque viene de dos consultas. */
+    const masViejaPrimero = (a: Candidata, b: Candidata) => {
+      if (a.visto === b.visto) return a.id < b.id ? -1 : 1;
+      if (!a.visto) return -1;
+      if (!b.visto) return 1;
+      return a.visto < b.visto ? -1 : 1;
+    };
+
+    /** Barre una columna entera pidiendo solo id y fecha. Devuelve null si la consulta falla. */
+    const idsPorColumna = async (columna: 'servers' | 'seasons', forma?: string): Promise<Candidata[] | null> => {
+      const juntados: Candidata[] = [];
+      for (let desde = 0; ; desde += PAGINA_DE_IDS) {
+        if (seAcaba()) break;
+        let q = db.from('media_items').select('id,streams_checked_at');
+        if (forma) q = q.contains(columna, forma);
+        const { data, error } = await q
+          // Lo más viejo primero: cada corrida ataca lo que está más cerca de caducar.
+          //
+          // El desempate por `id` NO es adorno. `streams_checked_at` se repite mucho —una corrida
+          // sella cientos de fichas casi a la vez— y paginar por rangos sobre una columna con
+          // empates se salta filas y repite otras, sin avisar.
+          .order('streams_checked_at', { ascending: true, nullsFirst: true })
+          .order('id', { ascending: true })
+          .range(desde, desde + PAGINA_DE_IDS - 1);
+        if (error) { console.error(`   ✗ no se pudieron leer los ids (${columna}):`, error.message); return null; }
+        if (!data?.length) break;
+        for (const f of data as any[]) juntados.push({ id: String(f.id), visto: f.streams_checked_at ?? null });
+        if (data.length < PAGINA_DE_IDS) break;
+      }
+      return juntados;
+    };
+
+    const [enLaFicha, enCapitulos] = await Promise.all([
+      idsPorColumna('servers', CON_URL_EN_LA_FICHA),
+      idsPorColumna('seasons', CON_URL_EN_UN_CAPITULO),
+    ]);
+
+    let candidatas: Candidata[] | null = null;
+    if (enLaFicha && enCapitulos) {
+      // Una serie puede salir en las dos listas; se queda una sola vez.
+      const porId = new Map<string, Candidata>();
+      for (const f of [...enLaFicha, ...enCapitulos]) porId.set(f.id, f);
+      candidatas = [...porId.values()].sort(masViejaPrimero);
+    }
+
+    /**
+     * RED DE SEGURIDAD, Y NO ES PARANOIA.
+     *
+     * El filtro se probó contra la base, pero no contra PostgREST —el proyecto estaba restringido
+     * cuando se escribió esto—, así que queda un hueco: que la forma jsonb no sobreviva al viaje
+     * por la url. Y el modo en que fallaría es el peor de todos, porque no da error: devuelve cero
+     * fichas, el barrido no mira nada, y todo parece haber ido bien.
+     *
+     * Así que cero se trata como sospecha, no como respuesta. Si el filtro falla o sale vacío se
+     * repite el barrido SIN filtro, que es lo que se hacía antes: cuesta más, pero mira todo.
+     */
+    if (!candidatas || candidatas.length === 0) {
+      console.warn('   ⚠ el filtro de urls permanentes no devolvió nada; se barre el catálogo entero');
+      candidatas = (await idsPorColumna('servers')) || [];
+    } else {
+      console.log(`   ${candidatas.length} ficha(s) con url permanente en el catálogo`);
+    }
+
+    /** Ids de esta parte que todavía no se han pedido enteros. */
+    const mios = candidatas.filter(f => meToca(f.id)).map(f => f.id);
+    console.log(`   ${mios.length} de ellas le tocan a esta parte`);
+
+    // Se piden de PAGINA en PAGINA: ni una lista de ids interminable en la url, ni una hornada de
+    // filas gordas más grande de lo que ya se traía antes.
+    while (mios.length) {
+      if (seAcaba()) break;
+      if (!await traerYProcesar(mios.splice(0, PAGINA))) break;
       if (topeFilas && filasEncoladas >= topeFilas) break;
       // No dejar que la cola crezca sin freno: si los obreros van por detrás, se espera.
       while (cola.length > CONC * 20 && !seAcaba()) await new Promise(r => setTimeout(r, 200));
     }
+
     leyendoTerminado = true;
   })();
 
