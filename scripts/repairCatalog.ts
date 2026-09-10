@@ -3490,36 +3490,69 @@ async function checkDeliveryByHost(apply: boolean): Promise<void> {
   const ANTES_DE_REPETIR_MS = 60_000;
   const respirar = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-  const rows = await fetchAllRows(['servers', 'seasons', 'has_streams']);
   const hostDe = (u: string) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return '(ilegible)'; } };
-  const servidoresDe = (r: any): any[] => [
-    ...(r.servers || []),
-    ...(r.seasons || []).flatMap((t: any) => (t.episodes || []).flatMap((e: any) => e.servers || [])),
-  ];
+
+  /**
+   * CUATRO EJEMPLOS POR HOST, PEDIDOS COMO CUATRO EJEMPLOS POR HOST.
+   *
+   * Esto arrancaba con `fetchAllRows(['servers','seasons','has_streams'])` —las 10.375 fichas con
+   * todo dentro, 92 MB— para acabar quedándose con cuatro servidores de cada host. Era el gasto
+   * más absurdo de los tres barridos de `verificar.yml`, porque este paso ni siquiera comprueba
+   * servidores: comprueba HOSTS, y con cuatro muestras de cada uno ya sabe lo que quería saber.
+   *
+   * La vista `muestra_por_host` (migraciones 018 y 019) guarda hasta ocho por host, el sello más
+   * fresco primero. Ocho y no cuatro para que aquí abajo quepa el filtro por frescura y aún
+   * queden cuatro. Y como vienen ordenados por sello descendente, si el cuarto ya está caducado
+   * es que no hay cuatro frescos: la respuesta es exacta, no un apaño.
+   *
+   * Medido: 26 KB en vez de 92.400 KB.
+   */
+  const FRESCURA_MS = 6 * 60 * 60 * 1000;
+  const { data: muestrario, error: errMuestra } = await db
+    .from('muestra_por_host')
+    .select('host,embed_url,direct_stream,direct_kind,verified_at')
+    .order('host', { ascending: true })
+    .order('puesto', { ascending: true });
+  if (errMuestra) {
+    console.error(`   ✗ no se pudo leer muestra_por_host: ${errMuestra.message}`);
+    console.error('     ¿están aplicadas las migraciones 018 y 019? Sin ellas este barrido no corre.');
+    return;
+  }
 
   /** Candidatos por host: solo los que HOY se publicarían, que son los que importa poder servir. */
   const porHost = new Map<string, any[]>();
-  for (const row of rows) {
-    for (const s of servidoresDe(row)) {
-      if (!s?.embed_url || !s.direct_stream) continue;
-      /**
-       * ...salvo con `--incluir-sin-sello`, que mira TAMBIÉN los que ya lo perdieron.
-       *
-       * Sin esa puerta hay un punto ciego: en cuanto este paso condena un host, sus servidores se
-       * quedan sin sello y dejan de entrar en el muestreo, así que este paso no puede enterarse
-       * NUNCA de que el host ha vuelto. Depende de que `--verificar` lo selle antes por el camino
-       * directo, y mientras tanto no hay forma de preguntar «¿ya entrega?» sin esperar horas.
-       *
-       * Solo mira más: no escribe distinto. Un servidor sin sello no tiene sello que retirar.
-       */
-      if (!MIRAR_SIN_SELLO) {
-        if (!s.verified_at) continue;
-        if (Date.now() - Date.parse(s.verified_at) > 6 * 60 * 60 * 1000) continue;
-      }
-      const h = hostDe(s.embed_url);
-      if (!porHost.has(h)) porHost.set(h, []);
-      const lista = porHost.get(h)!;
-      if (lista.length < 4 && !lista.some(x => x.embed_url === s.embed_url)) lista.push(s);
+  for (const m of (muestrario || []) as any[]) {
+    if (!m.embed_url || !m.direct_stream) continue;
+    /**
+     * ...salvo con `--incluir-sin-sello`, que mira TAMBIÉN los que ya lo perdieron.
+     *
+     * Sin esa puerta hay un punto ciego: en cuanto este paso condena un host, sus servidores se
+     * quedan sin sello y dejan de entrar en el muestreo, así que este paso no puede enterarse
+     * NUNCA de que el host ha vuelto. Depende de que `--verificar` lo selle antes por el camino
+     * directo, y mientras tanto no hay forma de preguntar «¿ya entrega?» sin esperar horas.
+     *
+     * Solo mira más: no escribe distinto. Un servidor sin sello no tiene sello que retirar.
+     */
+    if (!MIRAR_SIN_SELLO) {
+      if (!m.verified_at) continue;
+      if (Date.now() - Date.parse(m.verified_at) > FRESCURA_MS) continue;
+    }
+    /**
+     * La clave se saca con `hostDe`, no con la columna `host` de la vista. Las dos dicen lo mismo
+     * para una url normal, pero una url interna de la API (`/api/v1/netmirror/...`) no tiene
+     * dominio: la vista la deja en cadena vacía y `hostDe` la llama `(ilegible)`. Se usa la
+     * segunda porque es la que sale por pantalla y la que llevan los veredictos de más abajo.
+     */
+    const h = hostDe(String(m.embed_url));
+    if (!porHost.has(h)) porHost.set(h, []);
+    const lista = porHost.get(h)!;
+    if (lista.length < 4 && !lista.some(x => x.embed_url === m.embed_url)) {
+      lista.push({
+        embed_url: m.embed_url,
+        direct_stream: m.direct_stream,
+        direct_kind: m.direct_kind,
+        verified_at: m.verified_at,
+      });
     }
   }
   console.log(`   ${porHost.size} hosts con servidores publicados\n`);
@@ -3671,7 +3704,95 @@ async function checkDeliveryByHost(apply: boolean): Promise<void> {
   const condenados = new Set(caidos);
   let fichasTocadas = 0, sellosRetirados = 0, seEsconden = 0, primerosAvisos = 0, absueltos = 0;
 
-  for (const row of rows) {
+  /**
+   * SE REESCRIBEN SOLO LAS FICHAS QUE PUEDEN CAMBIAR, y se sabe cuáles son sin abrirlas.
+   *
+   * Esto recorría las 10.375 fichas para acabar tocando unas pocas. Pero mirando lo que hace
+   * `revisar` aquí abajo, una ficha solo cambia en dos casos, y los dos se pueden preguntar:
+   *
+   *   · lleva un servidor SELLADO de un host CONDENADO      → golpe, o retirada del sello
+   *   · lleva un servidor SELLADO de un host que ENTREGA
+   *     y que arrastraba un golpe de una vuelta anterior    → se le perdona
+   *
+   * Un host sin veredicto no toca nada, y un servidor sin sello tampoco: `revisar` se va en su
+   * primera línea. Así que las candidatas salen de `servidores_publicados` con esas dos
+   * consultas, y ninguna otra ficha puede cambiar.
+   */
+  const alSql = (h: string) => (h === '(ilegible)' ? '' : h);
+
+  /**
+   * Paginado CON `order`, y no es por gusto: PostgREST corta en 1.000 filas por respuesta, y
+   * paginar por rangos sin un orden estable se salta filas y repite otras sin avisar. Aquí eso
+   * significaría dejar fichas sin reescribir y no enterarse nunca.
+   */
+  const idsDeHosts = async (hosts: string[], soloConGolpe: boolean, destino: Set<string>): Promise<boolean> => {
+    if (hosts.length === 0) return true;
+    const PAGINA_IDS = 1000;
+    for (let desde = 0; ; desde += PAGINA_IDS) {
+      /**
+       * `any` a propósito, y solo aquí. Encadenar `in` + `not` + dos `order` + `range` sobre una
+       * vista hace que TypeScript se rinda inspeccionando los genéricos de supabase-js
+       * («Type instantiation is excessively deep»). Se resuelve y se espera en la misma
+       * expresión, así que no se escapa ningún constructor a medio montar — que es el fallo que
+       * vacía listados enteros cuando un builder viaja fuera de su función.
+       */
+      let q: any = db
+        .from('servidores_publicados')
+        .select('media_id')
+        .in('host', hosts.map(alSql))
+        .not('verified_at', 'is', null);
+      if (soloConGolpe) q = q.not('fallos_entrega', 'is', null);
+      const { data, error } = await q
+        .order('media_id', { ascending: true })
+        .order('embed_url', { ascending: true })
+        .range(desde, desde + PAGINA_IDS - 1);
+      if (error) { console.warn(`   ⚠ no se pudieron listar las fichas afectadas: ${error.message}`); return false; }
+      if (!data?.length) return true;
+      for (const f of data as any[]) destino.add(String(f.media_id));
+      if (data.length < PAGINA_IDS) return true;
+    }
+  };
+
+  const idsQueTocar = new Set<string>();
+  const listadoCompleto =
+    (await idsDeHosts([...condenados], false, idsQueTocar)) &&
+    (await idsDeHosts([...entregan], true, idsQueTocar));
+  if (!listadoCompleto) {
+    console.warn('   ⚠ listado incompleto: se deja la escritura para la vuelta siguiente');
+    await purgarCacheDeTocadas(apply);
+    return;
+  }
+
+  /**
+   * TOPE POR VUELTA, porque el perdón puede llegar en avalancha.
+   *
+   * Perdonar un golpe es un cambio en el JSON de la ficha, así que cuesta traerla y volver a
+   * escribirla. En marcha normal son un puñado. Pero si los hosts han estado caídos un tiempo
+   * los golpes se acumulan —al escribir esto hay 8.107 fichas con uno pendiente— y una sola
+   * vuelta intentaría reescribir el catálogo entero, que es justo el gasto que se está quitando.
+   *
+   * Con tope, el atraso se drena en unas cuantas vueltas y no se pierde nada: un golpe de más
+   * solo significa que a esa ficha se le perdona una vuelta más tarde.
+   */
+  const TOPE_DE_FICHAS = 1500;
+  const candidatas = [...idsQueTocar].sort();
+  const aTocar = candidatas.slice(0, TOPE_DE_FICHAS);
+  if (candidatas.length > aTocar.length) {
+    console.log(`   ${candidatas.length} ficha(s) afectadas · se hacen ${aTocar.length} y el resto en la vuelta siguiente`);
+  } else if (candidatas.length) {
+    console.log(`   ${candidatas.length} ficha(s) afectadas`);
+  }
+
+  for (let i = 0; i < aTocar.length; i += 100) {
+    const { data: lote, error: errLote } = await db
+      .from('media_items')
+      // `tmdb_id` lo necesita `marcarTocada`: sin él salen menos claves de caché y la ficha se
+      // queda anunciada con los servidores viejos justo después de retirárselos.
+      .select('id,tmdb_id,type,title,servers,seasons,has_streams')
+      .in('id', aTocar.slice(i, i + 100));
+    if (errLote) { console.warn(`   ⚠ no se pudo traer un lote: ${errLote.message}`); break; }
+
+    for (const row of (lote || []) as any[]) {
     let cambio = false;
     /**
      * Se retira la PRUEBA, no el enlace (ver la nota de arriba). Y NO A LA PRIMERA.
@@ -3729,6 +3850,7 @@ async function checkDeliveryByHost(apply: boolean): Promise<void> {
       .update({ servers, seasons, has_streams: veredicto ?? row.has_streams })
       .eq('id', row.id);
     if (error) console.warn(`   ⚠ ${row.id}: ${error.message}`);
+    }
   }
 
   console.log(`\n🚫 ${sellosRetirados} sellos retirados en ${fichasTocadas} fichas · ${seEsconden} dejan de anunciarse ${apply ? '' : '(se harían)'}`);
