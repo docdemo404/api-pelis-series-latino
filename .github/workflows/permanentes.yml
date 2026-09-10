@@ -18,10 +18,27 @@ name: Que nadie se encuentre un vídeo caído
 #   verificar.yml   ~24 s por servidor    vuelta completa: horas
 #   esto            ~2 s, y 24 a la vez   vuelta completa: minutos
 #
-# Por eso esto puede correr CADA 20 MINUTOS sobre el catálogo entero. La primera pasada en seco,
-# con solo 27 fichas guardadas, ya encontró dos caídas (`remux.unlimplay.com` devolviendo 403 en
+# Por eso esto puede barrer el catálogo entero en una sola vuelta. La primera pasada en seco, con
+# solo 27 fichas guardadas, ya encontró dos caídas (`remux.unlimplay.com` devolviendo 403 en
 # «23 000 vidas» y «Zona de riesgo»): justo lo que se estaba reportando como «hay vídeos que dan
 # error y siguen apareciendo».
+#
+# ─── POR QUÉ YA NO CORRE CADA 20 MINUTOS ─────────────────────────────────────────────────────
+#
+# Porque el proyecto de Supabase acabó restringido por `exceed_egress_quota` y la app se quedó
+# enseñando un catálogo vacío. Esto era el mayor consumidor con diferencia: ocho runners bajando
+# la tabla entera, cada uno, setenta y dos veces al día.
+#
+# La fuga en sí ya está tapada en `verificarPermanentes.ts` —ver allí—: una vuelta pasó de ~712 MB
+# a ~9,7 MB. Pero cada 20 minutos eso seguían siendo ~21 GB al mes, y el plan gratuito da 5 GB.
+#
+# Cada 3 horas son ~2,3 GB al mes, y dejan sitio a los otros seis trabajos programados y a la
+# propia app, que leen de la misma base. Lo que se paga a cambio es tardar hasta 3 horas en
+# detectar una caída en vez de 20 minutos; el sello dura 12 h, así que siguen entrando cuatro
+# vueltas dentro de la ventana y se pueden perder tres seguidas sin que caduque nada.
+#
+# OJO SI SE VUELVE A SUBIR EL RITMO: la cuenta es ~9,7 MB por vuelta. Multiplicar por las vueltas
+# al día antes de tocar el cron, o se repite lo mismo.
 #
 # Al encontrar uno muerto le quita el SELLO, no la url. Sin sello no se publica, así que la ficha
 # sale de los listados en cuanto se purga el caché; y como la url sigue guardada, la vuelta
@@ -29,9 +46,10 @@ name: Que nadie se encuentre un vídeo caído
 
 on:
   schedule:
-    # Cada 20 minutos. La ventana del sello permanente es de 12 h, así que caben decenas de
-    # vueltas dentro: se puede perder muchas corridas seguidas sin que caduque nada.
-    - cron: '*/20 * * * *'
+    # Cada 3 horas, y en el minuto 40 a propósito: los demás trabajos de este repositorio
+    # arrancan en punto o a y media, y lo que no se puede hacer es competir con ellos por las
+    # conexiones salientes del runner. Se evita también la hora del crawl completo (04:00).
+    - cron: '40 0,3,6,9,12,15,18,21 * * *'
   workflow_dispatch:
 
 # Si una vuelta se alarga, la siguiente ESPERA en vez de duplicar las peticiones a los hosts.
