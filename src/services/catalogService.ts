@@ -1162,6 +1162,31 @@ export class CatalogService {
    * Habilita el "ver todo" de cada fila del home y el scroll infinito sin traer el
    * catálogo entero a memoria. Devuelve null si la DB no está poblada o la consulta
    * falla, para que el llamador caiga al filtrado en memoria de siempre.
+   *
+   * ── AQUÍ SE ESCAPABA CASI TODO EL CUPO DE SUPABASE, Y NO SE VEÍA ────────────────────────────
+   *
+   * Esta consulta pedía `select('*')`. Es la MISMA equivocación que documenta
+   * `COLUMNAS_DE_TARJETA` unas líneas más arriba —arrastrar `servers` y `seasons` para pintar una
+   * carátula y un título— pero al arreglarla en el home y en los carruseles, a esta se le pasó.
+   *
+   * Y esta es la peor de las tres, porque las otras dos van a caché: el home se guarda dos horas
+   * y da igual cuánta gente entre. El scroll infinito NO se cachea. Cada vez que alguien baja y se
+   * cargan veinte fichas más, sale una consulta a la base.
+   *
+   * Medido sobre el catálogo real, una página de veinte:
+   *
+   *   select('*')            907 KB
+   *   columnas de tarjeta     22 KB
+   *
+   * Lo mismo en pantalla, cuarenta veces menos por el cable. A 907 KB el cupo mensual entero del
+   * plan gratuito se gastaba en unos 5.500 deslizamientos, o sea unas pocas decenas de usuarios
+   * curioseando un rato al día. El proyecto acabó restringido por `exceed_egress_quota` y la app
+   * se quedó enseñando un catálogo vacío sin dar un solo error.
+   *
+   * No falta nada de lo que el listado enseña: la tarjeta del home ya viaja así desde siempre
+   * —ver `toCardItem`, que ni siquiera incluye `servers`— y los enlaces se piden aparte en
+   * `/api/v1/media/:id/streams`. `has_streams` sí va dentro, así que quien mire si una ficha tiene
+   * vídeo lo sigue sabiendo.
    */
   static async discoverPaged(
     page: number,
@@ -1174,7 +1199,7 @@ export class CatalogService {
 
     try {
       let query = this.primeroLoCompleto(
-        supabase.from('media_items').select('*', { count: 'exact' }),
+        supabase.from('media_items').select(this.COLUMNAS_DE_TARJETA, { count: 'exact' }),
         await this.hasScoreColumn()
       );
       query = query.order('updated_at', { ascending: false }).range(from, from + safeLimit - 1);
