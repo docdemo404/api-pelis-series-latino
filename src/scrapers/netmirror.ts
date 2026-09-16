@@ -200,6 +200,23 @@ export interface MasterNetmirror {
   video: VideoVariante[];
 }
 
+/** Lee un atributo HLS incluso cuando la lista usa valores sin comillas. */
+function atributoHls(linea: string, clave: string): string {
+  const escapada = clave.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = new RegExp(`(?:^|[:,])\\s*${escapada}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^,\\s]*))`, 'i').exec(linea);
+  return (match?.[1] ?? match?.[2] ?? match?.[3] ?? '').trim();
+}
+
+/** HLS permite URI relativas; NetMirror las usa en parte de sus pistas de audio. */
+function uriHlsAbsoluta(uri: string, masterUrl: string): string {
+  try {
+    const absoluta = new URL(uri.trim(), masterUrl).toString();
+    return /^https?:\/\/[^/]+\//i.test(absoluta) && !/\bunknown\b/i.test(absoluta) ? absoluta : '';
+  } catch {
+    return '';
+  }
+}
+
 /**
  * Empareja titulo+anio contra el buscador de NetMirror y devuelve su netflix_id.
  * `/search.php?s=<titulo>` no requiere cookies ni token — se puede llamar desde cualquier IP.
@@ -292,7 +309,8 @@ export async function buscarNetflixId(
 export async function masterHls(netflixId: string, token: string): Promise<MasterNetmirror | null> {
   if (!netflixId || !token) return null;
   try {
-    const r = await fetch(`${NM_PLAY_ORIGEN}/hls/${encodeURIComponent(netflixId)}.m3u8?in=${encodeURIComponent(token)}`, {
+    const masterUrl = `${NM_PLAY_ORIGEN}/hls/${encodeURIComponent(netflixId)}.m3u8?in=${encodeURIComponent(token)}`;
+    const r = await fetch(masterUrl, {
       headers: { 'User-Agent': UA, Referer: `${NM_PLAY_ORIGEN}/` },
     });
     if (!r.ok) return null;
@@ -306,23 +324,23 @@ export async function masterHls(netflixId: string, token: string): Promise<Maste
     for (let i = 0; i < lineas.length; i++) {
       const l = lineas[i];
       if (l.startsWith('#EXT-X-MEDIA') && /TYPE=AUDIO/i.test(l)) {
-        const language = /LANGUAGE="([^"]+)"/i.exec(l)?.[1] || '';
-        const name = /NAME="([^"]+)"/i.exec(l)?.[1] || '';
-        const uri = /URI="([^"]+)"/i.exec(l)?.[1] || '';
-        const defaultTrack = /DEFAULT=YES/i.test(l);
-        // Las URIs de audio son publicas y vienen absolutas ("https://s88...").
-        // Filtramos las vacías ("https:///files/...") que salen cuando el netflix_id no está.
-        if (uri && /^https?:\/\/[^/]+\//i.test(uri)) {
+        const language = atributoHls(l, 'LANGUAGE');
+        const name = atributoHls(l, 'NAME');
+        const uri = uriHlsAbsoluta(atributoHls(l, 'URI'), r.url || masterUrl);
+        const defaultTrack = /^yes$/i.test(atributoHls(l, 'DEFAULT'));
+        // Las pistas no inglesas pueden llegar como URI relativa; descartarlas hacía que el
+        // API expusiera sólo la pista English aunque el master tuviera varias.
+        if (uri) {
           audios.push({ language, name, uri, defaultTrack });
         }
       } else if (l.startsWith('#EXT-X-STREAM-INF')) {
-        const bandwidth = Number(/BANDWIDTH=(\d+)/i.exec(l)?.[1] || 0);
-        const resolution = /RESOLUTION=(\d+x\d+)/i.exec(l)?.[1] || null;
-        const defaultTrack = /DEFAULT=YES/i.test(l);
-        const uri = lineas[i + 1] || '';
+        const bandwidth = Number(atributoHls(l, 'BANDWIDTH')) || 0;
+        const resolution = atributoHls(l, 'RESOLUTION') || null;
+        const defaultTrack = /^yes$/i.test(atributoHls(l, 'DEFAULT'));
+        const uri = uriHlsAbsoluta(lineas[i + 1] || '', r.url || masterUrl);
         // Solo variantes reales; las de placeholder tienen `in=unknown` cuando el netflix_id no
         // existe (medido: `s21.freecdn4.top/files/220884/...` para ids no reconocidos).
-        if (uri && /^https?:\/\//.test(uri) && !/unknown/i.test(uri)) {
+        if (uri) {
           video.push({ bandwidth, resolution, uri, defaultTrack });
         }
       }

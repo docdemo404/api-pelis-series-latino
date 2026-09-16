@@ -9,7 +9,9 @@ import { normalizeTitle, slugify, yearFromSlug, searchIndexKey } from '../utils/
 import { httpClient } from '../utils/httpClient';
 import { CacheStore } from '../cache/store';
 import { unwrapRedirector, canonicalArchiveOrg } from '../scrapers/directStream';
-import { pelicula as netmirrorPelicula, episodio as netmirrorEpisodio, FuenteNetmirror } from '../scrapers/netmirror';
+import { pelicula as netmirrorPelicula, episodio as netmirrorEpisodio, buscarNetflixId, masterHls, FuenteNetmirror } from '../scrapers/netmirror';
+import { traducirYNormalizar } from '../utils/idiomas';
+import { leerAjuste } from '../utils/ajustesRemotos';
 import { revisarServidores, aplicarVeredictosRecordados } from './playbackHealth';
 import {
   LedgerManual,
@@ -5133,6 +5135,63 @@ async function serverDeNetmirror(
   // futuro sea quitar el `return null` sin tocar nada mas.
   const fuente = await netmirrorPelicula(tmdbId).catch(() => null);
   if (!fuente) return null;
+
+  // No esperar al barrido nocturno para habilitar multi-audio en una ficha nueva. La respuesta
+  // de NetMirror ya trae el título indexado por su buscador, así que resolvemos y persistimos su
+  // netflix_id en la primera apertura. Sin este paso el servidor reproduce, pero no incluye
+  // `netmirror_hls` y el cliente no puede pedir ni descubrir sus pistas extra.
+  if (!netflixIdCache && fuente.meta.title) {
+    const encontrado = await buscarNetflixId(fuente.meta.title, fuente.meta.year || undefined).catch(() => null);
+    if (encontrado) {
+      netflixIdCache = encontrado;
+      await getSupabaseAdmin().from('netmirror_cache').upsert({
+        tmdb_id: tmdbId,
+        temporada: 0,
+        episodio: 0,
+        disponible: true,
+        netflix_id: encontrado,
+        comprobado_at: new Date().toISOString(),
+      }, { onConflict: 'tmdb_id,temporada,episodio' });
+    }
+  }
+
+  // Una versión vieja del parser descartaba URIs relativas y dejó varias fichas con una única
+  // pista `eng` aunque su master tuviera todas las demás. Al encontrarnos ese estado, refrescamos
+  // una vez con el token que el cliente ya comparte para el escáner. Así la respuesta de esta
+  // misma apertura contiene el multi-audio; si no hay token, mandamos idiomas vacíos para que el
+  // descubrimiento oportunista del cliente repueble la caché en vez de afirmar erróneamente que
+  // English es la única opción.
+  const cacheSoloIngles = Array.isArray(idiomasCache)
+    && idiomasCache.length === 1
+    && /^eng?$/i.test(String(idiomasCache[0]?.lang || ''));
+  if (netflixIdCache && cacheSoloIngles) {
+    try {
+      const ajuste = await leerAjuste<{ token?: string }>('nm-token');
+      if (ajuste?.token) {
+        const master = await masterHls(netflixIdCache, ajuste.token);
+        const pistas = master
+          ? traducirYNormalizar(master.audios.map(a => ({ language: a.language, name: a.name, uri: a.uri })))
+          : [];
+        if (pistas.some(p => p.lang !== 'eng')) {
+          idiomasCache = pistas;
+          const ejemplo = master?.video[0]?.uri || master?.audios[0]?.uri || '';
+          try { dominioHls = new URL(ejemplo).hostname; } catch { /* se conserva el anterior */ }
+          await getSupabaseAdmin().from('netmirror_cache').update({
+            idiomas_audio: pistas,
+            dominio_hls: dominioHls,
+            comprobado_at: new Date().toISOString(),
+          }).eq('tmdb_id', tmdbId).eq('temporada', 0).eq('episodio', 0);
+        } else {
+          // No reutilizar el dato incompleto: el cliente hará el descubrimiento con su sesión.
+          idiomasCache = [];
+        }
+      } else {
+        idiomasCache = [];
+      }
+    } catch {
+      idiomasCache = [];
+    }
+  }
   const query = '';
   const ruta = `/api/v1/netmirror/stream/${tmdbId}${query}`;
   const calidad: ServerOption['quality'] =

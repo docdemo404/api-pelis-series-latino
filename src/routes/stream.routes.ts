@@ -1020,6 +1020,13 @@ router.post(['/api/v1/report', '/api/v1/playback/report'], async (req: Request, 
       failovers: numero(b.failovers),
       avg_height: numero(b.avg_height),
       app_version: texto(b.app_version),
+      /*
+       * Lo que el aparato midio y esta API no puede saber sola. Ver la migracion 013 y
+       * `medidasDeAparatos`: es lo que acaba ordenando la lista de servidores.
+       */
+      kbps_medidos: numero(b.kbps_medidos),
+      reconexiones: numero(b.reconexiones),
+      conexiones: numero(b.conexiones),
     };
 
     // Se registra siempre, tabla o no: en los registros de Vercel se puede buscar y agrupar, y

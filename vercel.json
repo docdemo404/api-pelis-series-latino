@@ -1,5 +1,8 @@
 {
   "version": 2,
+  "regions": [
+    "gru1"
+  ],
   "builds": [
     {
       "src": "api/index.ts",

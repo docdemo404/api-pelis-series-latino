@@ -1,5 +1,6 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { asegurarHostsConCache } from '../services/hostsConCache';
+import { asegurarMedidasDeAparatos } from '../services/medidasDeAparatos';
 import { CatalogService } from '../services/catalogService';
 import { RealScraperService } from '../services/realScraperService';
 import { sendErrorResponse } from '../utils/apiHelpers';
@@ -75,6 +76,9 @@ async function respondWithStreams(req: Request, res: Response, typeHint?: Conten
   // Qué dominios pasan por la caché decide la url que sale de aquí, así que hay que saberlo ANTES
   // de construir la respuesta. Una vez por proceso; ver la nota en `asegurarHostsConCache`.
   await asegurarHostsConCache();
+  // Y lo que han medido los aparatos, que es lo que ordena la lista de verdad. Ver alli: una vez
+  // cada diez minutos por proceso, y si falla se sigue con el sondeo de siempre.
+  await asegurarMedidasDeAparatos();
 
   const deep = String(req.query.deep || '') === '1' || String(req.query.deep || '') === 'true';
   const item = await CatalogService.getStreams(req.params.id, typeHint, { deep });

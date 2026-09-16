@@ -76,3 +76,4 @@ Thumbs.db
 
 # Base SQLite local (sin TURSO_DATABASE_URL)
 data/
+worker/.wrangler/

@@ -10,6 +10,26 @@ compatibility_date = "2026-07-29"
 [observability]
 enabled = true
 
+# ── DONDE SE EJECUTA ESTE WORKER ──────────────────────────────────────────────────────────
+#
+# De fabrica, un Worker corre en el centro de datos mas cercano A QUIEN PIDE. Para casi todo eso es
+# lo correcto, y aqui es justo al reves: lo que este Worker hace es pedirle trozos a un origen
+# lejano y lento — archive.org cobra entre 10 y 25 s hasta el primer byte, y `cacheDeTrozos.js` le
+# lanza rafagas de SEIS subpeticiones para amortizar esa latencia una sola vez.
+#
+# Con la colocacion inteligente, Cloudflare mira cuanto tarda cada peticion y mueve la ejecucion
+# cerca del ORIGEN. Su documentacion lo dice con estas palabras: beneficia a los Workers que hacen
+# muchas subpeticiones a servicios distantes. Lo que se paga es un salto mas para el espectador
+# —milisegundos— y lo que se ahorra son seis viajes transatlanticos por trozo frio.
+#
+# Esta disponible en TODOS los planes, incluido el gratuito.
+#
+# Dos avisos: tarda unos quince minutos en activarse y necesita trafico sostenido desde varios
+# sitios para decidir, asi que no se juzga el mismo dia de desplegarlo. Y si algun dia estorba, se
+# quita cambiando `mode` a "off" — no hay nada mas atado a esto.
+[placement]
+mode = "smart"
+
 # EL BUCKET DE LA CACHÉ POR TROZOS.
 #
 # R2 y no la caché del borde por dos razones. La primera es el dinero: R2 NO cobra tráfico de

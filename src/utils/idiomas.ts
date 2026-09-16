@@ -91,6 +91,20 @@ export function normalizarISO(tag: string): string {
   return t.slice(0, 3);
 }
 
+/** Algunos masters de NetMirror omiten LANGUAGE, pero conservan NAME. */
+function idiomaDesdeNombre(nombre: string): string {
+  const n = String(nombre || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  if (/(?:spanish|espanol|latino|castell)/.test(n)) return 'spa';
+  if (/(?:english|ingles)/.test(n)) return 'eng';
+  if (/(?:french|frances)/.test(n)) return 'fra';
+  if (/(?:portuguese|portugues)/.test(n)) return 'por';
+  if (/(?:italian|italiano)/.test(n)) return 'ita';
+  if (/(?:german|aleman)/.test(n)) return 'deu';
+  if (/(?:japanese|japones)/.test(n)) return 'jpn';
+  if (/(?:korean|coreano)/.test(n)) return 'kor';
+  return 'und';
+}
+
 /** Nombre en español de un idioma ISO. Devuelve el propio código si no lo conocemos. */
 export function nombreEsp(iso: string): string {
   return MAPA[normalizarISO(iso)] || iso;
@@ -119,7 +133,10 @@ interface EntradaBruta {
  * La primera pista `spa` (o `eng` si no hay español) queda marcada `default: true`.
  */
 export function traducirYNormalizar(brutas: EntradaBruta[]): PistaAudio[] {
-  const iso = brutas.map(b => normalizarISO(b.language));
+  const iso = brutas.map(b => {
+    const normalizado = normalizarISO(b.language);
+    return normalizado === 'und' ? idiomaDesdeNombre(b.name || '') : normalizado;
+  });
   const cuentaSpa = iso.filter(x => x === 'spa').length;
   let indiceSpa = 0;
 

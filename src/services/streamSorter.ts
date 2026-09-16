@@ -129,6 +129,11 @@ function urlPublicaDe(server: ServerOption): string | undefined {
 export function effectiveDirectMode(server: ServerOption): DirectMode | undefined {
   if (!server.direct_stream) return undefined;
 
+  // NetMirror ya apunta a NUESTRA ruta estable `/api/v1/netmirror/stream`. Tratar esa ruta
+  // como si fuese un embed desconocido la mandaba por `bestMode(CONSERVATIVE)` y la convertía
+  // falsamente en `proxy`, aunque el endpoint entrega un 302 fresco al CDN para Android.
+  if (getSourceId(server) === 'netmirror') return server.direct_mode || 'redirect';
+
   /**
    * PRIMERO LO QUE NO LLEVA FIRMA, y va antes que `bestMode` A PROPÓSITO.
    *
@@ -527,6 +532,10 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
    */
   const directScore = (s: ServerOption): number => {
     if (!s.direct_stream) return 0;
+    // NetMirror es la fuente prioritaria cuando está viva: además del vídeo aporta el master
+    // HLS multi-audio. Sin este desempate el criterio genérico de coste dejaba primero un MP4/HLS
+    // mono-audio de menor prioridad y NetMirror quedaba como respaldo.
+    if (getSourceId(s) === 'netmirror') return 5;
     // `public` es el más rápido que hay y estaba puntuando como `proxy`: su URL no caduca ni va
     // atada a una IP, así que se entrega tal cual y el reproductor habla DIRECTAMENTE con el CDN —
     // cero saltos, cero bytes nuestros, y adelantar cuesta lo que el CDN tarde. Empatarlo con el
