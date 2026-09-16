@@ -71,3 +71,8 @@ Thumbs.db
 *.tar.bz2
 *.tar.xz
 *.tar.zstcatalogo_urls_permanentes.csv
+
+.env*
+
+# Base SQLite local (sin TURSO_DATABASE_URL)
+data/

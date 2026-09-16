@@ -64,8 +64,8 @@ router.get('/api/v1/panel', async (_req: Request, res: Response, next: NextFunct
        * comparando a mano una fila antes y después. Pasó, y costó media tarde encontrarlo.
        *
        *   true  → el camino de petición puede retirar lo que demuestre que no se ve.
-       *   false → falta SUPABASE_SERVICE_ROLE_KEY en el entorno; todo lo que la API aprende al
-       *           servir se pierde, y el catálogo solo se corrige desde los trabajos de GitHub.
+       *   false → la base no acepta escrituras (token de Turso de solo lectura, o base vacía:
+       *           la prueba necesita una fila); todo lo que la API aprende al servir se pierde.
        */
       catalog_writable: escritura,
     });

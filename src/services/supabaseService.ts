@@ -1,17 +1,19 @@
-import { createClient } from '@supabase/supabase-js';
-
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://kgeytmocuitbchpdcoad.supabase.co';
-const SUPABASE_KEY = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtnZXl0bW9jdWl0YmNocGRjb2FkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ1OTY1NTQsImV4cCI6MjEwMDE3MjU1NH0._t2cRnkx_BCXP-J7TaK3Iymhk_bod2Xb5RlzsqSScxg';
-
-// Cliente compartido de Supabase (anon). La capa de acceso a datos vive en CatalogService.
-export const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-
 /**
- * Cliente para jobs de background (scripts/refreshCatalog.ts): usa la
- * SUPABASE_SERVICE_ROLE_KEY si está disponible (necesaria para escribir cuando la
- * tabla tiene RLS activado). Sin ella, degrada al cliente anon.
+ * EL ACCESO A LA BASE DE DATOS (Turso / libSQL), con el nombre de siempre.
+ *
+ * El archivo se sigue llamando `supabaseService` y sigue exportando `supabase` y
+ * `getSupabaseAdmin()` porque diecinueve archivos los importan así, y lo que cambió en la mudanza
+ * de septiembre de 2026 fue la base, no el código que la usa: `src/db/compat.ts` habla la misma
+ * sintaxis que supabase-js y por debajo manda SQL a Turso. Ver allí qué subconjunto está.
+ *
+ * Ya no hay dos clientes (anon / service role): el token de Turso lo puede todo, así que
+ * `getSupabaseAdmin()` devuelve el mismo cliente. Se conserva para no tocar a quien lo llama y
+ * porque el nombre sigue diciendo la intención: «esto escribe».
  */
-export function getSupabaseAdmin() {
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  return serviceKey ? createClient(SUPABASE_URL, serviceKey) : supabase;
+import { ClienteCompat } from '../db/compat';
+
+export const supabase = new ClienteCompat();
+
+export function getSupabaseAdmin(): ClienteCompat {
+  return supabase;
 }

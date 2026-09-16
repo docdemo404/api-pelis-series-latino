@@ -25,25 +25,27 @@ npm run dev
 La API estará lista en: `http://localhost:3000/api/v1`
 Documentación gráfica en: `http://localhost:3000/docs`
 
-## 🗂 Migraciones de la base de datos
+## 🗂 La base de datos: Turso (SQLite)
+
+El catálogo vive en **Turso** (libSQL, SQLite gestionado) desde septiembre de 2026. Antes estaba
+en Supabase y se acabó la cuota de salida (5 GB/mes): en Turso no se cobra por bytes que salen.
 
 ```bash
-npm run migrar                                  # dice cuáles faltan, no toca nada
-npm run migrar -- --apply                       # aplica las pendientes, en orden
+npm run db:esquema                              # crea tablas, índices, disparadores y vistas
 ```
 
-Necesita `SUPABASE_DB_URL` en el `.env` (panel de Supabase → **Connect** → *Session pooler*). La
-clave REST que usa la API no sirve: sabe leer y escribir filas, no cambiar la forma de la tabla.
+Necesita `TURSO_DATABASE_URL` y `TURSO_AUTH_TOKEN` en el `.env` (panel de Turso → la base →
+*Connect*). Sin ellas, en local se usa un archivo `data/catalogo.db` y se puede trabajar igual;
+en Vercel y en Actions sin ellas se para con error, a propósito.
 
-**La primera vez, en una base que ya existe, hay que fijar el punto de partida:**
+El esquema entero está en un solo archivo, `src/db/turso/esquema.sql`, con número de versión: los
+jobs lo aplican solos al arrancar si la base va por detrás. Cambiar una vista es editarlo y subir
+`VERSION_DEL_ESQUEMA` en `src/db/libsql.ts`. Las migraciones de Postgres de `src/db/migrations/`
+quedan como historia de por qué existe cada columna.
 
-```bash
-npm run migrar -- --baseline=011_subtitulos.sql
-```
-
-Da por aplicadas la 011 y todas las anteriores **sin ejecutarlas**, que es lo correcto porque ya se
-pegaron a mano en el SQL Editor. Sin este paso, volver a lanzar la 007 recalcularía `has_streams`
-de todo el catálogo y borraría el resultado de las verificaciones de reproducción reales.
+El código sigue escribiendo `supabase.from('media_items').select()...`: `src/db/compat.ts` habla
+esa sintaxis y por debajo manda SQL a libSQL. Lo que no está implementado lanza error al
+construir la consulta; ver la cabecera de ese archivo.
 
 ## 🧩 Metadata: rellenar los huecos que TMDB no cubre
 

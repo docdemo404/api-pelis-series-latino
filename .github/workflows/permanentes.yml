@@ -89,9 +89,8 @@ jobs:
 
       - name: Comprobar que cada url permanente sigue entregando vídeo
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
           # Sin esto el arreglo se escribe en la base y el caché sigue enseñando la ficha vieja
           # hasta 12 h. Retirar sin purgar es dejarlo roto por fuera.
           UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}

@@ -2591,7 +2591,7 @@ export class CatalogService {
         return false;
       }
       if (!data || data.length === 0) {
-        console.warn(`[persist] ${etiqueta} ${id}: 0 filas escritas — sin permiso de escritura (¿falta SUPABASE_SERVICE_ROLE_KEY?)`);
+        console.warn(`[persist] ${etiqueta} ${id}: 0 filas escritas — sin permiso de escritura (¿token de Turso de solo lectura?)`);
         return false;
       }
       return true;
