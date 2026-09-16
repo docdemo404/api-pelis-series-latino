@@ -20,6 +20,8 @@
  * (net27.cc hoy, otro mañana), pero el path y el shape se mantienen.
  */
 
+import { ServerOption } from '../types';
+
 const ORIGENES = ['https://net27.cc'] as const;
 const REFERER_MP4 = 'https://videodownloader.site/';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -148,6 +150,70 @@ function empaquetar(j: RespuestaNetmirror): FuenteNetmirror | null {
 export async function pelicula(tmdbId: number): Promise<FuenteNetmirror | null> {
   const j = await llamar(tmdbId, '');
   return j ? empaquetar(j) : null;
+}
+
+/**
+ * EL SERVIDOR QUE SE ANUNCIA para una película que NetMirror tiene.
+ *
+ * Lo construyen dos sitios y tiene que salir igual de los dos: `serverDeNetmirror` en
+ * catalogService, al abrir la ficha, y `scripts/importarNetmirror.ts`, al traer un título que
+ * el catálogo no tenía. Antes vivía solo en el primero, y el importador habría tenido que copiar
+ * la forma a mano — y una copia se separa en cuanto alguien toca una de las dos.
+ *
+ * El `direct_stream` apunta a nuestro endpoint con `?mode=redirect`: para el cliente Android
+ * (Media3) esto es un 302 al CDN, propaga los headers `Referer` y descarga directo del CDN sin
+ * que ningún byte pase por el Worker. Antes el proxy duplicaba latencia y ancho de banda:
+ * Spider-Man y Kung Fu Panda 4 tardaban 5-10 s en empezar. Los clientes sin headers pueden pedir
+ * la misma URL sin `?mode=redirect` y el endpoint hace proxy.
+ *
+ * El `?mode=redirect` sobre nuestro endpoint tiene otra ventaja sobre la URL directa del CDN:
+ * aquí el 302 se emite en el momento del play (con firma FRESCA), no cuando se cacheó la ficha
+ * diez minutos atrás. Así el CDN nunca ve una firma caducada — y por eso el servidor se puede
+ * guardar en la base aunque el mp4 de detrás caduque en horas.
+ */
+export function servidorDePelicula(tmdbId: number, fuente: FuenteNetmirror): ServerOption {
+  const ruta = `/api/v1/netmirror/stream/${tmdbId}`;
+  const calidad: ServerOption['quality'] =
+    fuente.meta.resolution === '1080' ? '1080p' :
+    fuente.meta.resolution === '720'  ? '720p'  :
+    fuente.meta.resolution === '4K'   ? '4K'    : '480p';
+  const ahora = new Date().toISOString();
+  const altura =
+    fuente.meta.resolution === '2160' || fuente.meta.resolution === '4K' ? 2160 :
+    fuente.meta.resolution === '1080' ? 1080 :
+    fuente.meta.resolution === '720'  ? 720  :
+    fuente.meta.resolution === '360'  ? 360  : 480;
+  const rutaRedirect = ruta + '?mode=redirect';
+  return {
+    id: `nm-${tmdbId}`,
+    name: 'NetMirror',
+    quality: calidad,
+    // Marcamos latino: la API devuelve audio original con subs es; nuestro proxy inyecta la pista
+    // subtitulada latina como default (ver `filtrarYordenarEsp`). El cliente lo trata como
+    // "latino disponible" a efectos de ordenación — es lo que ve el espectador.
+    language: 'latino',
+    embed_url: rutaRedirect,
+    direct_stream: rutaRedirect,
+    direct_kind: 'mp4',
+    direct_mode: 'redirect',
+    direct_host: 'bcdnxw.hakunaymatata.com',
+    // Cabeceras que el CDN exige. Media3 las fija y las propaga al seguir el 302 (comprobado).
+    headers: {
+      Referer: REFERER_MP4,
+      'User-Agent': UA,
+    },
+    status: 'online',
+    last_checked: ahora,
+    // Sello reciente: acabamos de resolver el mp4 contra la API oficial. Sin esto,
+    // `revisarServidores` intenta comprobar el embed_url y lo puede marcar offline.
+    verified_at: ahora,
+    max_height: altura,
+    // TTFB observado en la CDN: ~300-500 ms. Sin este valor el sorter le asigna infinito y lo
+    // hunde por debajo de cualquier server con TTFB medido.
+    ttfb_ms: 400,
+    source_id: 'netmirror',
+    source_name: 'NetMirror',
+  } as ServerOption;
 }
 
 /** Resuelve un capítulo por tmdbId de la serie y temporada/episodio. */

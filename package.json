@@ -14,6 +14,7 @@
     "rotular:capitulos": "ts-node scripts/rotularCapitulos.ts",
     "metadatos:rellenar": "ts-node scripts/rellenarMetadatos.ts",
     "importar:videoapi": "ts-node scripts/importarVideoapi.ts",
+    "importar:netmirror": "ts-node scripts/importarNetmirror.ts",
     "check:catalog": "ts-node scripts/checkCatalog.ts",
     "check:sources": "ts-node scripts/checkSources.ts",
     "calentar:indices": "ts-node scripts/calentarIndices.ts",

@@ -44,9 +44,12 @@ export interface Arranque {
   sinVeredicto?: boolean;
 }
 
-async function pedir(url: string, desde: number, hasta?: number) {
+/** Cabeceras que el origen exige además del rango: hoy, el `Referer` sin el que la CDN de NetMirror contesta 429. */
+export type CabecerasDeOrigen = Record<string, string>;
+
+async function pedir(url: string, desde: number, hasta?: number, cabeceras: CabecerasDeOrigen = {}) {
   const rango = hasta === undefined ? `bytes=${desde}-` : `bytes=${desde}-${hasta}`;
-  return fetch(url, { headers: { Range: rango }, signal: AbortSignal.timeout(PACIENCIA_MS) });
+  return fetch(url, { headers: { ...cabeceras, Range: rango }, signal: AbortSignal.timeout(PACIENCIA_MS) });
 }
 
 /**
@@ -119,7 +122,8 @@ function totalDe(r: Response): number {
  */
 async function localizarIndice(
   url: string,
-  total: number
+  total: number,
+  cabeceras: CabecerasDeOrigen = {}
 ): Promise<
   | { ok: true; indiceEn: number; indiceTam: number; delante: boolean }
   | { ok: false; veredicto: Arranque }
@@ -142,7 +146,7 @@ async function localizarIndice(
 
     let r: Response;
     try {
-      r = await pedir(url, posicion, posicion + 15);
+      r = await pedir(url, posicion, posicion + 15, cabeceras);
     } catch (e: any) {
       return { ok: false, veredicto: noSeSabe('no se puede leer la cabecera', e?.message || String(e)) };
     }
@@ -213,11 +217,11 @@ const noSeSabe = (causa: string, detalle: string): Arranque =>
  * enterrar por lentitud vacía el catálogo. Lo que sí condena es lo que no depende del día: un
  * fichero cuyas cajas no cuadran, o un índice que no está donde el propio fichero dice.
  */
-export async function puedeAbrirse(url: string): Promise<Arranque> {
+export async function puedeAbrirse(url: string, cabeceras: CabecerasDeOrigen = {}): Promise<Arranque> {
   // --- 1. abrir con rango abierto, como media3 ---
   let abierto: Response;
   try {
-    abierto = await pedir(url, 0);
+    abierto = await pedir(url, 0, undefined, cabeceras);
   } catch (e: any) {
     return noSeSabe('no contesta', e?.message || String(e));
   }
@@ -270,7 +274,7 @@ export async function puedeAbrirse(url: string): Promise<Arranque> {
   }
 
   // --- 2. ¿dónde está el índice? ---
-  const donde = await localizarIndice(url, total);
+  const donde = await localizarIndice(url, total, cabeceras);
   if (!donde.ok) return donde.veredicto;
   const { indiceEn, indiceTam, delante } = donde;
 
@@ -278,7 +282,7 @@ export async function puedeAbrirse(url: string): Promise<Arranque> {
   const t0 = Date.now();
   let respuestaIndice: Response;
   try {
-    respuestaIndice = await pedir(url, indiceEn, Math.min(indiceEn + indiceTam - 1, total - 1));
+    respuestaIndice = await pedir(url, indiceEn, Math.min(indiceEn + indiceTam - 1, total - 1), cabeceras);
   } catch (e: any) {
     return noSeSabe('el índice no llega', `${(indiceTam / 1048576).toFixed(1)} MB: ${e?.message || e}`);
   }

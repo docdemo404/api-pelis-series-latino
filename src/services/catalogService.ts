@@ -9,7 +9,7 @@ import { normalizeTitle, slugify, yearFromSlug, searchIndexKey } from '../utils/
 import { httpClient } from '../utils/httpClient';
 import { CacheStore } from '../cache/store';
 import { unwrapRedirector, canonicalArchiveOrg } from '../scrapers/directStream';
-import { pelicula as netmirrorPelicula, episodio as netmirrorEpisodio, buscarNetflixId, masterHls, FuenteNetmirror } from '../scrapers/netmirror';
+import { pelicula as netmirrorPelicula, episodio as netmirrorEpisodio, buscarNetflixId, masterHls, servidorDePelicula, FuenteNetmirror } from '../scrapers/netmirror';
 import { traducirYNormalizar } from '../utils/idiomas';
 import { leerAjuste } from '../utils/ajustesRemotos';
 import { revisarServidores, aplicarVeredictosRecordados } from './playbackHealth';
@@ -5192,57 +5192,12 @@ async function serverDeNetmirror(
       idiomasCache = [];
     }
   }
-  const query = '';
-  const ruta = `/api/v1/netmirror/stream/${tmdbId}${query}`;
-  const calidad: ServerOption['quality'] =
-    fuente.meta.resolution === '1080' ? '1080p' :
-    fuente.meta.resolution === '720'  ? '720p'  :
-    fuente.meta.resolution === '4K'   ? '4K'    : '480p';
-  const ahora = new Date().toISOString();
-  const altura =
-    fuente.meta.resolution === '2160' || fuente.meta.resolution === '4K' ? 2160 :
-    fuente.meta.resolution === '1080' ? 1080 :
-    fuente.meta.resolution === '720'  ? 720  :
-    fuente.meta.resolution === '360'  ? 360  : 480;
-  // El `direct_stream` apunta a nuestro endpoint con `?mode=redirect`: para el cliente Android
-  // (Media3) esto es un 302 al CDN, propaga los headers `Referer` y descarga direct del CDN sin
-  // que ningun byte pase por el Worker. Antes el proxy duplicaba latencia y ancho de banda:
-  // Spider-Man y Kung Fu Panda 4 tardaban 5-10s en empezar. Los clientes sin headers pueden
-  // pedir la misma URL sin `?mode=redirect` y el endpoint hace proxy.
-  //
-  // El `?mode=redirect` sobre nuestro endpoint tiene otra ventaja sobre la URL directa CDN:
-  // aqui el 302 se emite en el momento del play (con firma FRESCA), no cuando se cacheo la
-  // ficha 10 min atras. Asi el CDN nunca ve una firma caducada.
-  const rutaRedirect = ruta + (ruta.includes('?') ? '&' : '?') + 'mode=redirect';
+  // La forma del servidor vive en el scraper (`servidorDePelicula`): es la MISMA que escribe
+  // `scripts/importarNetmirror.ts` cuando trae una ficha nueva, y tienen que coincidir —el
+  // proxy, la cabecera Referer, el modo redirect, el sello— o el importador y la apertura se
+  // contradirían sobre el mismo título.
   const server: ServerOption = {
-    id: `nm-${tmdbId}`,
-    name: 'NetMirror',
-    quality: calidad,
-    // Marcamos latino: la API devuelve audio original con subs es; nuestro proxy inyecta la pista
-    // subtitulada latina como default (ver `filtrarYordenarEsp` en scraper). El cliente lo trata
-    // como "latino disponible" a efectos de ordenacion — es lo que ve el espectador.
-    language: 'latino',
-    embed_url: rutaRedirect,
-    direct_stream: rutaRedirect,
-    direct_kind: 'mp4',
-    direct_mode: 'redirect',
-    direct_host: 'bcdnxw.hakunaymatata.com',
-    // Cabeceras que el CDN exige. Media3 las fija y las propaga al seguir el 302 (comprobado).
-    headers: {
-      Referer: 'https://videodownloader.site/',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-    },
-    status: 'online',
-    last_checked: ahora,
-    // Sello reciente: acabamos de resolver el mp4 contra la API oficial. Sin esto,
-    // `revisarServidores` intenta comprobar el embed_url y lo puede marcar offline.
-    verified_at: ahora,
-    max_height: altura,
-    // TTFB observado en la CDN: ~300-500 ms. Sin este valor el sorter le asigna infinito y lo
-    // hunde por debajo de cualquier server con TTFB medido.
-    ttfb_ms: 400,
-    source_id: 'netmirror',
-    source_name: 'NetMirror',
+    ...servidorDePelicula(tmdbId, fuente),
     // Metadata multi-audio para el cliente Android. Cuando el cache tiene los idiomas del
     // master HLS (poblados por el escaneo o por un cliente previo), se los damos aqui para que
     // Media3 pueda montar el HLS con multi-audio en vez del mp4 mono-audio. Sin idiomas, el

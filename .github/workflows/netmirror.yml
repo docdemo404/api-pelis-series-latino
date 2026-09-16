@@ -1,0 +1,84 @@
+name: Traer lo que NetMirror reproduce (Prime Video) y no teníamos
+
+# NETMIRROR COMO POBLADOR, NO SOLO COMO SERVIDOR.
+#
+# Hasta aquí NetMirror se pegaba a fichas que ya existían (`scanNetmirror.ts` recorre lo nuestro y
+# pregunta título a título). Lo que ninguna otra fuente trajera no entraba aunque NetMirror lo
+# tuviera. Este trabajo hace el camino contrario: parte de la lista de Prime Video que publica TMDB
+# (`discover/movie` por región) y mete lo que NetMirror reproduce y el catálogo no tiene.
+#
+# La lista NO se saca del buscador de NetMirror a propósito: contesta 50 títulos por consulta,
+# busca por subcadena y da títulos con año, no ids. Con TMDB la identidad viene de los dos lados
+# —TMDB da el id, NetMirror contesta por ese mismo id— y no hay que emparejar nada por nombre,
+# que es lo que este repositorio prohíbe. Ver la cabecera de `scripts/importarNetmirror.ts`.
+#
+# ── SOLO PELÍCULAS ─────────────────────────────────────────────────────────────────────────────
+#
+# La API de NetMirror devuelve el mismo mp4 para todos los capítulos de una serie, y el catálogo
+# ya no la anuncia para series por eso. Traer series de Prime con NetMirror de única fuente sería
+# anunciar temporadas que reproducen el piloto.
+#
+# ── EL RITMO ───────────────────────────────────────────────────────────────────────────────────
+#
+# Tres peticiones a la vez contra NetMirror: con más, su API contesta «no lo tengo» a títulos que
+# sí tiene (medido en `scanNetmirror.ts`), y un «no» se recuerda dos semanas. Cada ficha cuesta
+# la consulta a la API más la prueba de arranque del mp4, unos 3-4 s. Las cuatro regiones suman
+# 22.476 ids distintos (medido el 2026-09-16: IN 5.390, MX 5.294, ES 8.019, US 20.001, con mucho
+# solape); a 900 por corrida y cuatro corridas al día, la primera vuelta completa tarda unos seis
+# días y las siguientes solo tocan lo nuevo, lo que toque resellar (cada 20 días, antes de que
+# venza el sello de 30) y los «no» que hayan cumplido las dos semanas.
+#
+# Mismo reloj que `videoapi.yml`, desplazado una hora, para no coincidir con él ni con el crawl.
+
+on:
+  schedule:
+    - cron: '0 3,9,15,21 * * *'
+  workflow_dispatch:
+    inputs:
+      limite:
+        description: 'Cuántas fichas como mucho en esta corrida'
+        required: false
+        default: '900'
+      minutos:
+        description: 'Presupuesto de reloj'
+        required: false
+        default: '40'
+      regiones:
+        description: 'Regiones de TMDB, separadas por comas'
+        required: false
+        default: 'IN,MX,ES,US'
+      proveedor:
+        description: 'prime o netflix'
+        required: false
+        default: 'prime'
+
+concurrency:
+  group: netmirror
+  cancel-in-progress: false
+
+jobs:
+  importar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+      - run: npm ci
+
+      - name: Importar lo que NetMirror reproduce
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+        run: |
+          npx ts-node scripts/importarNetmirror.ts \
+            --limite=${{ inputs.limite || 900 }} \
+            --minutos=${{ inputs.minutos || 40 }} \
+            --regiones=${{ inputs.regiones || 'IN,MX,ES,US' }} \
+            --proveedor=${{ inputs.proveedor || 'prime' }}
