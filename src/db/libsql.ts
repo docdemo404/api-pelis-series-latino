@@ -12,7 +12,7 @@
  * silenciosa» que este proyecto ya pagó con Supabase.
  *
  * EL ESQUEMA SE APLICA SOLO. `src/db/turso/esquema.sql` es idempotente y lleva un número de
- * versión; al primer uso de cada proceso se mira `PRAGMA user_version` (una ida y vuelta) y si no
+ * versión; al primer uso de cada proceso se mira la tabla `esquema` (una ida y vuelta) y si no
  * coincide se ejecuta el archivo entero y se sube el número. Así una base recién creada en Turso
  * queda lista con la primera petición, y cambiar una vista es subir `VERSION_DEL_ESQUEMA`.
  */
@@ -66,6 +66,19 @@ export function getDb(): Client {
 }
 
 /**
+ * Qué versión del esquema tiene la base. Va en una tabla (`esquema`) y no en `PRAGMA
+ * user_version` porque Turso no deja escribir pragmas. Sin tabla, es una base recién nacida: 0.
+ */
+export async function versionAplicada(): Promise<number> {
+  try {
+    const rs = await getDb().execute("SELECT valor FROM esquema WHERE clave = 'version'");
+    return Number(rs.rows[0]?.[0] ?? 0);
+  } catch {
+    return 0;
+  }
+}
+
+/**
  * Deja la base con el esquema de `esquema.sql`. Idempotente y barata cuando ya está: una lectura
  * del `user_version`. Se llama sola desde el adaptador antes de la primera consulta del proceso.
  */
@@ -73,12 +86,14 @@ export function asegurarEsquema(): Promise<void> {
   if (!esquemaListo) {
     esquemaListo = (async () => {
       const db = getDb();
-      const rs = await db.execute('PRAGMA user_version');
-      const actual = Number(rs.rows[0]?.[0] ?? 0);
+      const actual = await versionAplicada();
       if (actual === VERSION_DEL_ESQUEMA) return;
       const archivo = path.join(__dirname, 'turso', 'esquema.sql');
       await db.executeMultiple(fs.readFileSync(archivo, 'utf8'));
-      await db.execute(`PRAGMA user_version = ${VERSION_DEL_ESQUEMA}`);
+      await db.execute({
+        sql: "INSERT INTO esquema (clave, valor) VALUES ('version', ?) ON CONFLICT (clave) DO UPDATE SET valor = excluded.valor",
+        args: [VERSION_DEL_ESQUEMA],
+      });
       console.log(`   ✅ esquema v${VERSION_DEL_ESQUEMA} aplicado (antes v${actual})`);
     })().catch(err => {
       esquemaListo = null; // que el siguiente lo vuelva a intentar en vez de quedarse roto

@@ -22,6 +22,12 @@
 --     decide con una escritura de prueba, no consultando permisos.
 -- ═══════════════════════════════════════════════════════════════════════════════════════════════
 
+-- Qué versión de este archivo tiene aplicada la base. La escribe `asegurarEsquema`.
+CREATE TABLE IF NOT EXISTS esquema (
+    clave TEXT PRIMARY KEY,
+    valor INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS media_items (
     id                TEXT PRIMARY KEY,
     tmdb_id           INTEGER NOT NULL,

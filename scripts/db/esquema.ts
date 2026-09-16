@@ -9,14 +9,14 @@
  * rehacen). Los jobs de GitHub lo hacen solos al arrancar; la API en Vercel no hace DDL.
  */
 import 'dotenv/config';
-import { asegurarEsquema, getDb, urlDeLaBase, VERSION_DEL_ESQUEMA } from '../../src/db/libsql';
+import { asegurarEsquema, getDb, urlDeLaBase, versionAplicada, VERSION_DEL_ESQUEMA } from '../../src/db/libsql';
 
 async function main() {
   const url = urlDeLaBase();
   console.log(`base: ${url.replace(/\/\/.*@/, '//***@')}`);
-  const antes = Number((await getDb().execute('PRAGMA user_version')).rows[0]?.[0] ?? 0);
+  const antes = await versionAplicada();
   if (antes === VERSION_DEL_ESQUEMA && process.argv.includes('--forzar')) {
-    await getDb().execute('PRAGMA user_version = 0');
+    await getDb().execute("DELETE FROM esquema WHERE clave = 'version'");
   }
   await asegurarEsquema();
   const tablas = await getDb().execute("SELECT name, type FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY type, name");
