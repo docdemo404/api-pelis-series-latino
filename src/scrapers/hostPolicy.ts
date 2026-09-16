@@ -95,6 +95,17 @@ export interface HostPolicy {
    */
   segmentosDisfrazados?: boolean;
   /**
+   * Cada url firmada (maestro, playlist, segmento) queda ATADA AL PRIMER CLIENTE que la usa, y no
+   * a la IP: desde la misma máquina, Node pide el maestro y contesta 200; curl lo pide un segundo
+   * después y contesta 403. Medido en el CDN de vimeos el 2026-09-16.
+   *
+   * Lo que eso prohíbe es el 302 al maestro: esta API lo comprueba antes de entregarlo (ver
+   * `comprobarDestino`) y con esa comprobación lo gasta. Lo que sí vale es `manifest`: las
+   * playlists las pide y las sirve la API, que es quien las usa, y los segmentos —cada uno con su
+   * token, que nadie ha tocado— van del CDN al reproductor. Unos KB por aquí, el vídeo por fuera.
+   */
+  tokenDeUnSoloCliente?: boolean;
+  /**
    * Su vídeo NO se puede servir desde nuestra red por ninguna vía, así que no se ofrece como
    * vídeo directo: el servidor se queda con su embed, que en un navegador funciona.
    *
@@ -333,6 +344,37 @@ const POLICIES: HostPolicy[] = [
     measuredAt: MEASURED_AT,
   },
   {
+    /**
+     * VideoAPI: el embed es `videoapi.la/e/…` (o `videoapp.zip`), que solo sirve para descubrir el
+     * reproductor de vimeos; el vídeo sale por `pN.vimeos.zip` / `sN.vimeos.net`, el mismo CDN de
+     * la entrada de abajo. Sin esta entrada caía en CONSERVATIVE —«atado por IP, por proxy»— y
+     * cada reproducción pasaba por el Worker de Cloudflare.
+     *
+     * MEDIDO el 2026-09-16 con token recién acuñado, en maestro, variante y segmento: 200 sin
+     * Referer, con Referer ajeno, sin UA de navegador y sin ninguna cabecera; `ACAO: *` en los
+     * tres; y un segmento acuñado desde Vercel se bajó desde otra IP. Abierto del todo, con UNA
+     * pega: cada url firmada se ata al primer cliente que la usa (`tokenDeUnSoloCliente`), así
+     * que el modo es `manifest` y no `redirect`. Ver el campo.
+     *
+     * Y HAY UN MOTIVO MÁS PARA NO PASAR POR EL WORKER: ese mismo día el CDN empezó a contestar
+     * 403 a TODO lo que sale del runtime de Cloudflare Workers —misma url, mismas cabeceras,
+     * misma IP en local: curl y Node 200, workerd 403—, así que por el Worker no reproduce
+     * ninguna. Por 302 el aparato habla con el CDN directamente, que es lo más rápido que hay.
+     */
+    match: ['videoapi.la', 'videoapp.zip'],
+    ipBound: false,
+    tokenDeUnSoloCliente: true,
+    refererRequired: false,
+    refererChecked: false,
+    cors: true,
+    browserUaRequired: false,
+    segmentRefererRequired: false,
+    segmentRefererChecked: false,
+    segmentCors: true,
+    tokenTtlSeconds: null,
+    measuredAt: '2026-09-16',
+  },
+  {
     // Abierto de arriba abajo aunque cada escalón esté en un host distinto: maestro en
     // `turboviplay.com`, variantes en `turbosplayer.com`, segmentos en `googleusercontent.com`.
     // Los tres sirven sin cabeceras y con `ACAO: *`, así que el 302 basta.
@@ -343,6 +385,8 @@ const POLICIES: HostPolicy[] = [
     // 276 servidores se quedaban en `CONSERVATIVE` pagando proxy sin motivo.
     match: ['vimeos.net', 'unlimplay'],
     ipBound: false,
+    // Mismo CDN que videoapi: el token se ata al primer cliente (medido el 2026-09-16). Ver el campo.
+    tokenDeUnSoloCliente: true,
     refererRequired: false,
     refererChecked: false,
     cors: true,
@@ -446,6 +490,11 @@ export function bestMode(embedUrl: string, kind: DirectKind, caps: ClientCaps = 
   // aquí. Va ANTES incluso de `caps.setsHeaders`: no es cuestión de qué cabeceras sepa poner el
   // cliente, es que ningún reproductor —nativo o no— sabe desenvolverlos.
   if (policy.segmentosDisfrazados) return 'proxy';
+
+  // El token se gasta con el primer uso y la API ya lo usa al comprobarlo: el maestro no se puede
+  // redirigir. Con HLS las playlists van por aquí y los segmentos por fuera; un fichero suelto
+  // es una sola url ya gastada, así que solo queda proxearlo.
+  if (policy.tokenDeUnSoloCliente) return kind === 'hls' ? 'manifest' : 'proxy';
 
   // Un cliente nativo pone las cabeceras que haga falta, así que a partir de aquí puede todo.
   if (caps.setsHeaders) return 'redirect';

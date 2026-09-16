@@ -146,8 +146,38 @@ function saltoDeVideoapi(embedUrl, html) {
  * Acuña la URL real del vídeo DESDE AQUÍ. Es el punto entero del Worker: el CDN tiene que ver la
  * misma IP acuñando y descargando.
  */
-async function acunar(embedUrl, saltos = 1) {
+/**
+ * EL SALTO DE VIDEOAPI SE RECUERDA. La página de videoapi.la tarda 3,3 s (medido el 2026-09-16) y
+ * lo único que aporta es la url del reproductor de vimeos, que es fija por título: el slug
+ * `embed-524lenj4bdra.html` es el id del fichero y no cambia. Se guarda en R2 siete días, y a
+ * partir de la primera reproducción cada arranque se ahorra ese viaje. El token que sí caduca se
+ * acuña en el paso siguiente, que no se cachea.
+ */
+const SALTO_EN_CACHE_MS = 7 * 24 * 60 * 60 * 1000;
+
+async function saltoRecordado(env, embedUrl) {
+  if (!env?.CACHE) return null;
+  const obj = await env.CACHE.get(`salto/${embedUrl}`).catch(() => null);
+  if (!obj) return null;
+  if (Number(obj.customMetadata?.hasta) < Date.now()) return null;
+  return obj.text();
+}
+
+function recordarSalto(env, embedUrl, dentro) {
+  if (!env?.CACHE) return;
+  env.CACHE.put(`salto/${embedUrl}`, dentro, {
+    customMetadata: { hasta: String(Date.now() + SALTO_EN_CACHE_MS) },
+  }).catch(() => {});
+}
+
+async function acunar(embedUrl, saltos = 1, env = null) {
   const origin = new URL(embedUrl).origin;
+
+  if (saltos > 0 && /(?:videoapi\.la|videoapp\.zip)\/e\//i.test(embedUrl)) {
+    const recordado = await saltoRecordado(env, embedUrl);
+    if (recordado) return acunar(recordado, saltos - 1, env);
+  }
+
   const res = await fetch(embedUrl, {
     headers: { 'User-Agent': UA, Referer: `${origin}/` },
     cf: { cacheTtl: 0 },
@@ -160,7 +190,10 @@ async function acunar(embedUrl, saltos = 1) {
   // convierta una reproducción en una ráfaga de peticiones.
   if (saltos > 0) {
     const dentro = saltoDeVideoapi(embedUrl, html);
-    if (dentro) return acunar(dentro, saltos - 1);
+    if (dentro) {
+      recordarSalto(env, embedUrl, dentro);
+      return acunar(dentro, saltos - 1, env);
+    }
   }
 
   const url = extraerDeTexto(unpackPacker(html) || '') || extraerDeTexto(html);
@@ -196,8 +229,8 @@ function reescribir(manifiesto, base, embedParam, firma, origenWorker) {
 }
 
 /** Trasplanta una firma recién acuñada a una URL que acaba de dar 403. */
-async function refrescar(objetivo, embedUrl) {
-  const fresco = await acunar(embedUrl);
+async function refrescar(objetivo, embedUrl, env = null) {
+  const fresco = await acunar(embedUrl, 1, env);
   if (!fresco) return null;
   try {
     const q = new URL(fresco.url).search;
@@ -208,6 +241,143 @@ async function refrescar(objetivo, embedUrl) {
   } catch {
     return null;
   }
+}
+
+/**
+ * PRECALENTAR: lo que el reproductor va a pedir dentro de un segundo, pedido AHORA.
+ *
+ * Medido desde Bolivia el 2026-09-16, con una película de VideoAPI: el maestro tarda 2–3 s (tres
+ * viajes al origen: embed, reproductor, m3u8), la playlist de la variante 2 s, la de audio otros
+ * 2 s, y el primer segmento 1,2 s. El reproductor los pide EN FILA, porque no sabe el siguiente
+ * hasta leer el anterior, así que el primer fotograma llegaba a los 8–10 s. Y la caché del borde
+ * no ayudaba: cada apertura acuña un token nuevo, la URL cambia y no hay dos peticiones iguales.
+ *
+ * Aquí, mientras se le entrega el maestro, el Worker sigue trabajando (`ctx.waitUntil`): baja
+ * las playlists hijas —variantes y pistas de audio, no los I-frames, que nadie pide al arrancar—
+ * las reescribe y las guarda en la caché del borde bajo la MISMA url que el reproductor va a
+ * pedir; y de cada una trae sus dos primeros segmentos, que se quedan en la caché de Cloudflare
+ * por la url del CDN. Cuando el reproductor llega, todo está a un salto de borde: unos 50 ms la
+ * playlist, 300 ms el segmento. La fila de 8–10 s se queda en lo que tarda el maestro.
+ *
+ * Con moderación: dos segmentos por pista y no más de tres peticiones a la vez contra el CDN,
+ * que es el mismo que devuelve 502 cuando se le insiste.
+ *
+ * LAS PLAYLISTS VAN A R2, NO A `caches.default`. En un dominio `*.workers.dev` —que es donde vive
+ * este Worker— la Cache API no guarda nada (está documentado, y se comprobó), y la caché de
+ * `fetch` solo retiene lo que Cloudflare cachea por defecto: los `.ts` sí, los `.m3u8` no. R2 ya
+ * está enchufado para los trozos de mp4; una playlist son unos KB con diez minutos de vida.
+ * No se purgan solas: el que se relee caducado se borra, el resto se queda. A 5 KB cada una,
+ * mil reproducciones al día son 15 MB al día; con el bucket lleno, `put` falla y se sigue igual.
+ */
+const SEGMENTOS_A_PRECALENTAR = 2;
+const PLAYLIST_EN_CACHE_MS = 10 * 60 * 1000;
+
+function llaveDePlaylist(urlSeg) {
+  const u = new URL(urlSeg).searchParams.get('u') || '';
+  return `playlist/${u}`;
+}
+
+async function playlistGuardada(env, urlSeg) {
+  if (!env.CACHE) return null;
+  const clave = llaveDePlaylist(urlSeg);
+  const obj = await env.CACHE.get(clave).catch(() => null);
+  if (!obj) return null;
+  if (Number(obj.customMetadata?.hasta) < Date.now()) {
+    env.CACHE.delete(clave).catch(() => {});
+    return null;
+  }
+  return obj.text();
+}
+
+async function guardarPlaylist(env, urlSeg, cuerpo) {
+  if (!env.CACHE) return;
+  await env.CACHE.put(llaveDePlaylist(urlSeg), cuerpo, {
+    httpMetadata: { contentType: 'application/vnd.apple.mpegurl' },
+    customMetadata: { hasta: String(Date.now() + PLAYLIST_EN_CACHE_MS) },
+  }).catch(() => {});
+}
+
+function hijasDelMaestro(maestroReescrito) {
+  const variantes = [];
+  const pistas = [];
+  const lineas = maestroReescrito.split(/\r?\n/);
+  for (let i = 0; i < lineas.length; i++) {
+    const t = lineas[i].trim();
+    if (t.startsWith('#EXT-X-MEDIA:')) {
+      const m = t.match(/URI="([^"]+)"/);
+      if (m) pistas.push(m[1]);
+    } else if (t.startsWith('#EXT-X-STREAM-INF:')) {
+      const sig = (lineas[i + 1] || '').trim();
+      if (sig && !sig.startsWith('#')) variantes.push(sig);
+    }
+  }
+  return [...variantes, ...pistas];
+}
+
+function primerosSegmentos(playlistReescrita, cuantos) {
+  return playlistReescrita
+    .split(/\r?\n/)
+    .map(l => l.trim())
+    .filter(l => l && !l.startsWith('#'))
+    .slice(0, cuantos);
+}
+
+/** El destino real (`?u=`) de una url `/seg` nuestra. */
+function objetivoDe(urlSeg) {
+  try {
+    return b64urlDecode(new URL(urlSeg).searchParams.get('u') || '');
+  } catch {
+    return null;
+  }
+}
+
+async function precalentar(env, maestroReescrito, referer, embedParam, firma, origenWorker, conocidas = new Map()) {
+  const cabeceras = { 'User-Agent': UA, Referer: referer };
+  const hijas = hijasDelMaestro(maestroReescrito);
+
+  const unaHija = async urlSeg => {
+    const objetivo = objetivoDe(urlSeg);
+    if (!objetivo) return;
+    let cuerpo = conocidas.get(urlSeg);
+    if (cuerpo) {
+      await guardarPlaylist(env, urlSeg, cuerpo);
+    } else {
+      cuerpo = await playlistGuardada(env, urlSeg);
+      if (!cuerpo) {
+        const res = await fetch(objetivo, { headers: cabeceras, cf: { cacheTtl: 0 } });
+        if (!res.ok) { console.log('precalentar: playlist', res.status, new URL(objetivo).host); return; }
+        cuerpo = reescribir(await res.text(), objetivo, embedParam, firma, origenWorker);
+        await guardarPlaylist(env, urlSeg, cuerpo);
+      }
+    }
+    // Sus primeros segmentos, en fila para no aporrear el CDN. Se lee el cuerpo entero: si no,
+    // Cloudflare no lo guarda.
+    for (const seg of primerosSegmentos(cuerpo, SEGMENTOS_A_PRECALENTAR)) {
+      const destino = objetivoDe(seg);
+      if (!destino) continue;
+      try {
+        const r = await fetch(destino, { headers: cabeceras, cf: { cacheEverything: true, cacheTtl: 86400 } });
+        await r.arrayBuffer();
+        if (!r.ok) console.log('precalentar: segmento', r.status, new URL(destino).host);
+      } catch {
+        /* un segmento que no llega ahora llegará cuando lo pida el reproductor */
+      }
+    }
+  };
+
+  // Tres hijas a la vez como mucho (dos variantes y una pista de audio es lo normal).
+  const cola = hijas.slice();
+  const obreros = Array.from({ length: Math.min(3, cola.length) }, async () => {
+    while (cola.length) {
+      const siguiente = cola.shift();
+      try {
+        await unaHija(siguiente);
+      } catch {
+        /* precalentar es un extra: nunca rompe la reproducción */
+      }
+    }
+  });
+  await Promise.all(obreros);
 }
 
 function respuestaVideo(upstream) {
@@ -315,6 +485,16 @@ export default {
       } catch {
         return new Response('parámetro ?u= no válido', { status: 400, headers: CORS });
       }
+
+      // Una playlist que `precalentar` dejó lista: se sirve de R2 sin tocar el CDN.
+      if (!request.headers.get('Range')) {
+        const lista = await playlistGuardada(env, request.url);
+        if (lista) {
+          return new Response(lista, {
+            headers: { ...CORS, 'Content-Type': 'application/vnd.apple.mpegurl', 'Cache-Control': 'no-store', 'X-Precalentada': '1' },
+          });
+        }
+      }
       const referer = new URL(embedUrl).origin + '/';
       const rango = request.headers.get('Range');
       const pedir = destino =>
@@ -329,11 +509,12 @@ export default {
 
       // 403/410 = la firma caducó o esta invocación salió por otra IP. Se vuelve a acuñar.
       if ((upstream.status === 403 || upstream.status === 410)) {
-        const refrescado = await refrescar(objetivo, embedUrl);
+        const refrescado = await refrescar(objetivo, embedUrl, env);
         if (refrescado) upstream = await pedir(refrescado);
       }
 
       if (upstream.status >= 400) {
+        console.log('seg: el CDN rechazó', upstream.status, new URL(objetivo).host);
         return new Response('el CDN rechazó el segmento', { status: 502, headers: CORS });
       }
 
@@ -341,6 +522,11 @@ export default {
       const tipo = upstream.headers.get('content-type') || '';
       if (/mpegurl|vnd\.apple/i.test(tipo)) {
         const cuerpo = reescribir(await upstream.text(), objetivo, embedParam, firma, origenWorker);
+        // Si el precalentado no llegó a tiempo (o esta playlist no venía del maestro), al menos
+        // que sus dos primeros segmentos vayan por delante del reproductor.
+        ctx.waitUntil(
+          precalentar(env, `#EXT-X-STREAM-INF:\n${request.url}`, referer, embedParam, firma, origenWorker, new Map([[request.url, cuerpo]]))
+        );
         return new Response(cuerpo, {
           headers: { ...CORS, 'Content-Type': 'application/vnd.apple.mpegurl', 'Cache-Control': 'no-store' },
         });
@@ -349,7 +535,7 @@ export default {
     }
 
     // ── Entrada: acuñar el vídeo y servirlo ──────────────────────────────────────────────
-    const acunado = await acunar(embedUrl);
+    const acunado = await acunar(embedUrl, 1, env);
     if (!acunado) {
       return new Response('no se pudo extraer el vídeo de este embed', { status: 502, headers: CORS });
     }
@@ -365,6 +551,7 @@ export default {
       });
 
     let upstream = await pedirEntrada(acunado.url);
+    console.log('entrada:', upstream.status, acunado.url, 'referer', acunado.referer);
 
     /**
      * REINTENTO EN LA ENTRADA, que faltaba.
@@ -376,7 +563,7 @@ export default {
      * enchufó. Se vuelve a acuñar y se trasplanta la firma nueva a la misma ruta.
      */
     if (upstream.status === 403 || upstream.status === 410) {
-      const refrescado = await refrescar(acunado.url, embedUrl);
+      const refrescado = await refrescar(acunado.url, embedUrl, env);
       if (refrescado) upstream = await pedirEntrada(refrescado);
     }
 
@@ -387,6 +574,7 @@ export default {
     const tipo = upstream.headers.get('content-type') || '';
     if (/mpegurl|vnd\.apple/i.test(tipo) || /\.m3u8(\?|$)/i.test(acunado.url)) {
       const cuerpo = reescribir(await upstream.text(), acunado.url, embedParam, firma, origenWorker);
+      ctx.waitUntil(precalentar(env, cuerpo, acunado.referer, embedParam, firma, origenWorker));
       return new Response(cuerpo, {
         headers: { ...CORS, 'Content-Type': 'application/vnd.apple.mpegurl', 'Cache-Control': 'no-store' },
       });
