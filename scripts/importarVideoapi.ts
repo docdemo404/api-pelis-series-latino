@@ -41,7 +41,6 @@ import {
   listarCatalogo,
   embedDeVideoapi,
   claseDeSerie,
-  esUrlDeVideoapi,
   UA_NAVEGADOR,
   ClaseVideoapi,
   CatalogoDeVideoapi,
@@ -114,8 +113,10 @@ interface Trabajo {
   clase: ClaseVideoapi;
   tmdbId: number;
   type: ContentType;
-  /** La fila que ya existe, si existe. */
-  fila?: { id: string; servers: any[]; seasons: any[] };
+  /** La fila que ya existe, si existe. Solo el id: lo que haga falta de ella se lee al escribir. */
+  fila?: { id: string };
+  /** Series: los capítulos que la fuente tiene y nosotros no. Decidido al armar la cola. */
+  pendientes?: CapituloDeVideoapi[];
 }
 
 const cuenta = {
@@ -234,18 +235,10 @@ function servidorDeVideoapi(
  * escribir nada. La carga inicial no lo nota; la sincronización de dentro de un mes, sí.
  */
 function capitulosPendientes(
-  fila: { seasons: any[] } | undefined,
+  yaResueltos: Set<string> | undefined,
   capitulos: CapituloDeVideoapi[]
 ): CapituloDeVideoapi[] {
-  if (REHACER) return capitulos;
-  const yaResueltos = new Set<string>();
-  for (const temp of fila?.seasons || []) {
-    for (const ep of (temp as any)?.episodes || []) {
-      if (yaTieneVideoapi(ep?.servers)) {
-        yaResueltos.add(`${(temp as any).season_number}x${ep.episode_number}`);
-      }
-    }
-  }
+  if (REHACER || !yaResueltos) return capitulos;
   return capitulos.filter((c) => !yaResueltos.has(`${c.temporada}x${c.capitulo}`));
 }
 
@@ -265,10 +258,54 @@ function capitulosPendientes(
  * Exigiendo `direct_stream` estas fichas vuelven a la cola y la siguiente vuelta las repara sola.
  * Es la misma idea que `--direct-only` en el crawl, sin necesidad de un modo aparte.
  */
-function yaTieneVideoapi(servers: any[] | null | undefined): boolean {
-  return (servers || []).some(
-    (s) => esUrlDeVideoapi(String(s?.embed_url || '')) && Boolean(s?.direct_stream)
-  );
+/**
+ * Y ESO SE LE PREGUNTA A POSTGRES, NO SE BAJA.
+ *
+ * Esto miraba `servers` y `seasons` de cada fila, y para tenerlos a mano el índice se bajaba el
+ * catálogo entero con las dos columnas dentro: 89 MB por vuelta, cuatro vueltas al día, 10 GB al
+ * mes contra una cuota de 5. Fue lo que agotó el egress de Supabase el 10 de septiembre (entró el
+ * 27 de agosto; a 356 MB/día, catorce días dan 5 GB, y catorce días después llegó el corte).
+ *
+ * La vista `servidores_publicados` (migraciones 018 y 019) ya da UN SERVIDOR POR FILA, ficha o
+ * capítulo, con su `direct_stream`. Pedirle solo los de videoapi con vídeo son unos cientos de KB
+ * y contesta exactamente lo que se necesita: qué películas y qué `SxE` ya están hechos.
+ *
+ * Devuelve, por id de ficha, el conjunto de claves resueltas: '' para la película en sí y `SxE`
+ * por capítulo. Sin la vista NO se degrada a bajarse la tabla: se para y se dice cuál falta.
+ */
+async function resueltoPorVideoapi(): Promise<Map<string, Set<string>>> {
+  const hecho = new Map<string, Set<string>>();
+  let bytes = 0;
+  const PAGINA = 1000;
+  for (let desde = 0; ; desde += PAGINA) {
+    const { data, error } = await db
+      .from('servidores_publicados')
+      .select('media_id,season_number,episode_number')
+      .or('embed_url.ilike.%videoapi.la/e/%,embed_url.ilike.%videoapp.zip/e/%')
+      .not('direct_stream', 'is', null)
+      .neq('direct_stream', '')
+      // Con `order`: paginar sin él se salta filas y repite otras, y no se nota.
+      .order('media_id')
+      .order('season_number', { nullsFirst: true })
+      .order('episode_number', { nullsFirst: true })
+      .range(desde, desde + PAGINA - 1);
+    if (error) {
+      throw new Error(
+        `no se pudo leer servidores_publicados (${error.message}). ` +
+          'Hace falta la vista de src/db/migrations/018 y 019, pegadas en el SQL Editor de Supabase.'
+      );
+    }
+    bytes += JSON.stringify(data || []).length;
+    for (const f of (data || []) as any[]) {
+      const id = String(f.media_id);
+      const clave = f.season_number == null ? '' : `${Number(f.season_number)}x${Number(f.episode_number)}`;
+      if (!hecho.has(id)) hecho.set(id, new Set());
+      hecho.get(id)!.add(clave);
+    }
+    if (!data || data.length < PAGINA) break;
+  }
+  console.log(`ya resuelto por videoapi: ${hecho.size} fichas (${Math.round(bytes / 1024)} KB bajados)`);
+  return hecho;
 }
 
 /** Añade el servidor sin pisar los que ya estaban, y sin duplicarse a sí mismo. */
@@ -279,25 +316,28 @@ function fusionarServidores(previos: any[], nuevo: ServerOption): any[] {
   return [nuevo, ...resto];
 }
 
-/** El catálogo nuestro, indexado por `tipo:tmdb`. Se pagina: supabase corta en 1000 por consulta. */
-async function nuestroCatalogo(): Promise<Map<string, { id: string; servers: any[]; seasons: any[] }>> {
-  const idx = new Map<string, { id: string; servers: any[]; seasons: any[] }>();
+/**
+ * El catálogo nuestro, indexado por `tipo:tmdb`. Se pagina: supabase corta en 1000 por consulta.
+ *
+ * TRES COLUMNAS Y NADA MÁS. Aquí venían también `servers` y `seasons` «para tenerlos a mano», y
+ * eso era bajarse el catálogo entero en cada corrida. Ver `resueltoPorVideoapi` para el coste.
+ */
+async function nuestroCatalogo(): Promise<Map<string, { id: string }>> {
+  const idx = new Map<string, { id: string }>();
+  let bytes = 0;
   for (let desde = 0; ; desde += 1000) {
     const { data, error } = await db
       .from('media_items')
-      .select('id, tmdb_id, type, servers, seasons')
+      .select('id,tmdb_id,type')
       .gt('tmdb_id', 0)
+      .order('id')
       .range(desde, desde + 999);
     if (error) throw new Error(error.message);
-    for (const f of data || []) {
-      idx.set(`${f.type}:${f.tmdb_id}`, {
-        id: String(f.id),
-        servers: (f as any).servers || [],
-        seasons: (f as any).seasons || [],
-      });
-    }
+    bytes += JSON.stringify(data || []).length;
+    for (const f of data || []) idx.set(`${f.type}:${f.tmdb_id}`, { id: String(f.id) });
     if (!data || data.length < 1000) break;
   }
+  console.log(`catálogo propio: ${idx.size} fichas con tmdb_id (${Math.round(bytes / 1024)} KB bajados)`);
   return idx;
 }
 
@@ -392,18 +432,12 @@ async function insertarFicha(ficha: MediaItem, servers: ServerOption[], seasons:
   if (/duplicate key/i.test(error.message)) {
     const { data } = await db
       .from('media_items')
-      .select('id, servers, seasons')
+      .select('id')
       .eq('tmdb_id', ficha.tmdb_id)
       .eq('type', ficha.type)
       .limit(1);
     const yaEsta: any = data && data[0];
-    if (yaEsta) {
-      return actualizarFicha(
-        { id: String(yaEsta.id), servers: yaEsta.servers || [], seasons: yaEsta.seasons || [] },
-        servers[0],
-        seasons
-      );
-    }
+    if (yaEsta) return actualizarFicha({ id: String(yaEsta.id) }, servers[0], seasons);
   }
   console.log(`   ! ${ficha.id}: ${error.message}`);
   cuenta.errores++;
@@ -418,15 +452,32 @@ async function insertarFicha(ficha: MediaItem, servers: ServerOption[], seasons:
  * verlas. Justo lo que se pidió al empezar («necesitamos más fuentes»).
  */
 async function actualizarFicha(
-  fila: { id: string; servers: any[]; seasons: any[] },
+  fila: { id: string },
   servidor: ServerOption | undefined,
   seasonsNuevas: any[]
 ): Promise<boolean> {
+  /**
+   * Lo que hay guardado se lee AQUÍ, justo antes de fusionar, y solo la columna que se va a
+   * tocar: `servers` para una película, `seasons` para una serie. Es una fila, no el catálogo. Y
+   * además es más fresco que un índice leído al arrancar: entre medias han pasado veinte minutos
+   * en los que otro escritor pudo añadir capítulos, y fusionar sobre lo viejo era pisarlos
+   * (`seasons` se fusiona, nunca se reemplaza — y tres fallos distintos vinieron de ahí).
+   */
+  const columnas = [servidor ? 'servers' : '', seasonsNuevas.length ? 'seasons' : ''].filter(Boolean).join(',');
+  const { data: actual, error: errLectura } = columnas
+    ? await db.from('media_items').select(columnas).eq('id', fila.id).maybeSingle()
+    : { data: null, error: null };
+  if (errLectura) {
+    console.log(`   ! ${fila.id}: ${errLectura.message}`);
+    cuenta.errores++;
+    return false;
+  }
+  const guardado: any = actual || {};
   const update: Record<string, unknown> = { updated_at: new Date().toISOString() };
 
-  if (servidor) update.servers = fusionarServidores(fila.servers, servidor);
+  if (servidor) update.servers = fusionarServidores(guardado.servers || [], servidor);
   if (seasonsNuevas.length) {
-    update.seasons = fusionarTemporadas(fila.seasons || [], seasonsNuevas);
+    update.seasons = fusionarTemporadas(guardado.seasons || [], seasonsNuevas);
   }
   update.streams_updated_at = new Date().toISOString();
   update.streams_checked_at = new Date().toISOString();
@@ -489,7 +540,11 @@ async function haremosSerie(t: Trabajo, catalogo: CatalogoDeVideoapi): Promise<v
     }
   }
 
-  const pendientes = capitulosPendientes(t.fila, capitulos).slice(0, CAPITULOS_POR_SERIE);
+  // Decidido al armar la cola, con lo que contestó la vista. Mismo criterio en los dos momentos.
+  const pendientes = (t.pendientes || capitulos)
+    .slice()
+    .sort((a, b) => a.temporada - b.temporada || a.capitulo - b.capitulo)
+    .slice(0, CAPITULOS_POR_SERIE);
   if (!pendientes.length) return;
 
   const resueltos: Array<{ c: CapituloDeVideoapi; servidor: ServerOption }> = [];
@@ -566,7 +621,7 @@ async function main() {
   );
 
   const nuestro = await nuestroCatalogo();
-  console.log(`catálogo propio: ${nuestro.size} fichas con tmdb_id`);
+  const hecho = REHACER ? new Map<string, Set<string>>() : await resueltoPorVideoapi();
 
   const animes = new Set(catalogo.anime);
   const cola: Trabajo[] = [];
@@ -574,7 +629,7 @@ async function main() {
   if (!SOLO || SOLO === 'peliculas') {
     for (const tmdbId of catalogo.peliculas) {
       const fila = nuestro.get(`movie:${tmdbId}`);
-      if (fila && !REHACER && yaTieneVideoapi(fila.servers)) continue;
+      if (fila && !REHACER && hecho.get(fila.id)?.has('')) continue;
       cola.push({ clase: 'movie', tmdbId, type: 'movie', fila });
     }
   }
@@ -585,8 +640,9 @@ async function main() {
       const capitulos = catalogo.capitulosPorSerie.get(tmdbId) || [];
       // Una serie sin capítulos pendientes no entra en la cola: si entrara, ocuparía un sitio de
       // la tanda para no hacer nada. Ver `capitulosPendientes`.
-      if (!capitulosPendientes(fila, capitulos).length) continue;
-      cola.push({ clase: claseDeSerie(tmdbId, animes), tmdbId, type: 'tvseries', fila });
+      const pendientes = capitulosPendientes(fila ? hecho.get(fila.id) : undefined, capitulos);
+      if (!pendientes.length) continue;
+      cola.push({ clase: claseDeSerie(tmdbId, animes), tmdbId, type: 'tvseries', fila, pendientes });
     }
   }
 

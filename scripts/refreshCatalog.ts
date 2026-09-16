@@ -535,49 +535,60 @@ async function fillDirectStreams(max: number): Promise<void> {
    * ventana que no se movía.
    *
    * Se notó midiendo: 2.343 servidores seguían sin vídeo directo en hosts que SÍ sabemos extraer,
-   * mientras el repaso se declaraba al día ronda tras ronda. Ahora se leen todas las fichas con
-   * enlaces (paginando), se filtran las que de verdad tienen algo pendiente y solo entonces se
-   * aplica el tope — que pasa a limitar el TRABAJO, no la búsqueda.
+   * mientras el repaso se declaraba al día ronda tras ronda. Ahora se recorre el catálogo entero,
+   * se filtran las que de verdad tienen algo pendiente y solo entonces se aplica el tope — que
+   * pasa a limitar el TRABAJO, no la búsqueda.
+   *
+   * PERO RECORRERLO NO ES BAJÁRSELO. Esto pedía todas las fichas con `servers` dentro —unos
+   * 10 MB, tres veces al día— para quedarse con los servidores sin `direct_stream`. Eso lo
+   * contesta Postgres con la vista `servidores_sin_directo` (migración 020): un servidor por fila,
+   * solo los que no tienen vídeo directo, cien bytes cada uno. Lo que sigue en JavaScript es
+   * `mereceRepasoDeExtraccion`, que mira la política del host y no se puede escribir en SQL.
    */
-  const filas: any[] = [];
+  const filas: Array<{ media_id: string; media_type: string; embed_url: string }> = [];
+  let bytes = 0;
   for (let desde = 0; ; desde += 1000) {
     const { data, error } = await db
-      .from('media_items')
-      .select('id,type,title,servers')
-      .not('servers', 'is', null)
-      .neq('servers', '[]')
+      .from('servidores_sin_directo')
+      .select('media_id,media_type,embed_url')
+      // Las más antiguas primero. Con `order` completo: paginar sin él se salta filas.
       .order('streams_updated_at', { ascending: true, nullsFirst: false })
+      .order('media_id')
+      .order('embed_url')
       .range(desde, desde + 999);
     if (error) {
-      console.warn(`   ⚠ No se pueden leer las fichas: ${error.message}`);
+      console.error(`   ✗ no se pudo leer servidores_sin_directo: ${error.message}`);
+      console.error('     ¿está aplicada la migración 020? Sin ella este repaso no puede correr.');
       return;
     }
     if (!data?.length) break;
-    filas.push(...data);
+    bytes += JSON.stringify(data).length;
+    filas.push(...(data as any[]));
     if (data.length < 1000) break;
   }
-  const data = filas;
 
-  // Interesan las que no tienen NINGÚN vídeo directo, y también aquellas donde un servidor
-  // que HOY sabemos resolver se quedó sin él: pasa cada vez que se añade un extractor nuevo,
-  // y también con upns, que responde 429 si se le insiste y deja el servidor sin resolver.
-  const candidatas = data.filter(row => {
-    if (!Array.isArray(row.servers) || row.servers.length === 0) return false;
-    const servers = row.servers as any[];
-    return servers.some(s => s?.embed_url && !s.direct_stream && mereceRepasoDeExtraccion(s.embed_url));
-  });
+  // Interesan las fichas donde un servidor que HOY sabemos resolver se quedó sin vídeo directo:
+  // pasa cada vez que se añade un extractor nuevo, y también con upns, que responde 429 si se le
+  // insiste y deja el servidor sin resolver. Una ficha, una vez, en el orden en que llegó.
+  const candidatas: Array<{ id: string; type: any }> = [];
+  const vistas = new Set<string>();
+  for (const f of filas) {
+    if (vistas.has(f.media_id) || !mereceRepasoDeExtraccion(f.embed_url)) continue;
+    vistas.add(f.media_id);
+    candidatas.push({ id: f.media_id, type: f.media_type });
+  }
 
   // El tope acota el TRABAJO de esta pasada, no la búsqueda: las que sobren salen en la
   // siguiente, y como se ordena por antigüedad se avanza siempre.
   const pending = candidatas.slice(0, max);
-  console.log(`   ${candidatas.length} fichas con algo extraíble pendiente en todo el catálogo`);
+  console.log(`   ${candidatas.length} fichas con algo extraíble pendiente en todo el catálogo (${filas.length} servidores sin directo, ${Math.round(bytes / 1024)} KB bajados)`);
 
   if (pending.length === 0) {
     console.log('✔ Todas las fichas revisadas ya tienen su vídeo directo resuelto.');
     return;
   }
 
-  console.log(`🎬 Extrayendo vídeo directo de ${pending.length} fichas (de ${data?.length || 0} revisadas)...`);
+  console.log(`🎬 Extrayendo vídeo directo de ${pending.length} fichas...`);
   const CONCURRENCY = 6;
   let conDirecto = 0;
   let servidoresDirectos = 0;

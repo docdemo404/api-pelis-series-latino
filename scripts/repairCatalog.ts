@@ -2666,49 +2666,22 @@ async function hideRowsWithoutDirect(apply: boolean): Promise<void> {
  *   npm run repair:catalog -- --episodios --apply --limit=200
  */
 async function checkEpisodes(apply: boolean, limitArg?: number): Promise<void> {
-  const CADUCA_MS = 7 * 24 * 60 * 60 * 1000;
   const tope = Number.isFinite(limitArg as number) && (limitArg as number) > 0 ? (limitArg as number) : 200;
   console.log(`🎞  Comprobando capítulos uno a uno${apply ? '' : ' (dry-run)'} · tope ${tope}\n`);
 
-  type Pendiente = { id: string; title: string; season: number; episode: number; edad: number; visible: boolean; orden: number };
-  const pendientes: Pendiente[] = [];
-
-  const PAGINA = 40;
-  for (let from = 0; ; from += PAGINA) {
-    const { data, error } = await db
-      .from('media_items')
-      .select('id,title,seasons,has_streams')
-      .eq('type', 'tvseries')
-      /**
-       * CON `order`. Un SELECT sin ORDER BY no garantiza el mismo orden entre consultas, así que
-       * paginar sin él se salta filas y repite otras — y no se nota, porque el recuento sale
-       * plausible y además estable. Con 26 series cabían en una página y daba igual; en cuanto el
-       * catálogo pase de `PAGINA` series, empieza a perder series enteras sin decir nada.
-       */
-      .order('id')
-      .range(from, from + PAGINA - 1);
-    if (error) { console.warn(`   ⚠ ${error.message}`); break; }
-    if (!data || data.length === 0) break;
-
-    for (const row of data as any[]) {
-      for (const t of row.seasons || []) {
-        for (const e of t?.episodes || []) {
-          const sello = e?.checked_at ? Date.parse(e.checked_at) : 0;
-          if (sello && Date.now() - sello < CADUCA_MS) continue;
-          const season = Number(t.season_number), episode = Number(e.episode_number);
-          pendientes.push({
-            id: row.id, title: row.title, season, episode,
-            edad: sello,                        // 0 = nunca comprobado, va primero
-            visible: row.has_streams === true,  // lo que la gente ve HOY
-            orden: season * 10000 + episode,    // 1x1 antes que 1x2, y ese antes que 2x1
-          });
-        }
-      }
-    }
-    if (data.length < PAGINA) break;
-  }
-
   /**
+   * SE LE PIDE A POSTGRES LA LISTA YA HECHA, no el material para hacerla.
+   *
+   * Esto se bajaba todas las series con `seasons` dentro —79 MB— para recorrer cada capítulo en
+   * JavaScript, quedarse con los que no tenían sello fresco, ordenarlos y cortar en `tope`. Nueve
+   * vueltas al día son 700 MB, contra 5 GB AL MES de cuota: este barrido solo la agotaba en una
+   * semana, y el egress agotado es lo que dejó Supabase pausado en septiembre.
+   *
+   * La vista `capitulos_por_comprobar` (migración 020) es esa misma lista: un capítulo por fila,
+   * solo los sin sello o con sello de más de siete días, y con `faltan` —cuántos le quedan a su
+   * serie— que es lo que necesita el orden. Aquí queda un ORDER BY y un LIMIT, y lo que baja son
+   * `tope` filas de sesenta bytes.
+   *
    * EL ORDEN DECIDE CUÁNTO TARDA EN NOTARSE, y con 90.000 pendientes eso pesa más que el ritmo.
    *
    * Se hacía a lo ANCHO —el 1x1 de todas las series antes que el 1x2 de ninguna— y tenía sentido
@@ -2723,17 +2696,41 @@ async function checkEpisodes(apply: boolean, limitArg?: number): Promise<void> {
    * Las que HOY están en el catálogo van delante: comprobar las que nadie ve no arregla nada
    * visible.
    */
-  const faltanPorSerie = new Map<string, number>();
-  for (const p of pendientes) faltanPorSerie.set(p.id, (faltanPorSerie.get(p.id) || 0) + 1);
-  pendientes.sort((a, b) =>
-    (Number(b.visible) - Number(a.visible)) ||
-    ((faltanPorSerie.get(a.id) || 0) - (faltanPorSerie.get(b.id) || 0)) ||
-    (a.id < b.id ? -1 : a.id > b.id ? 1 : 0) ||   // no intercalar dos series con el mismo tamaño
-    (a.orden - b.orden)
-  );
-  const lista = pendientes.slice(0, tope);
-  const visibles = pendientes.filter(p => p.visible).length;
-  console.log(`   ${pendientes.length} capítulos por comprobar (${visibles} de series visibles) · se hacen ${lista.length}`);
+  const { data, error } = await db
+    .from('capitulos_por_comprobar')
+    .select('media_id,media_title,has_streams,season_number,episode_number,faltan')
+    .order('has_streams', { ascending: false, nullsFirst: false })   // lo que la gente ve HOY
+    .order('faltan', { ascending: true })                             // las que menos les falta
+    .order('media_id')                                                // no intercalar dos series
+    .order('season_number')                                           // 1x1 antes que 1x2,
+    .order('episode_number')                                          // y ese antes que 2x1
+    .limit(tope);
+  if (error) {
+    console.error(`   ✗ no se pudo leer capitulos_por_comprobar: ${error.message}`);
+    console.error('     ¿está aplicada la migración 020? Sin ella este barrido no puede correr.');
+    return;
+  }
+  const lista = ((data || []) as any[]).map(f => ({
+    id: String(f.media_id),
+    season: Number(f.season_number),
+    episode: Number(f.episode_number),
+  }));
+
+  /**
+   * Los totales son solo para el registro, y van aparte: cada recuento recorre la vista entera
+   * (todas las temporadas de todas las series), así que si Postgres lo corta por tiempo se sigue
+   * sin él. Lo que baja de cada uno es una cabecera.
+   */
+  const contar = async (soloVisibles: boolean) => {
+    let q = db.from('capitulos_por_comprobar').select('media_id', { count: 'exact', head: true });
+    if (soloVisibles) q = q.eq('has_streams', true);
+    const { count, error: err } = await q;
+    return err ? null : count;
+  };
+  const [total, visibles] = await Promise.all([contar(false), contar(true)]);
+  const rotulo = (n: number | null | undefined) => (n == null ? '?' : String(n));
+  const bajado = Math.round(JSON.stringify(data || []).length / 1024);
+  console.log(`   ${rotulo(total)} capítulos por comprobar (${rotulo(visibles)} de series visibles) · se hacen ${lista.length} (${bajado} KB bajados)`);
 
   /**
    * TRES resultados, no dos, y confundirlos da un informe que asusta sin motivo:
