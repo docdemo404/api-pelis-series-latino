@@ -22,13 +22,14 @@
 import 'dotenv/config';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
 import { esUrlDeFicheroPermanente } from '../src/scrapers/directStream';
+import { urlApiProduccion } from '../src/config/produccion';
 
 /**
  * La dirección pública de la API. La URL firmada del Worker se le PIDE a ella en vez de calcularla
  * aquí, y eso no es un rodeo: es lo que hace que este script no necesite la clave de firma. Un
  * proceso que solo calienta una caché no tiene por qué poder firmar nada.
  */
-const API = process.env.CATALOG_URL || 'https://api-pelis-series-latino-gilt.vercel.app';
+const API = urlApiProduccion('CATALOG_URL');
 
 /** La URL firmada de la caché para este fichero, tal y como la emitiría la API al reproductor. */
 async function urlFirmada(urlFichero: string): Promise<string | null> {

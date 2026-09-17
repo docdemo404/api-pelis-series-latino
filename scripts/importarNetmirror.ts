@@ -70,6 +70,7 @@ import { TmdbService, TMDB_API_KEY } from '../src/services/tmdbService';
 import { CatalogService } from '../src/services/catalogService';
 import { searchIndexKey } from '../src/utils/text';
 import { MediaItem, ServerOption } from '../src/types';
+import { urlApiProduccion } from '../src/config/produccion';
 
 const db = getSupabaseAdmin();
 
@@ -106,7 +107,7 @@ const TMDB = texto('tmdb', '').split(',').map(Number).filter((n) => n > 0);
  * API sale de `API_PELIS_URL` o, si no está, de la de producción.
  */
 const VIA = texto('via', 'directo').toLowerCase();
-const API_PELIS = (process.env.API_PELIS_URL || 'https://api-catalogo-latino.vercel.app').replace(/\/$/, '');
+const API_PELIS = urlApiProduccion('API_PELIS_URL');
 /** Una película que NetMirror tiene seguro, para saber si desde aquí contesta antes de empezar. */
 const PELICULA_TESTIGO = 27205; // El Origen (2010)
 /** Tantos «no contesta» seguidos ya no son mala suerte: es que dejó de atendernos. */

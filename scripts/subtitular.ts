@@ -37,6 +37,7 @@ import { medirEncaje } from '../src/services/subtitulos/encaje';
 import { correrEnElTiempo, escribirVtt, leerSubtitulo, type Linea } from '../src/services/subtitulos/formato';
 import { buscarPublicos, descargarPublico } from '../src/services/subtitulos/publicos';
 import { noMorirPorUnCorteDeRed } from '../src/utils/seguirVivo';
+import { urlApiProduccion } from '../src/config/produccion';
 
 // Un socket que se muere no puede llevarse por delante el barrido entero. Ver ahi.
 noMorirPorUnCorteDeRed();
@@ -211,8 +212,7 @@ async function pistaEntreLosFlujos(url: string, preferido: string): Promise<Audi
  */
 function urlAbsoluta(url: string): string {
   if (!url.startsWith('/')) return url;
-  const base = (process.env.API_PUBLIC_URL || 'https://api-pelis-series-latino-gilt.vercel.app')
-    .replace(/\/$/, '');
+  const base = urlApiProduccion('API_PUBLIC_URL');
   return base + url;
 }
 

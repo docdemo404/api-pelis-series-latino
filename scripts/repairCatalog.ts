@@ -86,6 +86,7 @@ import { nombreConTipo, paraElCliente, fichaReproducible, veredictoDisponibilida
 import { extraerManuales, fusionarConLedger, leerLedger, ledgerVacio, todoElLedger, esManual } from '../src/services/manualLedger';
 import { MediaItem, ContentType } from '../src/types';
 import { noMorirPorUnCorteDeRed } from '../src/utils/seguirVivo';
+import { urlApiProduccion } from '../src/config/produccion';
 
 // Un socket que se muere no puede llevarse por delante el barrido entero. Ver ahi.
 noMorirPorUnCorteDeRed();
@@ -3318,7 +3319,7 @@ async function reconcilePolicyDirects(apply: boolean): Promise<void> {
  *   npm run repair:catalog -- --directos-falsos --apply
  */
 async function repairFakeDirects(apply: boolean, limitArg?: number, soloHost?: string): Promise<void> {
-  const API = process.env.API_BASE || 'https://api-pelis-series-latino-gilt.vercel.app';
+  const API = urlApiProduccion('API_BASE', 'API_BASE_URL');
   console.log(`🎭 Comprobando los que se anuncian como vídeo directo${apply ? '' : ' (dry-run)'}...`);
 
   const rows = (await fetchAllRows(['servers'])).filter(r => (r.servers || []).length > 0);
@@ -3497,8 +3498,27 @@ async function repairFakeDirects(apply: boolean, limitArg?: number, soloHost?: s
  *   npm run repair:catalog -- --entrega --apply
  */
 async function checkDeliveryByHost(apply: boolean): Promise<void> {
-  const API = (process.env.API_BASE_URL || 'https://api-pelis-series-latino-gilt.vercel.app').replace(/\/+$/, '');
+  const API = urlApiProduccion('API_BASE_URL', 'API_BASE');
   console.log(`🚚 Comprobando la entrega REAL por host, contra ${API}${apply ? '' : ' (dry-run)'}...`);
+
+  /**
+   * PRIMERO, ¿HAY ALGUIEN AL OTRO LADO? Este paso mide hosts A TRAVÉS de la API, así que una API
+   * que no contesta no dice nada de ningún host. Y sin esta pregunta previa dice lo contrario:
+   * el dominio viejo `…-gilt` se borró el 2026-08-28, quedó aquí como valor por defecto, y su
+   * `404 The deployment could not be found` se leyó durante semanas como «este host no entrega»
+   * —para los diez hosts, en cada vuelta, con 538 sellos retirados por corrida (ver
+   * `src/config/produccion.ts`). Un 404 del panel es un problema NUESTRO, y se para aquí.
+   */
+  try {
+    const salud = await streamClient.get(`${API}/api/v1/panel`, { timeout: 15000, validateStatus: () => true });
+    if (salud.status !== 200) {
+      console.error(`   ✗ la API contesta ${salud.status} en /api/v1/panel: no se puede medir ningún host, no se toca nada.`);
+      return;
+    }
+  } catch (e) {
+    console.error(`   ✗ la API no contesta (${e instanceof Error ? e.message : e}): no se puede medir ningún host, no se toca nada.`);
+    return;
+  }
 
   /**
    * Cuántos veredictos concluyentes de «no entrega» hacen falta para condenar un host, y a qué
@@ -3561,10 +3581,23 @@ async function checkDeliveryByHost(apply: boolean): Promise<void> {
       if (Date.now() - Date.parse(m.verified_at) > FRESCURA_MS) continue;
     }
     /**
+     * LAS RUTAS INTERNAS NO SE JUZGAN AQUÍ. Un `embed_url` que empieza por `/` es una ruta de
+     * nuestra propia API (`/api/v1/netmirror/stream/<tmdb>`): su «host» somos nosotros, y
+     * preguntarle a Vercel si alcanza a Vercel no mide nada. Peor: `entrega()` envuelve el
+     * embed en `/api/v1/stream/direct?e=…`, que no sabe extraer una ruta interna y contesta 400
+     * —concluyente— con la API perfectamente viva. Medido el 2026-09-17: el mismo
+     * `/api/v1/netmirror/stream/1007757?mode=redirect` contesta 302 al mp4 del CDN pedido tal
+     * cual, y 400 envuelto. Así fue como el host `(ilegible)` perdió 1.906 sellos.
+     *
+     * Si esas rutas entregan lo decide quien las trae: `importarNetmirror` sella cada una tras
+     * arrancar el mp4 desde Vercel (`--via=api`), y el aviso de la app en `/api/v1/report` las
+     * retira una a una cuando fallan de verdad.
+     */
+    if (String(m.embed_url).startsWith('/')) continue;
+    /**
      * La clave se saca con `hostDe`, no con la columna `host` de la vista. Las dos dicen lo mismo
-     * para una url normal, pero una url interna de la API (`/api/v1/netmirror/...`) no tiene
-     * dominio: la vista la deja en cadena vacía y `hostDe` la llama `(ilegible)`. Se usa la
-     * segunda porque es la que sale por pantalla y la que llevan los veredictos de más abajo.
+     * para una url normal, pero por si alguna quedara sin dominio `hostDe` la llama `(ilegible)`,
+     * que es lo que sale por pantalla y lo que llevan los veredictos de más abajo.
      */
     const h = hostDe(String(m.embed_url));
     if (!porHost.has(h)) porHost.set(h, []);
@@ -3724,6 +3757,20 @@ async function checkDeliveryByHost(apply: boolean): Promise<void> {
     console.log(`\n❌ ${caidos.length} host(s) que la API NO puede entregar: ${caidos.join(', ')}`);
   }
 
+  /**
+   * FUSIBLE: QUE CAIGAN TODOS A LA VEZ HABLA DE NOSOTROS, NO DE ELLOS.
+   *
+   * Diez hosts distintos —archive.org, Google Drive, videoapi…— no dejan de atender a Vercel el
+   * mismo minuto. Cuando el veredicto es «ninguno entrega» lo que ha fallado es el camino común:
+   * la API caída, un despliegue a medias, una ruta que cambió. La comprobación de arriba coge el
+   * caso claro (el panel no contesta); esta coge el resto, porque el panel puede estar vivo y la
+   * ruta de vídeo no. Con un solo host examinado no hay «todos» que valga, y se deja pasar.
+   */
+  if (caidos.length >= 2 && entregan.size === 0) {
+    console.error('\n   ✗ han caído TODOS los hosts a la vez: eso es un fallo nuestro, no de ellos. No se toca nada.');
+    return;
+  }
+
   const condenados = new Set(caidos);
   let fichasTocadas = 0, sellosRetirados = 0, seEsconden = 0, primerosAvisos = 0, absueltos = 0;
 
@@ -3878,6 +3925,101 @@ async function checkDeliveryByHost(apply: boolean): Promise<void> {
 
   console.log(`\n🚫 ${sellosRetirados} sellos retirados en ${fichasTocadas} fichas · ${seEsconden} dejan de anunciarse ${apply ? '' : '(se harían)'}`);
   console.log(`   ⏳ ${primerosAvisos} servidor(es) con su primer golpe, que siguen anunciados · 🙌 ${absueltos} absuelto(s)`);
+  console.log(apply ? '   ✅ aplicado' : '   (dry-run: repite con --apply)');
+  await purgarCacheDeTocadas(apply);
+}
+
+/**
+ * DEVOLVER LOS SELLOS A LAS RUTAS INTERNAS (`--devolver-internos`)
+ *
+ * Es la reparación de lo que `--entrega` hizo mientras preguntaba a un dominio muerto (ver
+ * `src/config/produccion.ts`): los servidores cuya url es una ruta de nuestra API —hoy, las de
+ * NetMirror, `/api/v1/netmirror/stream/<tmdb>`— acumularon dos golpes falsos y perdieron el
+ * sello. A los demás hosts los vuelve a sellar `--verificar` en su siguiente vuelta; a estos no
+ * los reselle nadie, porque `--verificar` no sabe sondear una ruta relativa. 1.906 de 2.424
+ * estaban fuera del catálogo cuando se escribió esto.
+ *
+ * Qué hace, y solo esto: a cada servidor con url interna le borra `fallos_entrega` y, si se
+ * quedó sin `verified_at`, se lo devuelve con la fecha de su `last_checked` (el importador lo
+ * selló entonces) o, en su defecto, la de ahora. No inventa nada que no estuviera: el sello lo
+ * había puesto `importarNetmirror` tras arrancar el mp4 desde Vercel, y lo que se lo quitó no
+ * era una medida sino un 404 del dominio equivocado. Un servidor que la app haya reportado
+ * caído de verdad (`/api/v1/report`) no lleva golpes de `--entrega`, así que no entra aquí.
+ *
+ * Y recalcula `has_streams`, porque «524 dejan de anunciarse» era la otra mitad del daño.
+ *
+ *   npm run repair:catalog -- --devolver-internos
+ *   npm run repair:catalog -- --devolver-internos --apply
+ */
+async function devolverSellosInternos(apply: boolean): Promise<void> {
+  console.log(`🩹 Devolviendo los sellos a las rutas internas${apply ? '' : ' (dry-run)'}...`);
+
+  /** Solo las fichas que tienen algo que cambiar, preguntado a la vista y no bajando el catálogo. */
+  const ids = new Set<string>();
+  const PAGINA = 1000;
+  for (let desde = 0; ; desde += PAGINA) {
+    const { data, error } = await db
+      .from('servidores_publicados')
+      .select('media_id,verified_at,fallos_entrega')
+      .like('embed_url', '/%')
+      .order('media_id', { ascending: true })
+      .order('embed_url', { ascending: true })
+      .range(desde, desde + PAGINA - 1);
+    if (error) { console.error(`   ✗ no se pudo leer servidores_publicados: ${error.message}`); return; }
+    for (const f of (data || []) as any[]) {
+      if (f.fallos_entrega != null || !f.verified_at) ids.add(String(f.media_id));
+    }
+    if (!data || data.length < PAGINA) break;
+  }
+  console.log(`   ${ids.size} ficha(s) con una ruta interna sin sello o con golpes`);
+
+  let fichas = 0, sellosDevueltos = 0, golpesBorrados = 0, vuelven = 0;
+  const aTocar = [...ids].sort();
+  for (let i = 0; i < aTocar.length; i += 100) {
+    const { data: lote, error } = await db
+      .from('media_items')
+      .select('id,tmdb_id,type,title,servers,seasons,has_streams')
+      .in('id', aTocar.slice(i, i + 100));
+    if (error) { console.warn(`   ⚠ no se pudo traer un lote: ${error.message}`); break; }
+
+    for (const row of (lote || []) as any[]) {
+      let cambio = false;
+      const revisar = (s: any) => {
+        if (!String(s?.embed_url || '').startsWith('/') || !s.direct_stream) return s;
+        if (s.fallos_entrega === undefined && s.verified_at) return s;
+        cambio = true;
+        const { fallos_entrega, ...limpio } = s;
+        if (fallos_entrega !== undefined) golpesBorrados++;
+        if (limpio.verified_at) return limpio;
+        sellosDevueltos++;
+        const sello = limpio.last_checked && Number.isFinite(Date.parse(limpio.last_checked))
+          ? limpio.last_checked
+          : new Date().toISOString();
+        return { ...limpio, verified_at: sello, status: 'online' };
+      };
+      const servers = (row.servers || []).map(revisar);
+      const seasons = (row.seasons || []).map((t: any) => ({
+        ...t,
+        episodes: (t.episodes || []).map((e: any) => (
+          Array.isArray(e?.servers) ? { ...e, servers: e.servers.map(revisar) } : e
+        )),
+      }));
+      if (!cambio) continue;
+
+      fichas++;
+      const veredicto = veredictoDisponibilidad({ type: row.type, servers, seasons }, 'todo');
+      if (veredicto === true && row.has_streams !== true) vuelven++;
+      if (!apply) continue;
+
+      marcarTocada(row);
+      const { error: errUpd } = await db.from('media_items')
+        .update({ servers, seasons, has_streams: veredicto ?? row.has_streams })
+        .eq('id', row.id);
+      if (errUpd) console.warn(`   ⚠ ${row.id}: ${errUpd.message}`);
+    }
+  }
+
+  console.log(`\n🩹 ${sellosDevueltos} sello(s) devueltos y ${golpesBorrados} golpe(s) borrados en ${fichas} ficha(s) · ${vuelven} vuelven a anunciarse ${apply ? '' : '(se harían)'}`);
   console.log(apply ? '   ✅ aplicado' : '   (dry-run: repite con --apply)');
   await purgarCacheDeTocadas(apply);
 }
@@ -4106,6 +4248,11 @@ async function main() {
 
   if (process.argv.includes('--entrega')) {
     await checkDeliveryByHost(apply);
+    return;
+  }
+
+  if (process.argv.includes('--devolver-internos')) {
+    await devolverSellosInternos(apply);
     return;
   }
 
