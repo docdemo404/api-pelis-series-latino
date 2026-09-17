@@ -65,7 +65,7 @@
 import 'dotenv/config';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
 import { consultarPelicula, servidorDePelicula, ConsultaNetmirror, FuenteNetmirror } from '../src/scrapers/netmirror';
-import { puedeAbrirse } from '../src/services/arranqueMp4';
+import { puedeAbrirse, Arranque } from '../src/services/arranqueMp4';
 import { TmdbService, TMDB_API_KEY } from '../src/services/tmdbService';
 import { CatalogService } from '../src/services/catalogService';
 import { searchIndexKey } from '../src/utils/text';
@@ -287,15 +287,25 @@ async function descartadosRecientes(): Promise<Set<number>> {
 // 3. Comprobar y escribir
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-/** La consulta, por el camino que toque. La respuesta tiene la misma forma por los dos. */
-async function consultar(tmdbId: number): Promise<ConsultaNetmirror> {
+/**
+ * La consulta, por el camino que toque. La respuesta tiene la misma forma por los dos, salvo que
+ * por la API viene ADEMÁS el veredicto de arranque del mp4: la CDN de NetMirror tampoco atiende a
+ * los runners de GitHub, así que desde allí no se puede probar el fichero — se prueba desde
+ * Vercel, que es desde donde se sirve, y se trae el resultado.
+ */
+type Consulta = ConsultaNetmirror & { arranque?: Arranque };
+
+async function consultar(tmdbId: number, conArranque = false): Promise<Consulta> {
   if (VIA !== 'api') return consultarPelicula(tmdbId);
   try {
-    const r = await fetch(`${API_PELIS}/api/v1/netmirror/probe/${tmdbId}`, { signal: AbortSignal.timeout(30_000) });
+    const r = await fetch(`${API_PELIS}/api/v1/netmirror/probe/${tmdbId}${conArranque ? '?arranque=1' : ''}`, {
+      signal: AbortSignal.timeout(30_000),
+    });
     if (r.status === 404) return { estado: 'no' };
     if (!r.ok) return { estado: 'sin-respuesta', detalle: `API HTTP ${r.status}` };
-    const j = (await r.json()) as { data?: FuenteNetmirror };
-    return j?.data?.mp4 ? { estado: 'tiene', fuente: j.data } : { estado: 'sin-respuesta', detalle: 'API sin fuente' };
+    const j = (await r.json()) as { data?: FuenteNetmirror; arranque?: Arranque };
+    if (!j?.data?.mp4) return { estado: 'sin-respuesta', detalle: 'API sin fuente' };
+    return { estado: 'tiene', fuente: j.data, arranque: j.arranque };
   } catch (e: any) {
     return { estado: 'sin-respuesta', detalle: e?.name === 'TimeoutError' ? 'timeout' : e?.message || String(e) };
   }
@@ -325,7 +335,7 @@ async function anotarCache(tmdbId: number, disponible: boolean, resolucion: numb
  * para verlo, no se guarda.
  */
 async function resolverYVerificar(c: Candidata): Promise<ServerOption | null> {
-  const consulta = await consultar(c.tmdbId);
+  const consulta = await consultar(c.tmdbId, true);
   if (consulta.estado === 'sin-respuesta') {
     cuenta.sinRespuesta++;
     if (++sinRespuestaSeguidos >= SIN_RESPUESTA_PARA_PARAR && !parar) {
@@ -348,7 +358,7 @@ async function resolverYVerificar(c: Candidata): Promise<ServerOption | null> {
     cuenta.otraObra++;
     return null;
   }
-  const arranque = await puedeAbrirse(fuente.mp4, { Referer: fuente.referer });
+  const arranque = consulta.arranque ?? (await puedeAbrirse(fuente.mp4, { Referer: fuente.referer }));
   if (!arranque.ok) {
     // Un tope agotado no condena (ver `arranqueMp4.ts`), pero tampoco se escribe: el importador
     // vuelve a pasar por aquí en la siguiente vuelta y lo que hoy fue lento entra mañana.

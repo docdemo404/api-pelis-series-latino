@@ -1,6 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { pelicula, episodio, consultarPelicula, FuenteNetmirror } from '../scrapers/netmirror';
 import { sendErrorResponse } from '../utils/apiHelpers';
+import { puedeAbrirse } from '../services/arranqueMp4';
 
 /**
  * NetMirror — endpoints por tmdb id.
@@ -48,6 +49,18 @@ router.get('/api/v1/netmirror/probe/:tmdbId', async (req: Request, res: Response
       const c = await consultarPelicula(tmdbId);
       if (c.estado === 'sin-respuesta') return sendErrorResponse(res, 502, 'UPSTREAM_ERROR', `NetMirror no contesta: ${c.detalle}`);
       if (c.estado === 'no') return sendErrorResponse(res, 404, 'NOT_FOUND', 'NetMirror no tiene este titulo.');
+      /**
+       * Con `?arranque=1` se comprueba ADEMÁS que el mp4 abre —la misma prueba del verificador,
+       * con la cabecera Referer de la CDN— y se devuelve el veredicto junto a la fuente. Hace
+       * falta porque la CDN tampoco atiende a los runners de GitHub: el importador no puede
+       * probarlo desde allí, y desde aquí sí. Presupuesto corto para no rozar el techo de la
+       * función; agotarlo da `sinVeredicto`, que el importador no apunta.
+       */
+      if (req.query.arranque === '1') {
+        const t0 = Date.now();
+        const arranque = await puedeAbrirse(c.fuente.mp4, { Referer: c.fuente.referer, 'User-Agent': UA }, 7_000);
+        return res.json({ status: 'success', data: c.fuente, arranque: { ...arranque, ms: Date.now() - t0 } });
+      }
       return res.json({ status: 'success', data: c.fuente });
     }
     const r = await resolver(req);
