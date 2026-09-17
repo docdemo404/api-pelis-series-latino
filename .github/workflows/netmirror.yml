@@ -28,6 +28,14 @@ name: Traer lo que NetMirror reproduce (Prime Video) y no teníamos
 # días y las siguientes solo tocan lo nuevo, lo que toque resellar (cada 20 días, antes de que
 # venza el sello de 30) y los «no» que hayan cumplido las dos semanas.
 #
+# ── POR QUÉ `--via=api` ───────────────────────────────────────────────────────────────────────
+#
+# NetMirror no atiende a la IP de los runners de GitHub (medido el 2026-09-16: la primera corrida
+# recibió «no» para todo y escribió 105 descartes falsos antes de cancelarla). Desde Vercel sí
+# contesta —es lo que sirve cada reproducción—, así que el importador le pregunta a través de
+# nuestra propia API (`/api/v1/netmirror/probe/<tmdb>`). Antes de escribir nada comprueba con
+# una película testigo que por esa vía contesta, y si no, se para con código 1.
+#
 # Mismo reloj que `videoapi.yml`, desplazado una hora, para no coincidir con él ni con el crawl.
 
 on:
@@ -81,4 +89,5 @@ jobs:
             --limite=${{ inputs.limite || 900 }} \
             --minutos=${{ inputs.minutos || 40 }} \
             --regiones=${{ inputs.regiones || 'IN,MX,ES,US' }} \
-            --proveedor=${{ inputs.proveedor || 'prime' }}
+            --proveedor=${{ inputs.proveedor || 'prime' }} \
+            --via=api

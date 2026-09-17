@@ -1,5 +1,5 @@
 import { Router, Request, Response, NextFunction } from 'express';
-import { pelicula, episodio, FuenteNetmirror } from '../scrapers/netmirror';
+import { pelicula, episodio, consultarPelicula, FuenteNetmirror } from '../scrapers/netmirror';
 import { sendErrorResponse } from '../utils/apiHelpers';
 
 /**
@@ -35,8 +35,21 @@ async function resolver(req: Request): Promise<FuenteNetmirror | null> {
   return pelicula(tmdbId);
 }
 
+/**
+ * La sonda dice TRES cosas, no dos: 200 con la fuente, 404 si NetMirror contestó que no la tiene,
+ * y 502 si NetMirror no contestó. `scripts/importarNetmirror.ts` la usa desde GitHub —cuya IP
+ * NetMirror no atiende— y apunta los 404 como «no» durante dos semanas; un 502 no se apunta.
+ * Solo para películas: la de capítulos sigue por `resolver`, que colapsa las dos cosas.
+ */
 router.get('/api/v1/netmirror/probe/:tmdbId', async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const tmdbId = Number(req.params.tmdbId);
+    if (String(req.query.type || 'movie') === 'movie' && Number.isFinite(tmdbId) && tmdbId > 0) {
+      const c = await consultarPelicula(tmdbId);
+      if (c.estado === 'sin-respuesta') return sendErrorResponse(res, 502, 'UPSTREAM_ERROR', `NetMirror no contesta: ${c.detalle}`);
+      if (c.estado === 'no') return sendErrorResponse(res, 404, 'NOT_FOUND', 'NetMirror no tiene este titulo.');
+      return res.json({ status: 'success', data: c.fuente });
+    }
     const r = await resolver(req);
     if (!r) return sendErrorResponse(res, 404, 'NOT_FOUND', 'NetMirror no tiene este titulo.');
     res.json({ status: 'success', data: r });

@@ -105,18 +105,52 @@ export function filtrarYordenarEsp(captions: CaptionNetmirror[] | undefined): Ca
     }));
 }
 
-async function llamar(tmdbId: number, extra: string): Promise<RespuestaNetmirror | null> {
+/**
+ * Lo que contesta la API, SEPARANDO «no lo tengo» de «no contesta».
+ *
+ * Antes las dos cosas salían como `null`, y quien llamaba no podía distinguir un título que
+ * NetMirror no tiene de una red caída, un 403 por IP o un timeout. La diferencia importa cuando
+ * la respuesta se APUNTA: el importador guarda los «no» dos semanas en `netmirror_cache`, y una
+ * corrida desde una IP que NetMirror bloquea escribió 105 «no» falsos en diez minutos (medido el
+ * 2026-09-16 desde un runner de GitHub) antes de que nadie lo viera.
+ */
+export type ConsultaNetmirror =
+  | { estado: 'tiene'; fuente: FuenteNetmirror }
+  | { estado: 'no' }
+  | { estado: 'sin-respuesta'; detalle: string };
+
+async function llamar(tmdbId: number, extra: string): Promise<{ j: RespuestaNetmirror } | { detalle: string }> {
+  let detalle = 'sin origenes';
   for (const origen of ORIGENES) {
     try {
       const r = await fetch(`${origen}/api/embed-tmdb/${tmdbId}${extra}`, {
         headers: { 'User-Agent': UA, 'Referer': REFERER_MP4, 'Accept': 'application/json' },
+        signal: AbortSignal.timeout(20_000),
       });
-      if (!r.ok) continue;
-      const j = (await r.json()) as RespuestaNetmirror;
-      return j;
-    } catch { /* siguiente origen */ }
+      if (!r.ok) { detalle = `HTTP ${r.status}`; continue; }
+      const cuerpo = await r.text();
+      try {
+        return { j: JSON.parse(cuerpo) as RespuestaNetmirror };
+      } catch {
+        // Un muro de Cloudflare contesta 200 con HTML: eso no es un «no».
+        detalle = `respuesta no JSON (${cuerpo.slice(0, 40).replace(/s+/g, ' ')}…)`;
+      }
+    } catch (e: any) {
+      detalle = e?.name === 'TimeoutError' ? 'timeout' : (e?.message || String(e));
+    }
   }
-  return null;
+  return { detalle };
+}
+
+function clasificar(r: { j: RespuestaNetmirror } | { detalle: string }): ConsultaNetmirror {
+  if ('detalle' in r) return { estado: 'sin-respuesta', detalle: r.detalle };
+  const fuente = empaquetar(r.j);
+  return fuente ? { estado: 'tiene', fuente } : { estado: 'no' };
+}
+
+/** Pregunta por una película distinguiendo «no la tiene» de «no contesta». */
+export async function consultarPelicula(tmdbId: number): Promise<ConsultaNetmirror> {
+  return clasificar(await llamar(tmdbId, ''));
 }
 
 function empaquetar(j: RespuestaNetmirror): FuenteNetmirror | null {
@@ -148,8 +182,8 @@ function empaquetar(j: RespuestaNetmirror): FuenteNetmirror | null {
 
 /** Resuelve una película por tmdbId. Devuelve null si NetMirror no la tiene. */
 export async function pelicula(tmdbId: number): Promise<FuenteNetmirror | null> {
-  const j = await llamar(tmdbId, '');
-  return j ? empaquetar(j) : null;
+  const c = await consultarPelicula(tmdbId);
+  return c.estado === 'tiene' ? c.fuente : null;
 }
 
 /**
@@ -222,8 +256,8 @@ export async function episodio(
   temporada: number,
   episodio: number,
 ): Promise<FuenteNetmirror | null> {
-  const j = await llamar(tmdbId, `?type=tv&s=${temporada}&e=${episodio}`);
-  return j ? empaquetar(j) : null;
+  const c = clasificar(await llamar(tmdbId, `?type=tv&s=${temporada}&e=${episodio}`));
+  return c.estado === 'tiene' ? c.fuente : null;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════

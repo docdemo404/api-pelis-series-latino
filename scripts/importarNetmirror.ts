@@ -40,16 +40,31 @@
  * cada play, así que guardarlo no guarda nada que caduque. Su sello vale 30 días
  * (`VERIFICADO_VIGENTE_MS`); las corridas siguientes lo renuevan antes de que venza.
  *
+ * ─── «No lo tiene» y «no contesta» son cosas distintas, y aquí costó verlo ──────────────────
+ *
+ * La primera corrida desde GitHub escribió 105 «no» en diez minutos y ni una ficha. NetMirror no
+ * atiende a la IP de los runners, y el scraper devolvía `null` igual para un 403 que para un
+ * título que no existe — así que el importador apuntaba cada bloqueo como «no lo tiene» durante
+ * dos semanas. Hubo que borrarlos a mano. Desde entonces:
+ *
+ *   · el scraper contesta `tiene` / `no` / `sin-respuesta`, y solo el `no` se apunta;
+ *   · antes de tocar nada se pregunta por una película que NetMirror SÍ tiene («El Origen»,
+ *     27205); si no contesta `tiene`, la corrida se para con código 1 y sin escribir;
+ *   · veinte `sin-respuesta` seguidos a mitad de corrida también la paran;
+ *   · y con `--via=api` NetMirror se consulta a través de nuestra API en Vercel
+ *     (`/api/v1/netmirror/probe/<tmdb>`), desde donde sí contesta. Es lo que usa el workflow.
+ *
  *   npm run importar:netmirror -- --dry                    ← qué haría, sin escribir
  *   npm run importar:netmirror                             ← una tanda (300 fichas, 40 min)
  *   npm run importar:netmirror -- --regiones=IN,MX         ← solo estas regiones de TMDB
  *   npm run importar:netmirror -- --proveedor=netflix      ← la sección Netflix, mismo camino
  *   npm run importar:netmirror -- --tmdb=27205,155         ← solo estos, para probar un caso
+ *   npm run importar:netmirror -- --via=api                ← preguntar a través de nuestra API
  *   npm run importar:netmirror -- --limite=0 --minutos=0   ← todo, de una sentada
  */
 import 'dotenv/config';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
-import { pelicula as netmirrorPelicula, servidorDePelicula } from '../src/scrapers/netmirror';
+import { consultarPelicula, servidorDePelicula, ConsultaNetmirror, FuenteNetmirror } from '../src/scrapers/netmirror';
 import { puedeAbrirse } from '../src/services/arranqueMp4';
 import { TmdbService, TMDB_API_KEY } from '../src/services/tmdbService';
 import { CatalogService } from '../src/services/catalogService';
@@ -86,6 +101,17 @@ const REGIONES = texto('regiones', 'IN,MX,ES,US').split(',').map((r) => r.trim()
 const PROVEEDOR = texto('proveedor', 'prime').toLowerCase();
 const TMDB = texto('tmdb', '').split(',').map(Number).filter((n) => n > 0);
 /**
+ * Por dónde se le pregunta a NetMirror. `directo` va a su API; `api` pasa por la nuestra en
+ * Vercel, para las máquinas a las que NetMirror no atiende (los runners de GitHub). La URL de la
+ * API sale de `API_PELIS_URL` o, si no está, de la de producción.
+ */
+const VIA = texto('via', 'directo').toLowerCase();
+const API_PELIS = (process.env.API_PELIS_URL || 'https://api-catalogo-latino.vercel.app').replace(/\/$/, '');
+/** Una película que NetMirror tiene seguro, para saber si desde aquí contesta antes de empezar. */
+const PELICULA_TESTIGO = 27205; // El Origen (2010)
+/** Tantos «no contesta» seguidos ya no son mala suerte: es que dejó de atendernos. */
+const SIN_RESPUESTA_PARA_PARAR = 20;
+/**
  * Antes de que el sello cumpla los 30 días se vuelve a comprobar y resellar. Veinte deja margen
  * para dos corridas perdidas: si el importador no corre en diez días seguidos, algo más grave
  * está pasando y se verá en el panel.
@@ -111,6 +137,7 @@ const cuenta = {
   fichasEnriquecidas: 0,
   reselladas: 0,
   noLoTiene: 0,
+  sinRespuesta: 0,
   noArranca: 0,
   otraObra: 0,
   sinTmdb: 0,
@@ -260,6 +287,23 @@ async function descartadosRecientes(): Promise<Set<number>> {
 // 3. Comprobar y escribir
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
+/** La consulta, por el camino que toque. La respuesta tiene la misma forma por los dos. */
+async function consultar(tmdbId: number): Promise<ConsultaNetmirror> {
+  if (VIA !== 'api') return consultarPelicula(tmdbId);
+  try {
+    const r = await fetch(`${API_PELIS}/api/v1/netmirror/probe/${tmdbId}`, { signal: AbortSignal.timeout(30_000) });
+    if (r.status === 404) return { estado: 'no' };
+    if (!r.ok) return { estado: 'sin-respuesta', detalle: `API HTTP ${r.status}` };
+    const j = (await r.json()) as { data?: FuenteNetmirror };
+    return j?.data?.mp4 ? { estado: 'tiene', fuente: j.data } : { estado: 'sin-respuesta', detalle: 'API sin fuente' };
+  } catch (e: any) {
+    return { estado: 'sin-respuesta', detalle: e?.name === 'TimeoutError' ? 'timeout' : e?.message || String(e) };
+  }
+}
+
+let sinRespuestaSeguidos = 0;
+let parar = false;
+
 async function anotarCache(tmdbId: number, disponible: boolean, resolucion: number | null): Promise<void> {
   if (DRY) return;
   try {
@@ -281,12 +325,22 @@ async function anotarCache(tmdbId: number, disponible: boolean, resolucion: numb
  * para verlo, no se guarda.
  */
 async function resolverYVerificar(c: Candidata): Promise<ServerOption | null> {
-  const fuente = await netmirrorPelicula(c.tmdbId);
-  if (!fuente) {
+  const consulta = await consultar(c.tmdbId);
+  if (consulta.estado === 'sin-respuesta') {
+    cuenta.sinRespuesta++;
+    if (++sinRespuestaSeguidos >= SIN_RESPUESTA_PARA_PARAR && !parar) {
+      parar = true;
+      console.log(`   ✗ NetMirror lleva ${sinRespuestaSeguidos} consultas sin contestar (${consulta.detalle}); se para aquí.`);
+    }
+    return null;
+  }
+  sinRespuestaSeguidos = 0;
+  if (consulta.estado === 'no') {
     cuenta.noLoTiene++;
     await anotarCache(c.tmdbId, false, null);
     return null;
   }
+  const fuente = consulta.fuente;
   const anioNm = Number(fuente.meta.year) || 0;
   const anioTmdb = Number(c.anio) || 0;
   if (anioNm && anioTmdb && Math.abs(anioNm - anioTmdb) > 1) {
@@ -473,6 +527,19 @@ async function main() {
       `limite=${rotulo(LIMITE)} minutos=${rotulo(MINUTOS)} a-la-vez=${A_LA_VEZ}${DRY ? ' (DRY)' : ''}`
   );
 
+  // Primero, ¿NetMirror nos contesta desde aquí? Si no, no hay nada que importar y sí mucho
+  // que estropear. Ver la cabecera.
+  const testigo = await consultar(PELICULA_TESTIGO);
+  if (testigo.estado !== 'tiene') {
+    console.error(
+      `NetMirror no contesta «tiene» para la película testigo ${PELICULA_TESTIGO} por la vía «${VIA}»: ` +
+        (testigo.estado === 'no' ? 'dice que no la tiene' : testigo.detalle) +
+        '. No se importa nada. Prueba con --via=api.'
+    );
+    process.exit(1);
+  }
+  console.log(`NetMirror contesta por la vía «${VIA}» (testigo ${PELICULA_TESTIGO}: ${testigo.fuente.meta.title} ${testigo.fuente.meta.year})`);
+
   const lista = await descubrir();
   console.log(`lista: ${lista.size} películas de TMDB con ${PROVEEDOR}`);
 
@@ -507,7 +574,7 @@ async function main() {
       `${cola.filter((t) => t.resellar).length} por resellar) · ${alDia} al día. Esta corrida: ${tanda.length}\n`
   );
 
-  for (let i = 0; i < tanda.length && quedaTiempo(); i += A_LA_VEZ) {
+  for (let i = 0; i < tanda.length && quedaTiempo() && !parar; i += A_LA_VEZ) {
     await Promise.all(tanda.slice(i, i + A_LA_VEZ).map((t) => trabajar(t).catch(() => { cuenta.errores++; })));
     if ((i / A_LA_VEZ) % 20 === 0 && i > 0) {
       console.log(`   … ${i}/${tanda.length} · ${cuenta.fichasNuevas} nuevas · ${cuenta.noLoTiene} no las tiene`);
@@ -520,10 +587,13 @@ async function main() {
 
   console.log(
     `\n${cuenta.fichasNuevas} fichas nuevas · ${cuenta.fichasEnriquecidas} enriquecidas · ${cuenta.reselladas} reselladas · ` +
-      `${cuenta.noLoTiene} no las tiene · ${cuenta.noArranca} no arrancan · ${cuenta.otraObra} otra obra · ` +
+      `${cuenta.noLoTiene} no las tiene · ${cuenta.sinRespuesta} sin respuesta · ${cuenta.noArranca} no arrancan · ${cuenta.otraObra} otra obra · ` +
       `${cuenta.sinTmdb} sin ficha TMDB · ${cuenta.errores} errores`
   );
   console.log(`Quedan ~${Math.max(0, cola.length - tanda.length)} en cola para la próxima vuelta.`);
+  // Parar por falta de respuesta es un fallo de la corrida, no un resultado: que el workflow lo
+  // enseñe en rojo.
+  if (parar) process.exit(1);
 }
 
 main()
