@@ -86,6 +86,18 @@ const SINGULAR: Record<ClaseLamoviebot, string> = {
  * los dos últimos.
  */
 const HOSTS_QUE_NO_ENTREGAN = [
+  /**
+   * `voe.sx` NO es que falle: es que MIENTE, y por eso encabeza la lista.
+   *
+   * Nos devuelve un clip de prueba de diez segundos (Big Buck Bunny) haciéndose pasar por la obra,
+   * en **83 de 83** extracciones medidas el 2026-09-20. Como es un mp4 real y sano, pasó la
+   * verificación entera —resolver, manifiesto, segmento— y 79 fichas se anunciaron con un conejo
+   * dentro. Lo cazó el usuario, no el código.
+   *
+   * Hay guarda genérica en `esVideoDeMuestra` (directStream) para que ningún host vuelva a colar
+   * material de demostración. Esto es la segunda cerradura: ni se guarda el embed.
+   */
+  'voe.sx',
   'filemoon',    // prueba de trabajo (`pow.js`) antes de soltar el vídeo — §5.5
   'waaw',        // exige prueba de interacción humana y firma antifraude — §5.5
   'krakenfiles', // reCAPTCHA — §5.5

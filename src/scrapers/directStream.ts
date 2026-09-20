@@ -199,7 +199,16 @@ export function esFicheroDirecto(url: string): boolean {
  * de eso aparece hoy en sus páginas. La conclusión seguía siendo la correcta y el mecanismo
  * descrito ya no existía: un comentario que explica un CÓMO caduca; el QUÉ y el POR QUÉ duran.
  */
-const DECOY_HOSTS = ['waaw.to', 'netu.tv', 'hqq.', 'vudeo.co', 'filemoon.', 'doodstream'];
+/**
+ * `voe.sx` SE AÑADIÓ EL 2026-09-20, y su señuelo es de otra clase que el de waaw.
+ *
+ * waaw deja a la vista una url falsa que no reproduce. voe hace algo peor: entrega un fichero que
+ * reproduce PERFECTAMENTE —diez segundos de Big Buck Bunny, cinco megas, mp4 impecable— y que no
+ * es la obra. Medido sobre las fichas de lamoviebot: **83 de 83** extracciones dieron ese mismo
+ * clip. Lo detectó el usuario viendo un conejo donde esperaba una película, que es exactamente el
+ * único control que nos faltaba.
+ */
+const DECOY_HOSTS = ['waaw.to', 'netu.tv', 'hqq.', 'vudeo.co', 'filemoon.', 'doodstream', 'voe.sx'];
 
 /** Reproductores SPA de la familia upns: el id va en el hash y el vídeo lo sirve su API. */
 const UPNS_HOSTS = ['upns.pro', 'upns.', 'rpmstream', '4meplayer', 'strp2p'];
@@ -916,12 +925,13 @@ export async function extractDirectFast(
      * Sin ella no había salida que no fuera apagar el DNS.
      */
     if (esFicheroDirecto(embedUrl)) {
+      if (esVideoDeMuestra(embedUrl)) return { direct: null, conclusive: true };
       return { direct: { url: embedUrl, kind: kindOf(embedUrl) }, conclusive: true };
     }
 
     // Y si no, puede que el vídeo venga dentro de un parámetro de la propia URL del embed.
     const fromParam = extractFromUrlParam(embedUrl);
-    if (fromParam) return { direct: fromParam, conclusive: true };
+    if (fromParam) return { direct: esVideoDeMuestra(fromParam.url) ? null : fromParam, conclusive: true };
 
     // upns.pro y Drive no dejan nada en el HTML: hay que preguntarle a su API. Solo se hace al
     // REPRODUCIR (`allowNetwork`), nunca al scrapear: la de upns responde 429 en cuanto se la
@@ -931,7 +941,7 @@ export async function extractDirectFast(
     if (diferido) {
       if (!opts.allowNetwork) return { direct: null, conclusive: true };
       const direct = diferido === 'drive' ? await extraerDrive(embedUrl) : await extractUpns(embedUrl);
-      return { direct, conclusive: true };
+      return { direct: direct && esVideoDeMuestra(direct.url) ? null : direct, conclusive: true };
     }
 
     const host = new URL(embedUrl).hostname.toLowerCase();
@@ -953,12 +963,55 @@ export async function extractDirectFast(
  * listeamed.net entra siempre por esa vía: su segundo salto es un muro anti-bot con huella de
  * canvas/WebGL, y saltárselo no es algo que este proyecto vaya a hacer.
  */
+/**
+ * VÍDEO DE MUESTRA HACIÉNDOSE PASAR POR LA OBRA — el señuelo que ninguna comprobación veía.
+ *
+ * El 2026-09-20 el usuario avisó de que «El conejo de peluche» reproducía un clip de diez segundos
+ * de Big Buck Bunny. Medido: `voe.sx` nos devolvió EXACTAMENTE ese fichero en **83 de 83**
+ * extracciones. No falla a veces — nos detecta y sirve material de prueba siempre.
+ *
+ * Lo grave es que pasó TODOS los controles, y no por un descuido: el proyecto verifica que lleguen
+ * bytes de vídeo de verdad —resolver, bajar el manifiesto, descargar un segmento— y esto es un mp4
+ * real, sano, que entrega sus cinco megas. **Comprobábamos que hubiera vídeo, no que fuera EL
+ * vídeo**, y contra un señuelo bien hecho esa diferencia es todo.
+ *
+ * Por eso la guarda vive aquí y no en el importador de una fuente: `extractDirect` es el embudo por
+ * el que pasan todas, así que el día que otro host haga lo mismo ya está tapado. Son ficheros de
+ * demostración conocidos y públicos; ninguna obra real sale por estas rutas.
+ */
+export function esVideoDeMuestra(url: string): boolean {
+  const u = String(url || '').toLowerCase();
+  if (!u) return false;
+  return [
+    'test-videos.co.uk',
+    'sample-videos.com',
+    'samplelib.com',
+    'filesamples.com',
+    'file-examples.com',
+    'learningcontainer.com',
+    'commondatastorage.googleapis.com/gtv-videos-bucket',
+    'big_buck_bunny',
+    'bigbuckbunny',
+    'elephantsdream',
+    'tears_of_steel',
+  ].some((p) => u.includes(p));
+}
+
 export async function extractDirect(
   embedUrl: string,
   html: string,
   opts: { allowNetwork?: boolean } = {}
 ): Promise<DirectStream | null> {
-  return extraer(embedUrl, html, opts, 0);
+  const directo = await extraer(embedUrl, html, opts, 0);
+  /**
+   * Se devuelve `null`, que es lo mismo que decir «de aquí no sale vídeo».
+   *
+   * Y es la respuesta correcta: el llamador se queda con el embed sin sello, la ficha no lo
+   * anuncia (`paraElCliente` exige el sello) y nadie le da a Reproducir para ver un conejo. Dejar
+   * pasar la url y marcarla después sería fiar la defensa a que alguien mire.
+   */
+  if (directo && esVideoDeMuestra(directo.url)) return null;
+  return directo;
 }
 
 /**
