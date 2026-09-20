@@ -213,6 +213,13 @@ jobs:
           node-version: 22
           cache: 'npm'
       - run: npm ci
+      - name: Retirar NetMirror sin multipista y Español Latino demostrado
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+        run: npx ts-node -T scripts/dev/limpiar_netmirror_sin_latino.ts --apply
       - name: Ajustar qué fichas se anuncian según lo que puedan reproducir
         env:
           TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
