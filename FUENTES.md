@@ -336,16 +336,41 @@ La diferencia está en de dónde sale el número:
 | ¿Puede equivocarse de obra? | No: contesta por ese número o por ninguno | **Sí** |
 | ¿Aplica el §1? | No llega a aplicar | **Entero** |
 
-Y se equivoca. Medido sobre 119 películas: acierta el **97 %** y falla el **3 %**, siempre por el
-mismo sitio — el homónimo, que es exactamente el fallo del que sale casi todo lo de este documento:
+Y se equivoca. El caso que lo destapó:
 
 ```
 ficha «Los Malditos (2025)»  →  dice tmdb 1059010 = «Los malditos» / I dannati (2024)
 su propio enlace apuntaba a      tmdb  850439    = «Los condenados» / The Damned (2025)
 ```
 
-Los tres fallos de la muestra eran homónimos **del mismo año**, o sea el caso que el año no puede
-separar: los cazó el título original, y por eso `juzgarIdentidad` lo pone por delante del año.
+**Pero lo importante de este apartado es CÓMO se comprueba, porque aquí se falló primero.** El
+primer intento comparó el `original_title` que publica la fuente contra el de TMDB —la escalera de
+`resolveTmdb`, lo que parecía obvio— y dio un 97 % de acierto. **Ese número no valía nada:**
+
+```
+detalle.original_title === TMDB.original_title  →  24/24
+listado.original_title === TMDB.original_title  →  24/24
+```
+
+El Worker RELLENA ese campo DESDE TMDB al emparejar. La comprobación le estaba preguntando a TMDB
+si estaba de acuerdo consigo mismo, y contestaba que sí siempre. Lo mismo vale para
+`release_date`; y sus imágenes están en su propio CDN, así que tampoco hay hash de
+`image.tmdb.org` con el que confirmar.
+
+Lo que sí es independiente, por orden de fuerza:
+
+1. **El segundo voto**: sus páginas incrustan un reproductor de `videoapp.zip`, que direcciona por
+   TMDB id, y ese número lo puso OTRO matcher. Lo traen el **97 %** de las fichas.
+2. **El slug** (`amor-y-compasion-2015`), que lo escribe su web a partir de su propio título y año.
+
+Y una lección sobre cómo usarlos: **el segundo voto confirma, pero no veta.** Vetando —si el id del
+embed no es el del Worker, fuera— rechazaba el 5 % y casi todo era bueno: «Inocencia» (2020) contra
+tmdb 602296 «Inocencia» (2020) coincide en título Y año exactos y aun así caía. videoapp **también**
+empareja a ojo: son dos matchers falibles y, cuando discrepan, no hay forma de saber cuál falló.
+Vetar con eso es tirar una moneda y llamarlo rigor.
+
+Con el voto confirmando y el slug decidiendo detrás: **99 % respaldado, 0 contradicciones** sobre
+99 películas, y lo que no corrobora nada se queda fuera sin adoptar identidad ajena.
 
 > **La regla, para la próxima fuente de este tipo: que una API te dé un `tmdb_id` no lo convierte
 > en un dato publicado.** Pregúntate quién lo calculó. Si lo dedujo un matcher —el suyo o el

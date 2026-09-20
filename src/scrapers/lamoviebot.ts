@@ -31,13 +31,22 @@
  *     ficha «Los Malditos (2025)»  →  dice tmdb 1059010 = «Los malditos» / *I dannati* (2024)
  *     su propio enlace apuntaba a      tmdb  850439    = «Los condenados» / *The Damned* (2025)
  *
- * Emparejó por título en español y se llevó el homónimo del año equivocado, que es exactamente lo
- * que aquí produjo 42 adopciones indebidas en cinco títulos.
+ * ── Y CUIDADO CON CÓMO SE COMPRUEBA, QUE AQUÍ SE FALLÓ UNA VEZ ───────────────────────────────
  *
- * MEDIDO sobre 119 películas (`diag_lamoviebot_identidad.ts`): acierta el 97 %, falla el 3 %. Los
- * tres fallos eran homónimos DEL MISMO AÑO —el caso que el año no puede separar— y los tres los
- * cazó el título original. De ahí `juzgarIdentidad`: su id se acepta solo si una señal
- * independiente del nombre regional lo respalda.
+ * El primer intento comparó el `original_title` que publica la fuente contra el de TMDB y dio un
+ * 97 % de acierto. **Ese número no valía nada.** Medido después: el `original_title` del Worker
+ * coincide con el de TMDB en 24 de 24 fichas, tanto en el listado como en el detalle, porque lo
+ * RELLENA DESDE TMDB al emparejar. La comprobación le estaba preguntando a TMDB si estaba de
+ * acuerdo consigo mismo. Lo mismo vale para `release_date`, y sus imágenes están en su propio CDN,
+ * así que tampoco hay hash de `image.tmdb.org` con el que confirmar.
+ *
+ * Lo que SÍ es independiente son sus propios embeds: incrusta un reproductor de `videoapp.zip`,
+ * que direcciona por TMDB id, y ese número lo puso OTRO matcher. Medido sobre 30 fichas: 29 traen
+ * ese segundo voto (97 %), 28 coinciden y 1 discrepa. Ver `juzgarIdentidad`.
+ *
+ * La lección, que vale para la próxima fuente: **antes de fiarte de una señal, comprueba que no
+ * venga del mismo sitio que lo que quieres verificar.** Una guarda circular es peor que ninguna,
+ * porque tranquiliza.
  *
  *   npx ts-node --transpile-only scripts/dev/diag_lamoviebot_identidad.ts   ← ¿sigue acertando?
  *   npx ts-node --transpile-only scripts/dev/diag_lamoviebot_extrae.ts      ← ¿sus hosts reproducen?
@@ -220,45 +229,135 @@ export function embedsDe(detalleFicha: any): EmbedLamoviebot[] {
 }
 
 /** El veredicto sobre el `tmdb_id` que propone la fuente. */
-export type VeredictoIdentidad = 'confirma-original' | 'confirma-año' | 'CONTRADICE' | 'sin-datos';
+export type VeredictoIdentidad =
+  | 'confirma-segundo-voto'
+  | 'confirma-original'
+  | 'confirma-año'
+  | 'CONTRADICE'
+  | 'sin-datos';
 
 /**
- * ¿RESPALDA ALGO INDEPENDIENTE DEL NOMBRE REGIONAL AL `tmdb_id` QUE PROPONE?
+ * El título y el año que lleva escritos el SLUG, que es lo único de esta fuente que no viene de
+ * TMDB: `amor-y-compasion-2015` → «amor y compasion», 2015.
+ */
+export function datosDelSlug(slug: string): { titulo: string; anio: number } {
+  const m = String(slug || '').match(/^(.*?)-((?:19|20)\d{2})$/);
+  if (!m) return { titulo: String(slug || '').replace(/-/g, ' ').trim(), anio: 0 };
+  return { titulo: m[1].replace(/-/g, ' ').trim(), anio: Number(m[2]) };
+}
+
+/**
+ * ¿RESPALDA ALGO INDEPENDIENTE AL `tmdb_id` QUE PROPONE ESTA FUENTE?
  *
- * La escalera es la de `resolveTmdb` y el ORDEN importa: el título original manda sobre el año,
- * porque un año suelto puede tapar un desmentido —el primero de los cinco caminos de FUENTES.md
- * §4 bis, donde un año de diferencia bastó para adoptar el póster y la sinopsis de otra película—.
+ * ── LA TRAMPA QUE HAY QUE ENTENDER ANTES DE TOCAR ESTO ───────────────────────────────────────
  *
- * Se compara contra el original Y contra el título traducido del candidato porque TMDB devuelve el
- * original cuando no hay traducción, y esta fuente a veces publica el nombre regional en el campo
- * de original.
+ * La primera versión comparaba el `original_title` que publica la fuente contra el de TMDB, que es
+ * la escalera de `resolveTmdb` y parecía lo obvio. **Y era circular.** Medido sobre 24 fichas:
+ *
+ *     detalle.original_title === TMDB.original_title  →  24/24
+ *     listado.original_title === TMDB.original_title  →  24/24
+ *
+ * O sea que el Worker RELLENA ese campo DESDE TMDB después de emparejar. Comparar su
+ * `original_title` con el de TMDB es preguntarle a TMDB si TMDB está de acuerdo consigo mismo:
+ * contesta que sí siempre, y el 97 % de acierto que salió de ahí no medía la identidad — medía la
+ * copia. Una guarda circular es peor que ninguna, porque tranquiliza.
+ *
+ * Lo mismo vale para `release_date`: también viene de TMDB. Y las imágenes que publica están en su
+ * propio CDN, así que tampoco hay hash de `image.tmdb.org` con el que confirmar (§4 bis).
+ *
+ * ── LO QUE SÍ ES SUYO ────────────────────────────────────────────────────────────────────────
+ *
+ * **El slug**, que lo escribe su web a partir del título y el año con que ELLA publica la obra. Es
+ * la única señal de esta fuente que no ha pasado por TMDB, y por eso es la que manda aquí. Caza el
+ * caso real que destapó todo esto:
+ *
+ *     amor-y-compasion-2015  →  dice tmdb 64802 = «Love! Valour! Compassion!» (1997)
+ *                               18 años de diferencia → CONTRADICE
+ *
+ * El año va por delante del título justamente porque el título de su web sí puede parecerse al de
+ * TMDB sin ser la misma obra (es el caso del homónimo), mientras que un desfase de años es un
+ * desmentido difícil de fingir. Se mantiene la tolerancia de ±1 de siempre (desfase de
+ * distribución: festival un año, estreno el siguiente).
+ *
+ * `sin-datos` NO respalda: un slug sin año no demuestra nada, y adoptar sobre nada es justo lo que
+ * FUENTES.md §3 prohíbe.
  */
 export function juzgarIdentidad(
-  suyo: { original_title?: string; year?: string; title?: string },
-  tmdb: { original_title?: string; title?: string; fecha?: string }
+  suyo: {
+    year?: string;
+    title?: string;
+    slug?: string;
+    /**
+     * EL SEGUNDO VOTO: los `tmdb_id` que van escritos DENTRO de sus propios embeds.
+     *
+     * Sus páginas incrustan un reproductor de `videoapp.zip`, que es una piel de videoapi y
+     * direcciona POR TMDB ID (`/e/movie/850439`) — este repositorio ya lo parsea así en
+     * `videoapi.ts`. Ese número lo puso **otro matcher**, no el de este Worker: es la única señal
+     * de identidad de esta fuente que no ha pasado por el mismo sitio que la que queremos juzgar.
+     *
+     * Medido sobre 30 fichas: **29 traen el segundo voto (97 %)**, 28 coinciden con el Worker y
+     * **1 discrepa** (`hierarchy-2025`: el Worker dice 1488810, su embed dice 1461181). Un 3 % de
+     * desacuerdo, que es el orden de magnitud del fallo que buscábamos.
+     */
+    idsDeEmbeds?: number[];
+  },
+  tmdb: { id: number; original_title?: string; title?: string; fecha?: string }
 ): VeredictoIdentidad {
-  const origSuyo = (suyo.original_title || '').trim();
-  const origTmdb = (tmdb.original_title || '').trim();
-  const anioSuyo = Number(String(suyo.year || '').slice(0, 4));
+  const delSlug = datosDelSlug(suyo.slug || '');
   const anioTmdb = Number(String(tmdb.fecha || '').slice(0, 4));
+
+  /**
+   * 1. EL SEGUNDO VOTO MANDA, y cuando los dos matchers discrepan no se elige ganador.
+   *
+   * No se adopta ninguno de los dos ids. Elegir sería volver a decidir a ojo justo lo que
+   * FUENTES.md §3 prohíbe, y lo que está en juego —un `tmdb_id` equivocado— es lo que después
+   * suelda dos filas en una. Es barato: al 3 % de las fichas se las deja fuera y se las mira otro
+   * día; adoptar mal no se deshace.
+   */
+  const votos = (suyo.idsDeEmbeds || []).filter((n) => Number.isFinite(n) && n > 0);
+  if (votos.length && tmdb.id > 0 && votos.includes(tmdb.id)) return 'confirma-segundo-voto';
+
+  /**
+   * QUE EL SEGUNDO VOTO DISCREPE NO BASTA PARA TIRAR LA FICHA, y esto se midió en las dos
+   * direcciones antes de decidirlo.
+   *
+   * La primera versión vetaba: si el id del embed no era el del Worker, fuera. Rechazaba el 5 % y
+   * casi todo era bueno — «Inocencia» (2020) contra tmdb 602296 «Inocencia» (2020) coincide en
+   * título Y año exactos, y aun así caía. La explicación es simple y hay que tenerla presente:
+   * **videoapp también empareja a ojo**. Son dos matchers falibles, y cuando discrepan no hay
+   * forma de saber cuál se equivocó. Vetar con eso es tirar una moneda y llamarlo rigor.
+   *
+   * Así que el voto CONFIRMA cuando coincide y no desmiente cuando no. Lo que decide entonces es
+   * el slug, que es lo único que escribe su web. Si tampoco corrobora nada, se cae a `sin-datos`
+   * y la ficha NO se adopta — que es lo que pide §3: sin respaldo, no se toma la identidad ajena.
+   */
+
+  /**
+   * 2. SIN SEGUNDO VOTO se cae al slug, que es lo único que escribe su web y no viene de TMDB.
+   *
+   * Y aquí el año NO desmiente, solo confirma. Sus fechas no son fiables —«Venganza» (Taken, 2008)
+   * está publicada como 2020 y «Amor y Compasión» (1997) como 2015—, así que rechazar por desfase
+   * costaba fichas buenas: de 99 medidas, las dos que caían eran correctas. El nombre suma
+   * confianza y tampoco desmiente: los nombres regionales de la misma obra no se parecen entre sí
+   * («En la tormenta» ES «Sin salida»), y retirar por falta de parecido es el error de §3.
+   */
+  const anioSuyo = delSlug.anio || Number(String(suyo.year || '').slice(0, 4));
   const hayAnios = Number.isFinite(anioSuyo) && Number.isFinite(anioTmdb) && anioSuyo > 0 && anioTmdb > 0;
 
-  if (origSuyo && origTmdb) {
-    const s = Math.max(similarity(origSuyo, origTmdb), similarity(origSuyo, tmdb.title || ''));
-    if (s >= 0.8) return 'confirma-original';
-    // Un original que no se parece a NINGUNO de los nombres del candidato es un desmentido, y a
-    // partir de ahí el año ya no puede respaldar por encima de él.
-    if (hayAnios && Math.abs(anioSuyo - anioTmdb) > 1) return 'CONTRADICE';
-    return s >= 0.5 ? 'confirma-año' : 'CONTRADICE';
+  if (delSlug.titulo) {
+    const s = Math.max(
+      similarity(delSlug.titulo, tmdb.title || ''),
+      similarity(delSlug.titulo, tmdb.original_title || '')
+    );
+    if (s >= 0.6) return 'confirma-original';
   }
-
-  if (hayAnios) return Math.abs(anioSuyo - anioTmdb) <= 1 ? 'confirma-año' : 'CONTRADICE';
+  if (hayAnios && Math.abs(anioSuyo - anioTmdb) <= 1) return 'confirma-año';
   return 'sin-datos';
 }
 
 /** ¿Vale este veredicto para adoptar la ficha de TMDB? Solo lo respaldado; `sin-datos` no basta. */
 export function respalda(v: VeredictoIdentidad): boolean {
-  return v === 'confirma-original' || v === 'confirma-año';
+  return v === 'confirma-segundo-voto' || v === 'confirma-original' || v === 'confirma-año';
 }
 
 /**

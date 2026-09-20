@@ -65,6 +65,7 @@ import {
   UA_NAVEGADOR,
   REFERER_LAMOVIE,
 } from '../src/scrapers/lamoviebot';
+import { datosDeLaUrl } from '../src/scrapers/videoapi';
 import { MediaItem, ServerOption, ContentType } from '../src/types';
 
 const db = getSupabaseAdmin();
@@ -256,7 +257,9 @@ async function nuestrasFilas(type: ContentType): Promise<Map<number, string>> {
  */
 async function identidadRespaldada(
   f: FichaLamoviebot,
-  type: ContentType
+  type: ContentType,
+  /** Los embeds de la ficha: de ahí sale el SEGUNDO VOTO que juzga su `tmdb_id`. */
+  embeds: EmbedLamoviebot[] = []
 ): Promise<{ ok: boolean; tmdbId: number; motivo: string }> {
   const id = Number(f.tmdb_id) || 0;
   if (!id) return { ok: false, tmdbId: 0, motivo: 'sin tmdb_id' };
@@ -269,8 +272,17 @@ async function identidadRespaldada(
   if (r.status !== 200) return { ok: false, tmdbId: 0, motivo: `tmdb ${id} → HTTP ${r.status}` };
 
   const v = juzgarIdentidad(
-    { original_title: f.original_title, year: f.year, title: f.title },
     {
+      year: f.year,
+      title: f.title,
+      slug: f.slug,
+      idsDeEmbeds: embeds
+        .map((e) => datosDeLaUrl(e.link))
+        .filter(Boolean)
+        .map((x) => (x as any).tmdbId as number),
+    },
+    {
+      id,
       original_title: r.data.original_title || r.data.original_name,
       title: r.data.title || r.data.name,
       fecha: r.data.release_date || r.data.first_air_date,
@@ -553,7 +565,7 @@ async function haremosPelicula(t: Trabajo): Promise<void> {
     return;
   }
 
-  const identidad = await identidadRespaldada({ ...t.ficha, ...d }, t.type);
+  const identidad = await identidadRespaldada({ ...t.ficha, ...d }, t.type, embeds);
   if (!identidad.ok) {
     cuenta.identidadRota++;
     console.log(`   ⊘ "${t.ficha.title}" (${t.ficha.year}) — ${identidad.motivo}`);
@@ -590,23 +602,6 @@ async function haremosSerie(t: Trabajo): Promise<void> {
   const temporadas: any[] = Array.isArray(d?.temporadas) ? d.temporadas : [];
   if (!temporadas.length) return;
 
-  const identidad = await identidadRespaldada({ ...t.ficha, ...d }, t.type);
-  if (!identidad.ok) {
-    cuenta.identidadRota++;
-    console.log(`   ⊘ "${t.ficha.title}" (${t.ficha.year}) — ${identidad.motivo}`);
-    return;
-  }
-
-  // La ficha primero: resolver capítulos de algo que no se va a poder escribir es tirar peticiones.
-  let ficha: MediaItem | null = null;
-  if (!t.filaExistente) {
-    ficha = await fichaDesdeTmdb(identidad.tmdbId, t.type, t.ficha.slug);
-    if (!ficha) {
-      cuenta.sinTmdb++;
-      return;
-    }
-  }
-
   /**
    * CADA CAPÍTULO CON SUS PROPIOS ENLACES, y por eso se pide el detalle de cada uno.
    *
@@ -628,11 +623,49 @@ async function haremosSerie(t: Trabajo): Promise<void> {
     .sort((a, b) => a.temporada - b.temporada || a.capitulo - b.capitulo)
     .slice(0, CAPITULOS_POR_SERIE === SIN_TOPE ? pendientes.length : CAPITULOS_POR_SERIE);
 
+  /**
+   * LA IDENTIDAD SE JUZGA CON LOS EMBEDS DEL PRIMER CAPÍTULO, y no con los de la ficha.
+   *
+   * Una ficha de serie de esta fuente NO trae embeds —los traen sus capítulos—, así que juzgándola
+   * a ella el segundo voto (el `tmdb_id` escrito dentro de su reproductor de `videoapp.zip`) no
+   * existía nunca y toda serie caía al camino flojo del slug. El primer capítulo hay que pedirlo
+   * de todas formas, así que el voto sale gratis: se pide una vez, se usa para juzgar y se reutiliza
+   * para resolver.
+   */
+  const primero = aTrabajar[0];
+  let dPrimero: any = null;
+  if (primero) {
+    try {
+      dPrimero = await detalleEpisodio(t.clase, t.ficha.slug, primero.temporada, primero.capitulo);
+    } catch {}
+  }
+
+  const identidad = await identidadRespaldada({ ...t.ficha, ...d }, t.type, dPrimero ? embedsDe(dPrimero) : []);
+  if (!identidad.ok) {
+    cuenta.identidadRota++;
+    console.log(`   ⊘ "${t.ficha.title}" (${t.ficha.year}) — ${identidad.motivo}`);
+    return;
+  }
+
+  // La ficha antes de resolver el resto: escribir capítulos de algo que no se va a poder guardar
+  // sería tirar peticiones.
+  let ficha: MediaItem | null = null;
+  if (!t.filaExistente) {
+    ficha = await fichaDesdeTmdb(identidad.tmdbId, t.type, t.ficha.slug);
+    if (!ficha) {
+      cuenta.sinTmdb++;
+      return;
+    }
+  }
+
   const resueltos: Array<{ temporada: number; capitulo: number; servers: ServerOption[] }> = [];
   for (const c of aTrabajar) {
     if (!quedaTiempo()) break;
     try {
-      const dEp = await detalleEpisodio(t.clase, t.ficha.slug, c.temporada, c.capitulo);
+      const dEp =
+        primero && c.temporada === primero.temporada && c.capitulo === primero.capitulo && dPrimero
+          ? dPrimero
+          : await detalleEpisodio(t.clase, t.ficha.slug, c.temporada, c.capitulo);
       const embeds = embedsDe(dEp);
       if (!embeds.length) continue;
       const servers = await servidoresQueReproducen(embeds, `${t.ficha.slug}-${c.temporada}x${c.capitulo}`, 2);

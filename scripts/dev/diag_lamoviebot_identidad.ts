@@ -22,7 +22,8 @@
 import 'dotenv/config';
 import { httpClient } from '../../src/utils/httpClient';
 import { TMDB_API_KEY } from '../../src/services/tmdbService';
-import { juzgarIdentidad, VeredictoIdentidad } from '../../src/scrapers/lamoviebot';
+import { juzgarIdentidad, VeredictoIdentidad, detalle, embedsDe, ClaseLamoviebot } from '../../src/scrapers/lamoviebot';
+import { datosDeLaUrl } from '../../src/scrapers/videoapi';
 
 const LMB = 'https://lamoviebot.tvymas.workers.dev';
 const UA =
@@ -36,6 +37,23 @@ async function json(url: string): Promise<any> {
   if (r.status !== 200) throw new Error(`HTTP ${r.status}`);
   return r.data;
 }
+
+/**
+ * SE JUZGA SOBRE EL DETALLE, NO SOBRE EL LISTADO — y esto costó una alarma falsa.
+ *
+ * Los dos endpoints NO dicen lo mismo. Para `amor-y-compasion-2015` el listado publica
+ * `original_title: "Love & Mercy"` y el detalle `"Love! Valour! Compassion!"`, que es el que
+ * coincide exacto con su `tmdb_id` (64802) y con la fecha de TMDB. Midiendo sobre el listado salía
+ * un desmentido donde el importador —que lee el detalle— ve una confirmación legítima.
+ *
+ * O sea que la primera versión de esto medía una fuente de datos que el importador no usa. Es la
+ * misma trampa que FUENTES.md §4 describe con FuegoCine (la misma página parseada en dos sitios,
+ * arreglada en uno solo): un diagnóstico que no lee lo que lee el código que vigila no mide nada,
+ * y encima da un número creíble.
+ *
+ * Cuesta una petición por ficha. Es lo que vale saber si la guarda que protege el catálogo
+ * funciona.
+ */
 
 /**
  * El veredicto lo pone `juzgarIdentidad`, importada de la fuente — NO una copia de su escalera.
@@ -62,12 +80,20 @@ async function main() {
   }
 
   const cuenta: Record<Veredicto, number> = {
-    'confirma-original': 0, 'confirma-año': 0, CONTRADICE: 0, 'sin-datos': 0,
+    'confirma-segundo-voto': 0, 'confirma-original': 0, 'confirma-año': 0, CONTRADICE: 0, 'sin-datos': 0,
   };
   const malos: string[] = [];
   let sinId = 0, noExiste = 0, mirados = 0;
 
-  for (const f of fichas.slice(0, CUANTAS)) {
+  for (const fLista of fichas.slice(0, CUANTAS)) {
+    // El detalle manda: es lo que lee el importador. El listado solo sirve para saber qué pedir.
+    let f: any = fLista;
+    try {
+      f = { ...fLista, ...(await detalle(TIPO as ClaseLamoviebot, fLista.slug)) };
+    } catch {
+      // Si el detalle no contesta, el importador tampoco escribiría la ficha: no se cuenta.
+      continue;
+    }
     const id = Number(f.tmdb_id) || 0;
     if (!id) { sinId++; continue; }
     const r = await httpClient.get(`https://api.themoviedb.org/3/${endpointTmdb}/${id}`, {
@@ -76,8 +102,17 @@ async function main() {
     if (r.status !== 200) { noExiste++; continue; }
     mirados++;
     const v = juzgarIdentidad(
-      { original_title: f.original_title, year: f.year, title: f.title },
       {
+        year: f.year,
+        title: f.title,
+        slug: f.slug,
+        idsDeEmbeds: embedsDe(f)
+          .map((e) => datosDeLaUrl(e.link))
+          .filter(Boolean)
+          .map((x) => (x as any).tmdbId as number),
+      },
+      {
+        id,
         original_title: r.data.original_title || r.data.original_name,
         title: r.data.title || r.data.name,
         fecha: r.data.release_date || r.data.first_air_date,
@@ -94,8 +129,9 @@ async function main() {
   }
 
   console.log(`\n¿ACIERTA EL tmdb_id DE LAMOVIEBOT? · ${TIPO} · ${mirados} fichas comprobadas contra TMDB\n`);
-  const ok = cuenta['confirma-original'] + cuenta['confirma-año'];
-  console.log(`  respaldado por título original: ${cuenta['confirma-original']}`);
+  const ok = cuenta['confirma-segundo-voto'] + cuenta['confirma-original'] + cuenta['confirma-año'];
+  console.log(`  respaldado por SEGUNDO VOTO:    ${cuenta['confirma-segundo-voto']}   ← el fuerte`);
+  console.log(`  respaldado por el slug:         ${cuenta['confirma-original']}`);
   console.log(`  respaldado solo por el año:     ${cuenta['confirma-año']}`);
   console.log(`  SE CONTRADICE:                  ${cuenta.CONTRADICE}`);
   console.log(`  sin datos con que juzgar:       ${cuenta['sin-datos']}`);
