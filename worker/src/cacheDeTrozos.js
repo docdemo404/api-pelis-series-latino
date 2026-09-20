@@ -260,20 +260,217 @@ async function trozo(env, url, indice, ctx) {
 const TROZOS_QUE_SE_GUARDAN = 12;
 
 /**
- * Vuelca un stream en el escritor y devuelve CUÁNTOS BYTES escribió.
+ * COPIA ACOTADA, Y SOLO CUANDO NO QUEDA OTRA.
  *
- * Lo de devolver la cuenta no es un detalle: quien lee de la caché tiene que avanzar por lo que
- * de verdad salió, no por lo que se suponía que había. Ver `cuerpoContinuo`.
+ * Este es el camino lento: toca los bytes en JS, uno a uno, y por eso se usa lo menos posible
+ * (ver `volcarOrigen`). Hace dos cosas que ningún atajo del runtime sabe hacer: tirar los
+ * primeros `saltar` bytes —cuando el origen ignora el `Range` y manda desde cero— y PARAR al
+ * llegar a `tope`.
+ *
+ * Lo de parar es media reparación del 2026-09-20. Antes escribía todo lo que llegase, así que un
+ * origen que contesta 200 a una petición de 4 MB volcaba la película entera en la respuesta:
+ * medido contra el Worker, una petición de 4.194.304 bytes devolvió 88.166.400. La otra media es
+ * que la respuesta ya no va sin medida (ver `cuerpoContinuo`).
  */
-async function volcar(origen, escritor) {
-  const lector = origen.getReader();
+async function copiarAcotado(destino, cuerpo, saltar, tope) {
+  const escritor = destino.getWriter();
+  const lector = cuerpo.getReader();
+  let porTirar = saltar;
   let escritos = 0;
-  for (;;) {
-    const { done, value } = await lector.read();
-    if (done) return escritos;
-    await escritor.write(value);
-    escritos += value.length;
+  try {
+    for (;;) {
+      const { done, value } = await lector.read();
+      if (done) return escritos;
+
+      let util = value;
+      if (porTirar > 0) {
+        if (porTirar >= util.length) { porTirar -= util.length; continue; }
+        util = util.subarray(porTirar);
+        porTirar = 0;
+      }
+
+      if (escritos + util.length >= tope) {
+        await escritor.write(util.subarray(0, tope - escritos));
+        try { await lector.cancel(); } catch (e) { /* ya cerrado */ }
+        return tope;
+      }
+
+      await escritor.write(util);
+      escritos += util.length;
+    }
+  } finally {
+    escritor.releaseLock();
   }
+}
+
+/**
+ * VUELCA UNA RESPUESTA DEL ORIGEN, Y SIN TOCAR LOS BYTES SI SE PUEDE EVITAR.
+ *
+ * `pipeTo` no es una forma más corta de escribir el bucle: es otra cosa. El bucle trae cada
+ * paquete al isolate y lo vuelve a escribir —trabajo de JS por cada 64 KB de película— y eso lo
+ * paga la invocación en CPU. En el plan gratuito ese presupuesto es pequeño y NO se puede subir
+ * (`CPU limits are not supported for the Free plan`), así que Cloudflare mataba la invocación a
+ * mitad del envío: medido el 2026-09-20, el mismo trozo de 4 MB pedido cinco veces devolvió
+ * 4.194.304, 499.712, 339.968, 400.611 y 466.147 bytes. El dato en R2 estaba entero; lo que se
+ * rompía era la entrega, y para media3 una entrega a medias es el final de la película.
+ *
+ * Con `pipeTo` los bytes no pasan por el isolate: los mueve el runtime. El camino lento queda
+ * para lo que de verdad lo necesita — un origen que ignoró el rango, o uno que anuncia más de lo
+ * que cabe en lo que se pidió.
+ *
+ * Devuelve cuántos bytes escribió.
+ */
+async function volcarOrigen(destino, respuesta, saltar, tope) {
+  if (saltar === 0) {
+    const anunciado = Number(respuesta.headers.get('content-length'));
+    if (Number.isFinite(anunciado) && anunciado > 0 && anunciado <= tope) {
+      await respuesta.body.pipeTo(destino, { preventClose: true });
+      return anunciado;
+    }
+  }
+  return copiarAcotado(destino, respuesta.body, saltar, tope);
+}
+
+/**
+ * SIRVE DESDE `desde` HASTA `hasta`, SIN CORTAR EN EL TROZO Y SIN PASARSE.
+ *
+ * El fallo original era contestar UN trozo y cerrar. Parecía correcto porque el `Content-Range`
+ * decía la verdad, y cualquier cliente educado habría pedido el siguiente. media3 no lo hace:
+ * cuando pide `bytes=N-` sin final toma el `Content-Length` como el tamaño del RECURSO, lee esos
+ * 4 MB, se le acaban y da la película por terminada. «Misión Rescate» moría a los 10,875 s, que
+ * son exactamente 4 MB de película.
+ *
+ * Eso se arregló entregando hasta el final. Lo que quedó roto —y se midió el 2026-09-20— es que
+ * la entrega no cumplía lo prometido POR LOS DOS LADOS:
+ *
+ *   · de menos: el mismo trozo de 4 MB pedido cinco veces devolvió 4.194.304, 499.712, 339.968,
+ *     400.611 y 466.147 bytes, con el dato entero en R2. La invocación se moría a mitad de envío
+ *     por CPU, porque los bytes pasaban por un bucle en JS.
+ *   · de más: una petición de 4 MB a una película de archive.org devolvió 88.166.400. El origen
+ *     ignoró el rango, contestó 200, y nadie estaba poniendo el tope por arriba.
+ *
+ * Y las dos pasaban calladas porque la respuesta salía SIN `Content-Length`: el Worker lo ponía
+ * en las cabeceras, pero al devolver un stream de longitud desconocida Cloudflare lo quita y
+ * manda `chunked`. Una respuesta sin medida no la puede desmentir nadie.
+ *
+ * Ahora el cuerpo es un `FixedLengthStream` con la medida exacta declarada. Eso hace tres cosas:
+ * devuelve el `Content-Length` a la respuesta, hace que pasarse sea imposible, y convierte
+ * quedarse corto en un error visible en vez de en una película que termina antes de tiempo.
+ *
+ * El reparto sigue siendo el mismo, y en este orden: lo que ya está en R2 —el arranque
+ * instantáneo—, una ráfaga corta al origen para amortizar su latencia de una vez, y UNA sola
+ * petición para todo lo que quede. El bucle de fuera solo da otra vuelta si algún tramo entregó
+ * menos de lo suyo, y entonces reintenta desde donde se quedó de verdad.
+ */
+function cuerpoContinuo(env, url, desde, hasta, ctx, respuestaYaAbierta, saltarDeEsa, totalFichero) {
+  const { readable, writable } = new FixedLengthStream(hasta - desde + 1);
+
+  const bombear = async () => {
+    let pos = desde;
+    try {
+      if (respuestaYaAbierta) {
+        // Ya se pidió al origen ahí arriba para saber el tamaño; se aprovecha esa misma respuesta.
+        pos += await volcarOrigen(writable, respuestaYaAbierta, saltarDeEsa, hasta - pos + 1);
+      }
+
+      while (pos <= hasta) {
+        const antes = pos;
+
+        // --- tramo 1: lo que ya está en casa ---
+        for (;;) {
+          if (pos > hasta) break;
+          const indice = Math.floor(pos / TROZO);
+          const dentro = pos - indice * TROZO;
+
+          /*
+           * SE PREGUNTA CUÁNTO MIDE EL TROZO ANTES DE LEERLO, y se pide exactamente eso.
+           *
+           * No todo trozo guardado mide un trozo entero: si una escritura se cortó, en R2 queda
+           * uno corto bajo una llave que promete 4 MB. Antes se leía a ciegas y se avanzaba
+           * contando los bytes que salían, que funcionaba pero obligaba a contarlos en JS — justo
+           * lo que había que dejar de hacer. Preguntando el tamaño se sabe de antemano cuánto va
+           * a venir, se pide con `length` para no pasarse de lo pedido, y los bytes pueden ir
+           * por `pipeTo` sin que nadie los mire.
+           */
+          const cabeza = await env.CACHE.head(llaveDe(url, indice)).catch(() => null);
+          const disponible = cabeza ? Math.max(0, cabeza.size - dentro) : 0;
+          if (disponible <= 0) break;
+
+          const aLeer = Math.min(hasta - pos + 1, disponible);
+          const guardado = await env.CACHE
+            .get(llaveDe(url, indice), { range: { offset: dentro, length: aLeer } })
+            .catch(() => null);
+          if (!guardado || !guardado.body) break;
+
+          await guardado.body.pipeTo(writable, { preventClose: true });
+          pos += aLeer;
+        }
+        if (pos > hasta) break;
+
+        /*
+         * --- tramo 2: UNA RÁFAGA CORTA PARA LOS PRIMEROS MEGAS ---
+         *
+         * Con archive.org lo que cuesta no es el ancho de banda, es la latencia: entre 10 y 25 s
+         * por petición, y el índice de una película larga son varios trozos. En fila esos
+         * segundos se suman; en paralelo se pagan una vez. Medido: cuatro peticiones a la vez
+         * traen 1 MB en 11,7 s contra 24,8 s de una sola.
+         *
+         * Acotada a seis tramos —24 MB— porque cubre cualquier índice y porque el plan gratuito
+         * cuenta subpeticiones: una por trozo en una película de 2 GB serían quinientas.
+         */
+        const RAFAGA = 6;
+        const enVuelo = [];
+        let cursor = pos;
+        for (let n = 0; n < RAFAGA && cursor <= hasta; n++) {
+          const indice = Math.floor(cursor / TROZO);
+          const finTramo = Math.min((indice + 1) * TROZO - 1, hasta);
+          enVuelo.push({ desde: cursor, hasta: finTramo, promesa: pedirAlOrigen(url, cursor, finTramo) });
+          cursor = finTramo + 1;
+        }
+
+        for (const tramo of enVuelo) {
+          const respuesta = await tramo.promesa;
+          if (!respuesta || !respuesta.ok || !respuesta.body) {
+            throw new Error('origen ' + (respuesta ? respuesta.status : 'sin respuesta'));
+          }
+          // Si un tramo anterior se quedó corto, este ya no empieza donde se pidió: se descarta y
+          // el bucle de fuera lo vuelve a pedir desde donde de verdad se está.
+          if (tramo.desde !== pos) { respuesta.body.cancel(); break; }
+
+          const saltar = respuesta.status === 200 ? tramo.desde : 0;
+          pos += await volcarOrigen(writable, respuesta, saltar, tramo.hasta - tramo.desde + 1);
+          if (pos !== tramo.hasta + 1) break;
+        }
+
+        // --- tramo 3: y el resto, de una sola petición ---
+        if (pos === cursor && pos <= hasta) {
+          const respuesta = await pedirAlOrigen(url, pos, hasta);
+          if (!respuesta || !respuesta.ok || !respuesta.body) {
+            throw new Error('origen ' + (respuesta ? respuesta.status : 'sin respuesta'));
+          }
+          const saltar = respuesta.status === 200 ? pos : 0;
+          pos += await volcarOrigen(writable, respuesta, saltar, hasta - pos + 1);
+        }
+
+        /*
+         * Una vuelta que no avanza ni un byte no va a avanzar en la siguiente: se corta aquí en
+         * vez de dejar la petición girando hasta que Cloudflare la mate.
+         */
+        if (pos === antes) throw new Error('no se pudo avanzar desde el byte ' + pos);
+      }
+
+      /*
+       * Cerrar un `FixedLengthStream` al que le faltan bytes LANZA, y es justo lo que se quiere:
+       * el cliente ve una descarga rota en vez de una película que se acaba antes de tiempo.
+       */
+      await writable.close();
+    } catch (e) {
+      await writable.abort(e).catch(() => {});
+    }
+  };
+
+  ctx.waitUntil(bombear());
+  return readable;
 }
 
 /** Pide al origen desde `desde` hasta `hasta`, insistiendo si contesta 5xx. */
@@ -297,168 +494,6 @@ async function pedirAlOrigen(url, desde, hasta) {
   return respuesta;
 }
 
-/**
- * Escribe en `escritor` los bytes de una respuesta del origen. NO GUARDA NADA, y eso es el arreglo.
- *
- * Guardaba: iba juntando lo que pasaba hasta completar un trozo y lo escribía en R2. Parecía
- * gratis —los bytes ya estaban de camino— y no lo era, porque juntar 4 MB significa tenerlos en
- * memoria, y completar el trozo significa copiarlos otra vez para partirlos. Tres copias de 4 MB
- * por trozo. Con la ráfaga de seis en paralelo eso son más de setenta megas de golpe, y el Worker
- * tiene ciento veintiocho: se quedaba sin memoria A MITAD DEL ENVÍO.
- *
- * Y morirse a mitad del envío es la peor forma de fallar aquí, porque las cabeceras ya salieron
- * diciendo cuánto iba a medir la respuesta. El cliente recibe menos de lo prometido. Un navegador
- * lo perdona —vuelve a pedir lo que falta y sigue tan tranquilo—, pero media3 no: da el fichero
- * por terminado. De ahí venía exactamente lo que se reportó, que el navegador reproduce una
- * película y la app no.
- *
- * Medido por el camino de entrega: cuatro de doce entregaban el índice a medias —una, 1.066.553
- * bytes de los 5.267.222 que había prometido—. Sin guardar nada, la memoria deja de ser un
- * problema y los bytes salen tal como vienen.
- *
- * La caché se sigue llenando, solo que donde toca: en la lectura por delante y en el calentador,
- * que usan `traerTrozo` y escriben en R2 con un `tee()` — sin juntar nada en memoria.
- */
-async function relevarDelOrigen(escritor, respuesta, saltar) {
-  let porTirar = saltar;
-  const lector = respuesta.body.getReader();
-  for (;;) {
-    const { done, value } = await lector.read();
-    if (done) break;
-    let util = value;
-    if (porTirar > 0) {
-      if (porTirar >= util.length) { porTirar -= util.length; continue; }
-      util = util.subarray(porTirar);
-      porTirar = 0;
-    }
-    await escritor.write(util);
-  }
-}
-
-/**
- * SIRVE DESDE `desde` HASTA `hasta`, SIN CORTAR EN EL TROZO.
- *
- * Aquí estaba el fallo que rompía la reproducción entera, y era mío: se contestaba UN trozo y se
- * cerraba. Parecía correcto porque el `Content-Range` decía la verdad —qué tramo iba dentro y
- * cuánto medía el fichero entero— y cualquier cliente educado habría pedido el siguiente.
- *
- * media3 no lo hace. Cuando pide `bytes=N-` sin final, toma el `Content-Length` de la respuesta
- * como el tamaño del RECURSO: lee esos 4 MB, se le acaban, y da la película por terminada. Ni
- * error ni reintento — se acabó, y el reproductor salta al final.
- *
- * Y encaja con todo lo que se venía viendo sin explicación: 4 MB son unos diez segundos de
- * película, y «Misión Rescate» moría exactamente a los 10,875 s. Lo que parecía un CDN lento o un
- * host caído era esto. En «Destino final» ni siquiera arrancaba: su índice `moov` pesa 7,5 MB, o
- * sea que con 4 MB el reproductor no llegaba nunca a saber cuánto duraba ni dónde estaba nada.
- *
- * Ahora la respuesta va HASTA EL FINAL, en dos tramos: primero los trozos que ya están en R2 —el
- * arranque instantáneo— y cuando falta uno, UNA sola petición al origen desde ahí hasta el final.
- * Una, no una por trozo: el plan gratuito cuenta subpeticiones y quinientas no caben en ningún
- * límite.
- */
-function cuerpoContinuo(env, url, desde, hasta, ctx, respuestaYaAbierta, saltarDeEsa, totalFichero) {
-  const { readable, writable } = new TransformStream();
-
-  const bombear = async () => {
-    const escritor = writable.getWriter();
-    try {
-      if (respuestaYaAbierta) {
-        // Ya se pidió al origen ahí arriba para saber el tamaño; se aprovecha esa misma
-        // respuesta en vez de volver a llamar.
-        await relevarDelOrigen(escritor, respuestaYaAbierta, saltarDeEsa);
-      } else {
-        let pos = desde;
-
-        // --- tramo 1: lo que ya está en casa ---
-        while (pos <= hasta) {
-          const indice = Math.floor(pos / TROZO);
-          const inicioTrozo = indice * TROZO;
-          const guardado = await env.CACHE.get(llaveDe(url, indice), {
-            range: { offset: pos - inicioTrozo },
-          }).catch(() => null);
-          if (!guardado || !guardado.body) break;
-
-          /*
-           * SE AVANZA POR LO QUE SALIÓ, NO POR LO QUE DEBERÍA HABER SALIDO.
-           *
-           * Antes esto hacía `pos = inicioTrozo + TROZO`, dando por hecho que todo trozo guardado
-           * mide un trozo entero. No siempre es verdad: si el origen corta una descarga a medias,
-           * en R2 queda un trozo corto bajo una llave que promete uno completo. Al leerlo se
-           * escribían menos bytes de los que se contaban, el hueco no lo rellenaba nadie, y el
-           * `Content-Length` anunciado dejaba de cuadrar con lo entregado.
-           *
-           * Se vio midiendo el catálogo entero: «Volver al Futuro» entregaba 1.306.588 bytes de
-           * índice de los 5.202.291 que había pedido. Un mp4 con el índice a medias no se puede
-           * abrir.
-           *
-           * Contando lo escrito, el fallo se cura solo: la vuelta siguiente empieza justo donde se
-           * quedó y, si en la caché no hay más, cae al origen y lo completa.
-           */
-          const escritos = await volcar(guardado.body, escritor);
-          if (escritos <= 0) break;
-          pos += escritos;
-        }
-
-        /*
-         * --- tramo 2a: UNA RÁFAGA EN PARALELO PARA LOS PRIMEROS MEGAS ---
-         *
-         * Esta es la causa raíz de que las películas de archive.org no arrancaran, y hasta ahora
-         * la estaba atacando de una en una. Se midió sobre las 21 fichas del catálogo que salen de
-         * ahí: arrancaban 12, y de las 9 que no, SEIS fallaban por lo mismo — traer el índice
-         * tardaba más de los 25 s que el reproductor espera.
-         *
-         * El problema no es el ancho de banda de archive.org, que da de sobra: es su LATENCIA. Cada
-         * petición cuesta entre 10 y 25 s hasta el primer byte, y el índice de una película larga
-         * son varios trozos. En fila, esos segundos se suman; en paralelo se pagan UNA vez.
-         * Medido: cuatro peticiones a la vez traen 1 MB en 11,7 s contra 24,8 s de una sola.
-         *
-         * La ráfaga está acotada a seis trozos —24 MB— por dos razones. Cubre de sobra cualquier
-         * índice, que es lo que hay que resolver antes del primer fotograma; y el plan gratuito
-         * cuenta subpeticiones, así que abrir una por trozo en una película de 2 GB serían
-         * quinientas y no cabe. Pasados esos 24 MB manda la reproducción secuencial, y ahí una sola
-         * petición continua es lo correcto: la latencia se paga una vez y los bytes fluyen.
-         */
-        const RAFAGA = 6;
-        const enVuelo = [];
-        let cursor = pos;
-        for (let n = 0; n < RAFAGA && cursor <= hasta; n++) {
-          const indice = Math.floor(cursor / TROZO);
-          const finTrozo = Math.min((indice + 1) * TROZO - 1, hasta);
-          enVuelo.push({ desde: cursor, hasta: finTrozo, promesa: pedirAlOrigen(url, cursor, finTrozo) });
-          cursor = finTrozo + 1;
-        }
-
-        for (const tramo of enVuelo) {
-          const respuesta = await tramo.promesa;
-          if (!respuesta || !respuesta.ok || !respuesta.body) {
-            throw new Error('origen ' + (respuesta ? respuesta.status : 'sin respuesta'));
-          }
-          const saltar = respuesta.status === 200 ? tramo.desde : 0;
-          await relevarDelOrigen(escritor, respuesta, saltar);
-        }
-
-        // --- tramo 2b: y el resto, ya en secuencia, de una sola petición ---
-        if (cursor <= hasta) {
-          const respuesta = await pedirAlOrigen(url, cursor, hasta);
-          if (!respuesta || !respuesta.ok || !respuesta.body) {
-            throw new Error('origen ' + (respuesta ? respuesta.status : 'sin respuesta'));
-          }
-          const saltar = respuesta.status === 200 ? cursor : 0;
-          await relevarDelOrigen(escritor, respuesta, saltar);
-        }
-      }
-    } catch (e) {
-      // Las cabeceras salieron hace rato, así que no se puede cambiar el status: se corta, y el
-      // reproductor lo trata como lo que es — una descarga interrumpida.
-      await escritor.abort(e).catch(() => {});
-      return;
-    }
-    await escritor.close().catch(() => {});
-  };
-
-  ctx.waitUntil(bombear());
-  return readable;
-}
 
 export async function servirConCache(request, env, ctx, url) {
   if (!env.CACHE) {
