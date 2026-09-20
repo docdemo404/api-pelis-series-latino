@@ -1,0 +1,65 @@
+name: Diagnosticar acceso cloud a NewTV
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probar:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Consultar indice y audios de NewTV
+        shell: bash
+        run: |
+          node <<'NODE'
+          const headers = {
+            'X-Requested-With': 'NetmirrorNewTV v1.0',
+            'User-Agent': 'Mozilla/5.0 /OS.GatuNewTV v1.0',
+            Accept: 'application/json, text/plain, */*',
+            Ott: 'pv',
+          };
+          const post = await fetch(
+            'https://tv.imgcdn.kim/newtv/post.php?id=0S3P89X75C2DXJ392UIWKUVXDZ',
+            { headers, signal: AbortSignal.timeout(15000) },
+          );
+          const body = await post.text();
+          let json;
+          try { json = JSON.parse(body); } catch {}
+          const idiomas = Array.isArray(json?.lang) ? json.lang : [];
+          console.log(JSON.stringify({
+            status: post.status,
+            title: json?.title || null,
+            audios: idiomas.length,
+            spanish: idiomas.filter(x => x?.s === 'spa').length,
+            bytes: body.length,
+          }));
+          if (!post.ok || json?.title !== 'Shrek' || idiomas.length < 2) process.exit(1);
+          NODE
+
+      - name: Consultar master HLS de NewTV
+        if: always()
+        shell: bash
+        run: |
+          node <<'NODE'
+          const url = 'https://tv.imgcdn.kim/newtv/hls/pv/0S3P89X75C2DXJ392UIWKUVXDZ.m3u8';
+          const response = await fetch(url, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0',
+              Referer: 'https://net52.cc/',
+              Origin: 'https://net52.cc',
+            },
+            signal: AbortSignal.timeout(15000),
+          });
+          const body = await response.text();
+          const audios = (body.match(/#EXT-X-MEDIA[^\n]*TYPE=AUDIO/gi) || []).length;
+          console.log(JSON.stringify({ status: response.status, audios, bytes: body.length }));
+          if (!response.ok || audios < 2) process.exit(1);
+          NODE
