@@ -1,4 +1,4 @@
-name: Traer lo que NetMirror reproduce (Prime Video) y no teníamos
+name: Sincronizar catálogo completo de NetMirror (Netflix, Prime y Hotstar/Disney+)
 
 # NETMIRROR COMO POBLADOR, NO SOLO COMO SERVIDOR.
 #
@@ -40,7 +40,7 @@ name: Traer lo que NetMirror reproduce (Prime Video) y no teníamos
 
 on:
   schedule:
-    - cron: '0 3,9,15,21 * * *'
+    - cron: '0 1,5,9,13,17,21 * * *'
   workflow_dispatch:
     inputs:
       limite:
@@ -54,11 +54,11 @@ on:
       regiones:
         description: 'Regiones de TMDB, separadas por comas'
         required: false
-        default: 'IN,MX,ES,US'
+        default: 'IN,MX,AR,CL,CO,PE,BR,ES,US,CA,GB,AU,DE,FR,IT'
       proveedor:
-        description: 'prime o netflix'
+        description: 'todos, netflix, prime, hotstar o disney'
         required: false
-        default: 'prime'
+        default: 'todos'
 
 concurrency:
   group: netmirror
@@ -88,6 +88,6 @@ jobs:
           npx ts-node scripts/importarNetmirror.ts \
             --limite=${{ inputs.limite || 900 }} \
             --minutos=${{ inputs.minutos || 40 }} \
-            --regiones=${{ inputs.regiones || 'IN,MX,ES,US' }} \
-            --proveedor=${{ inputs.proveedor || 'prime' }} \
+            --regiones=${{ inputs.regiones || 'IN,MX,AR,CL,CO,PE,BR,ES,US,CA,GB,AU,DE,FR,IT' }} \
+            --proveedor=${{ inputs.proveedor || 'todos' }} \
             --via=api

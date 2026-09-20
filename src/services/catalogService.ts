@@ -9,9 +9,8 @@ import { normalizeTitle, slugify, yearFromSlug, searchIndexKey } from '../utils/
 import { httpClient } from '../utils/httpClient';
 import { CacheStore } from '../cache/store';
 import { unwrapRedirector, canonicalArchiveOrg } from '../scrapers/directStream';
-import { pelicula as netmirrorPelicula, episodio as netmirrorEpisodio, buscarNetflixId, masterHls, servidorDePelicula, FuenteNetmirror } from '../scrapers/netmirror';
-import { traducirYNormalizar } from '../utils/idiomas';
-import { leerAjuste } from '../utils/ajustesRemotos';
+import { servidorVirtualDePelicula, decodificarIdNetmirror } from '../scrapers/netmirror';
+import { tieneEspanolLatino } from '../utils/idiomas';
 import { revisarServidores, aplicarVeredictosRecordados } from './playbackHealth';
 import {
   LedgerManual,
@@ -48,30 +47,6 @@ const CACHE_TTL_SIN_SELLO_SECONDS = 60;
 // La METADATA (sinopsis, pósters, reparto…) apenas cambia: se cachea mucho más tiempo que
 // los enlaces, que sí caducan. Es lo que permite que la ficha emergente abra al instante.
 const METADATA_TTL_SECONDS = 6 * 60 * 60;
-
-// Enlaces persistidos por debajo de esta antigüedad se sirven de la DB sin volver a scrapear.
-const STREAMS_FRESH_MS = 24 * 60 * 60 * 1000;
-
-// Corte de re-resolución: los enlaces guardados antes de esta fecha se consideran caducos
-// aunque sean recientes, y se vuelven a resolver UNA vez por título según se van pidiendo.
-//
-// 2026-07-23 → empezó a extraerse el vídeo directo: lo guardado antes solo tenía embed.
-// 2026-07-25 → se midió qué hosts admiten redirección (src/scrapers/hostPolicy.ts). Lo
-//   guardado antes lleva `direct_mode: 'proxy'` a fuego y sin el campo `headers`.
-//
-//   Ni reproducir ni el ORDEN dependen ya de esto: /stream/direct vuelve a decidir el modo en
-//   cada petición, y `streamSorter` lo RECALCULA antes de ordenar (`effectiveDirectMode`) en vez
-//   de leer la etiqueta guardada — que era lo que hundía precisamente a los servidores que no
-//   gastan proxy. Lo único que sigue sin arreglarse solo es `headers`, que es lo que copia un
-//   cliente nativo para pedir `?mode=redirect`. Si algún día ese campo deja de importar, este
-//   corte se puede retirar y se ahorra un re-escrapeo por título.
-//
-// 2026-07-25T21:42 → se arregló la comprobación de salud (src/scrapers/embedHealth.ts), que
-//   marcaba caído a emturbovid entero: 6.265 servidores, el segundo host más grande y el más
-//   rápido que se ha medido (holgura 6x en frío, 13x repetido). El `status` es un campo GUARDADO
-//   y `streamSorter` antepone lo que está `online`, así que sin volver a comprobarlos seguirían
-//   enterrados con el veredicto viejo. Esto es lo que los saca a flote.
-const DIRECT_EXTRACTION_SINCE = Date.parse('2026-07-25T21:42:00Z');
 
 /**
  * Clave canónica de título para AGRUPAR variantes del mismo contenido entre fuentes
@@ -1471,13 +1446,6 @@ export class CatalogService {
   }
 
   /**
-   * ¿Los enlaces persistidos siguen siendo válidos (menos de 24 h)?
-   *
-   * Además se descartan los resueltos ANTES de que existiera la extracción de vídeo directo:
-   * sin esto, cualquier ficha ya guardada seguiría sirviendo solo embeds hasta que caducara
-   * por su cuenta. Es una re-resolución única por título, no una invalidación permanente.
-   */
-  /**
    * Aplica a una ficha ya resuelta lo que se haya aprendido DESPUÉS de guardarla.
    *
    * Los dos caminos rápidos —ficha en caché y enlaces frescos de la DB— devuelven servidores con
@@ -1495,50 +1463,6 @@ export class CatalogService {
     if (revisados === item.servers) return item;
     const servers = sortServersBySourcePriority(revisados);
     return { ...item, servers, primary_stream: getPrimaryStream(servers) };
-  }
-
-  /**
-   * ¿Se puede entregar lo guardado sin volver a comprobar nada?
-   *
-   * ESTE ATAJO SE COMÍA TODAS LAS COMPROBACIONES. Bastaba con que los enlaces se hubieran escrito
-   * hace menos de 24 h para devolverlos tal cual, sin sondear: se amplió el presupuesto de sondeo,
-   * se hizo que se resellara al servir… y nada de eso llegaba a ejecutarse nunca, porque la ficha
-   * salía por aquí. «Milagro en la Celda 7» seguía entregando su servidor muerto después de tres
-   * arreglos seguidos, y los tres eran correctos: no se ejecutaba ninguno.
-   *
-   * La fecha de escritura dice cuándo se resolvió la lista, no si el vídeo sigue ahí. Lo segundo
-   * lo dice el sello de cada servidor, y ahora se exige: si lo que se iba a entregar no está
-   * sellado y vigente, se cae a la resolución completa, que sondea y resella.
-   */
-  private static hasFreshStreams(item: MediaItem): boolean {
-    /**
-     * UNA SERIE GUARDA SUS ENLACES EN LOS CAPÍTULOS, y esta salida los ignoraba.
-     *
-     * La última línea de esta función ya acepta `hasEpisodeServers` como motivo suficiente, así
-     * que la guarda de aquí arriba se contradecía con ella: una serie con todos sus capítulos
-     * resueltos y ninguno servidor a nivel de ficha —que es la forma CORRECTA de guardarla, lo
-     * dice `fichaReproducible`: «en una serie los servidores de nivel ficha NO cuentan»— salía
-     * por aquí con `false` y se iba a la resolución completa. O sea, un scrapeo en vivo contra
-     * todas las fuentes en CADA apertura de la ficha, teniendo la respuesta ya guardada.
-     *
-     * Se veía en los registros al abrir «Arrow»: cuatro «[TioPlus] Error scrapeando detalle: 404»
-     * seguidos, buscando por un slug que no es de TioPlus, para acabar entregando los enlaces que
-     * ya estaban en la fila.
-     *
-     * Era un caso raro mientras casi todas las series traían algún servidor de ficha por el
-     * scraping de su página. Con videoapi pasa a ser la norma: sus 1.800 series se guardan con los
-     * enlaces exclusivamente en los capítulos, porque la fuente los nombra uno a uno.
-     */
-    const hayAlgoGuardado = (item.servers && item.servers.length > 0) || this.hasEpisodeServers(item);
-    if (!hayAlgoGuardado) return false;
-    if (!item.streams_updated_at) return false;
-    const ts = Date.parse(item.streams_updated_at);
-    if (!Number.isFinite(ts)) return false;
-    if (ts < DIRECT_EXTRACTION_SINCE) return false;
-    if (Date.now() - ts >= STREAMS_FRESH_MS) return false;
-    // Y que haya ALTERNATIVAS, no solo uno: con un único servidor, un atasco no tiene salida y
-    // el camino rápido impediría durante 24 h volver a buscar los demás. Ver `getEpisode`.
-    return paraElCliente(item.servers).length >= 2 || this.hasEpisodeServers(item);
   }
 
   /**
@@ -2704,33 +2628,19 @@ export class CatalogService {
   }
 
   /**
-   * ESCRIBE EL VEREDICTO, Y SI ES EL QUE ESCONDE LA FICHA, ESPERA A QUE LLEGUE.
+   * ESCRIBE EL RESULTADO ANTES DE RESPONDER.
    *
-   * `persistStreams` iba siempre lanzado y olvidado, y sobre Vercel eso significa muchas veces
-   * NUNCA: la función se congela en cuanto contesta, así que un UPDATE que aún no había salido se
-   * queda a medias y no se escribe jamás. No es una sospecha — está medido y documentado en este
-   * mismo archivo, en `getEpisode`: por eso los capítulos pasaron a esperar su escritura, y por eso
-   * `--episodios` veía los mismos 90.000 pendientes corrida tras corrida.
+   * En Vercel no existe un segundo plano fiable después de enviar la respuesta: la lambda puede
+   * congelarse de inmediato. Esperar sólo los resultados negativos dejaba evaporarse precisamente
+   * los positivos descubiertos por `deep`: la petición reproducía una vez, pero la fila conservaba
+   * el servidor viejo y la siguiente apertura volvía a quedar vacía. El caso medido fue
+   * «Sargento Stubby» (TMDB 433694): se encontró y verificó TioPlus, pero nunca llegó a Supabase.
    *
-   * Aquí muerde exactamente igual, y en el peor sitio: la petición sondea la lista entera, se queda
-   * sin nada que entregar, concluye que la ficha no se puede anunciar… y ese `has_streams = false`
-   * se evapora con la lambda. El título vuelve a la portada como si nada, y el siguiente que lo
-   * abra repite la misma comprobación para volver a perderla.
-   *
-   * Así que se distingue por lo que hay en juego, no por comodidad:
-   *
-   *   · queda algo que entregar → el write-through es un ADELANTO para la próxima apertura, y
-   *     perderlo solo cuesta repetir trabajo. Se lanza y se olvida, como estaba.
-   *   · no queda nada          → esa escritura es lo ÚNICO que saca el título de los listados.
-   *     Se espera. Son ~150 ms al final de una respuesta que acaba de gastar varios segundos
-   *     sondeando, y sin ellos todo lo demás es decorativo.
+   * La escritura tarda una única consulta al final de un camino que ya hizo scraping y sondeo. Se
+   * espera siempre; tanto publicar un servidor como retirar uno son parte del resultado, no tareas
+   * opcionales para después de responder.
    */
   private static async guardarEnlaces(item: MediaItem, verified: boolean, seMiroAlgo: boolean): Promise<void> {
-    const hayQueEntregar = paraElCliente(item.servers).length > 0 || this.hasEpisodeServers(item);
-    if (hayQueEntregar) {
-      void this.persistStreams(item, verified, seMiroAlgo).catch(() => {});
-      return;
-    }
     await this.persistStreams(item, verified, seMiroAlgo).catch(() => {});
   }
 
@@ -3624,42 +3534,18 @@ export class CatalogService {
       .find(s => s.season_number === season)?.episodes
       ?.find(e => e.episode_number === episode);
 
-    /**
-     * SI YA ESTÁ RESUELTO Y FRESCO, NO SE SCRAPEA. Es la misma regla que `hasFreshStreams` aplica
-     * a las películas, y aquí faltaba: se scrapeaba SIEMPRE, aunque los enlaces estuvieran
-     * guardados y recién comprobados. Abrir un capítulo costaba una visita a la fuente y el sondeo
-     * de sus servidores —segundos— cuando la respuesta ya estaba en la base de datos.
+    /*
+     * Las URL que se guardan ya son estables: o son públicas o apuntan a `/stream/direct`, que
+     * acuña una firma nueva al reproducir. Exigir dos servidores y menos de 24 h convertía un
+     * capítulo perfectamente reproducible en 8 s de scraping + sondeo cada vez que caducaba el
+     * caché HTTP. Un servidor ya trae además sus rutas de respaldo en el cliente Android.
      *
-     * Resolver bajo demanda no puede ser el mecanismo normal: eso convierte cada reproducción en
-     * una espera y deja al cliente pagando un trabajo que le toca al catálogo. Lo normal es leer
-     * lo ya resuelto; scrapear es el respaldo para lo que la pasada de fondo aún no ha cubierto.
+     * Los veredictos negativos se aplican debajo antes de responder; si el único guardado fue
+     * marcado offline, `paraElCliente` devuelve cero y sí se vuelve al camino exhaustivo.
      */
-    const selloEp = deLaFicha?.checked_at ? Date.parse(deLaFicha.checked_at) : 0;
-    /**
-     * Y que lo guardado SIRVA PARA ALGO. Tener servidores no basta: si ninguno es publicable, el
-     * atajo devuelve una lista vacía y encima impide volver a mirar durante 24 h — el capítulo se
-     * queda muerto por un sello que puso una resolución que salió mal.
-     *
-     * Pasó con «Breaking Bad»: un intento anterior selló el capítulo con los servidores de una sola
-     * fuente, todos inservibles, y a partir de ahí ya no se scrapeaba. La fuente nueva estaba
-     * enganchada, tenía tres vídeos directos y no se llegaba a preguntar.
-     *
-     * Es la misma regla que `hasFreshStreams` aplica a las películas.
-     */
-    /**
-     * Y con ALTERNATIVAS, no con uno.
-     *
-     * Bastaba con que hubiera un servidor publicable para dar el capítulo por resuelto y no volver
-     * a mirar en 24 h. Pero un solo servidor es justo el caso que no tiene salida: si se atasca, no
-     * hay a dónde caer. El capítulo se quedaba con el primero que se selló y los otros tres con
-     * vídeo directo seguían escondidos esperando turno para siempre.
-     *
-     * Con dos ya hay failover, que es lo que importa. Por debajo se vuelve a resolver, y esa pasada
-     * sella hasta tres (`objetivoSellados`). Se paga una vez por capítulo.
-     */
-    const yaResuelto = Boolean(selloEp)
-      && Date.now() - selloEp < STREAMS_FRESH_MS
-      && paraElCliente(deLaFicha?.servers).length >= 2;
+    const yaResuelto = paraElCliente(
+      aplicarVeredictosRecordados((deLaFicha?.servers || []) as ServerOption[]),
+    ).length > 0;
 
     /**
      * LA PÁGINA EXACTA DE ESTE CAPÍTULO VA LA PRIMERA, si el catálogo la guardó.
@@ -3741,21 +3627,18 @@ export class CatalogService {
     const propiosMasNm = propios.filter(s => String((s as any)?.source_id || '').toLowerCase() !== 'netmirror');
     if (serie.tmdb_id) {
       const nm = await serverDeNetmirror(serie.tmdb_id, { tipo: 'tv', s: season, e: episode });
-      if (nm) propiosMasNm.push(nm.server);
+      if (nm) propiosMasNm.push(nm);
     }
 
-    const revisados = await revisarServidores(
-      sortServersBySourcePriority(aplicarVeredictosRecordados(propiosMasNm)),
-      // Un episodio trae 4-6 servidores y a menudo la mitad están caídos, así que el cupo de sondas
-      // cubre la lista entera: con tope de 3 se gastaban en los muertos y el último se entregaba
-      // SIN comprobar, conservando su `online` viejo. Manda el presupuesto de TIEMPO, que se queda
-      // en 3 s para no castigar la apertura — y lo ya sabido sale del caché compartido sin gastar
-      // sonda, así que la segunda vez que alguien abre este capítulo no se sondea nada.
-      // Mismo razonamiento que en las películas: quedarse a medias ya no entrega un servidor sin
-      // comprobar, deja el capítulo vacío. Se para en cuanto uno demuestra que reproduce.
-      // Mismo motivo que en las películas: alternativas para poder caer si el primero se atasca.
-      { presupuestoMs: 8000, maximo: 8, objetivoSellados: 3 }
-    );
+    const conocidos = sortServersBySourcePriority(aplicarVeredictosRecordados(propiosMasNm));
+    const revisados = yaResuelto
+      ? conocidos
+      : await revisarServidores(
+          conocidos,
+          // Solo se paga cuando de verdad faltan enlaces utilizables. El barrido de fondo deja
+          // este resultado persistido para que la siguiente apertura vuelva al camino rápido.
+          { presupuestoMs: 8000, maximo: 8, objetivoSellados: 3 },
+        );
 
     /**
      * Los que se han demostrado caídos NO se entregan.
@@ -4089,16 +3972,13 @@ export class CatalogService {
     if (cached && !opts.deep) {
       const alDia = this.conSaludAlDia(cached);
       if (paraElCliente(alDia.servers).length > 0 || this.hasEpisodeServers(alDia)) {
-        // NetMirror se re-resuelve incluso en el atajo del cache. El mp4 firmado caduca en
-        // pocas horas, y el `verified_at` viejo lo hundiria en el sorter — mejor un server
-        // recien acunado. Idempotente: se quita el que hubiera antes de anadir.
-        if (alDia.type === 'movie' && alDia.tmdb_id) {
-          const sinViejo = (alDia.servers || []).filter(s => String((s as any)?.source_id || '').toLowerCase() !== 'netmirror');
-          const nm = await serverDeNetmirror(alDia.tmdb_id, { tipo: 'movie' });
-          alDia.servers = nm ? [...sinViejo, nm.server] : sinViejo;
-          alDia.servers = sortServersBySourcePriority(alDia.servers);
-          alDia.primary_stream = getPrimaryStream(alDia.servers);
-        }
+        // La consulta auxiliar es SOLO a nuestra tabla `netmirror_cache`, nunca al upstream.
+        // Ahí vive el netflix_id que convierte su MP4 mono-audio en el master multi-audio.
+        alDia.servers = sortServersBySourcePriority(await enriquecerNetmirrorDesdeCache(
+          alDia.servers || [],
+          alDia.type === 'movie' ? alDia.tmdb_id : null,
+        ));
+        alDia.primary_stream = getPrimaryStream(alDia.servers);
         return alDia;
       }
     }
@@ -4106,43 +3986,28 @@ export class CatalogService {
     const result = await this.getMetadata(q, typeHint);
     if (!result) return null;
 
-    /**
-     * A. Enlaces persistidos y frescos: no hay que scrapear, PERO SÍ HAY QUE COMPROBAR.
+    /*
+     * SERVIR LO YA RESUELTO SIN VOLVER A SONDEARLO EN EL REQUEST.
      *
-     * Aquí estaba el fondo del asunto, y costó tres despliegues verlo. La lista guardada se
-     * devolvía tal cual porque el sello decía que alguien había demostrado que funcionaba. Pero un
-     * sello es una promesa sobre el PASADO: «Milagro en la Celda 7» y «Volver al Futuro 3» tenían
-     * el suyo de hacía tres horas y sus enlaces daban 502 y 503 en ese momento. Acortar la ventana
-     * solo mueve el problema — el vídeo se puede caer en el minuto siguiente a sellarlo.
+     * Esto cubre todas las fuentes, no solo NetMirror. Un `direct_stream` guardado es estable y
+     * vuelve a acuñar su destino al reproducir; comprobar hasta tres servidores aquí añadía hasta
+     * 9 s antes de que Media3 pudiera pedir un solo byte. Los jobs de verificación y los reportes
+     * de reproducción mantienen los veredictos, que `conSaludAlDia` aplica sin red.
      *
-     * Si la regla es que lo que se entrega funciona, lo que se entrega hay que comprobarlo al
-     * entregarlo. `revisarServidores` para en cuanto uno demuestra que reproduce y lo ya sabido
-     * sale del caché de salud sin gastar sonda, así que el caso normal —la cabeza funciona, o se
-     * comprobó hace nada— sigue costando prácticamente cero. Solo se paga cuando la cabeza ha
-     * muerto, que es exactamente cuando hay que enterarse.
-     *
-     * Lo comprobado se resella, se reordena y se persiste: la siguiente apertura ya sale barata.
+     * Solo se scrapea/sondea cuando no queda ningún servidor publicable. Así se conserva la
+     * recuperación de fichas realmente vacías sin cobrarla en cada reproducción sana.
      */
-    if (!opts.deep && this.hasFreshStreams(result)) {
-      // NetMirror: se pega tambien en el atajo de enlaces frescos, o el server virtual solo
-      // saldria cuando toca resolver de cero. Idempotente: si ya viniera uno del cache
-      // (persistencia accidental), no metemos otro.
-      // Se elimina el que hubiera (persistencia accidental con sello viejo) y se resuelve fresco.
-      const conNm = (result.servers || []).filter(s => String((s as any)?.source_id || '').toLowerCase() !== 'netmirror');
-      if (result.type === 'movie' && result.tmdb_id) {
-        const nm = await serverDeNetmirror(result.tmdb_id, { tipo: 'movie' });
-        if (nm) conNm.push(nm.server);
+    if (!opts.deep) {
+      const alDia = this.conSaludAlDia(result);
+      if (paraElCliente(alDia.servers).length > 0 || this.hasEpisodeServers(alDia)) {
+        alDia.servers = sortServersBySourcePriority(await enriquecerNetmirrorDesdeCache(
+          alDia.servers || [],
+          alDia.type === 'movie' ? alDia.tmdb_id : null,
+        ));
+        alDia.primary_stream = getPrimaryStream(alDia.servers);
+        await this.cacheItem('byid', cacheKey, alDia, CACHE_TTL_SECONDS);
+        return alDia;
       }
-      const revisados = await revisarServidores(
-        sortServersBySourcePriority(aplicarVeredictosRecordados(conNm)),
-        // Tres demostrados, no uno: sin alternativas un atasco no tiene salida. Ver `objetivoSellados`.
-        { presupuestoMs: 9000, maximo: 8, objetivoSellados: 3 }
-      );
-      result.servers = sortServersBySourcePriority(revisados);
-      result.primary_stream = getPrimaryStream(result.servers);
-      await this.guardarEnlaces(result, false, true);
-      await this.cacheItem('byid', cacheKey, result, CACHE_TTL_SECONDS);
-      return result;
     }
 
     const allServers: ServerOption[] = [...(result.servers || [])];
@@ -4391,7 +4256,7 @@ export class CatalogService {
     }
     if (result.type === 'movie' && result.tmdb_id) {
       const nm = await serverDeNetmirror(result.tmdb_id, { tipo: 'movie' });
-      if (nm) allServers.push(nm.server);
+      if (nm) allServers.push(nm);
     }
 
     const revisados = await revisarServidores(sortServersBySourcePriority(allServers), opts.deep
@@ -5080,17 +4945,20 @@ function urlDe(sv: any): string {
 }
 
 /**
- * NETMIRROR — se pega como server virtual cuando la ficha tiene tmdb_id.
+ * NETMIRROR — se pega como server virtual cuando su caché confirma que tiene la película.
  *
- * No se guarda en la DB porque su mp4 caduca cada pocas horas (query firmada por CDN). El server
- * apunta a `/api/v1/netmirror/stream/<tmdbId>[?...]`, que es una url ESTABLE para el cliente:
- * cada reproduccion re-consulta la API por dentro y hace proxy con la cabecera Referer que la
- * CDN exige. Prioridad la fija `sources.ts` — hoy `1`, encima de todo.
+ * La lista solo necesita una URL estable: el MP4 firmado se resuelve dentro de
+ * `/api/v1/netmirror/stream/<tmdbId>` al reproducir. Consultar además `net27.cc` aquí añadía entre
+ * 2 y 10 segundos a CADA `/streams`, incluso cuando el resto de servidores ya estaba cacheado.
+ *
+ * Por eso este camino es deliberadamente cache-only. El escáner/importador mantiene
+ * `netmirror_cache`; si aún no ha comprobado una obra, se sirven las otras fuentes y NetMirror se
+ * incorporará en el siguiente barrido. La ausencia de una fuente opcional nunca bloquea Play.
  */
 async function serverDeNetmirror(
   tmdbId: number,
   contexto: { tipo: 'movie' } | { tipo: 'tv'; s: number; e: number },
-): Promise<{ server: ServerOption; fuente: FuenteNetmirror } | null> {
+): Promise<ServerOption | null> {
   // NETMIRROR PARA SERIES ESTA ROTO EN ORIGEN, y no se puede arreglar desde aqui.
   //
   // `/api/embed-tmdb/{tmdbSerie}?type=tv&s=X&e=Y` devuelve el MISMO fichero mp4 para todos
@@ -5106,15 +4974,11 @@ async function serverDeNetmirror(
   // quita este corte.
   if (contexto.tipo === 'tv') return null;
 
-  // Antes de llamar a la API: mirar la cache de disponibilidad. Si sabemos que NetMirror NO
-  // tiene esta obra (barrido por `scripts/scanNetmirror.ts`), se salta la peticion. Esto evita
-  // el rate-limit incidental que dispara `noSource` sobre obras que si estan cuando llegan
-  // muchas peticiones seguidas.
-  //
-  // Para series, el cache se guarda a NIVEL SERIE (temporada=1, episodio=1). Si S1E1 no esta,
-  // damos por hecho que ninguna temporada esta. Es cierto en >90% de los casos medidos.
+  // El caché es también el veredicto de disponibilidad. No se convierte un fallo/timeout del
+  // upstream en un falso «no»: si la fila no existe o no afirma `disponible=true`, se omite.
+  let disponible = false;
   let netflixIdCache: string | null = null;
-  let idiomasCache: Array<{ lang: string; name_es: string; default?: boolean }> | null = null;
+  let idiomasCache: Array<{ lang: string; name_es: string; uri?: string; default?: boolean }> | null = null;
   let dominioHls: string | null = null;
   try {
     const cli = getSupabaseAdmin();
@@ -5124,102 +4988,74 @@ async function serverDeNetmirror(
       .select('disponible,netflix_id,idiomas_audio,dominio_hls')
       .eq('tmdb_id', tmdbId).eq('temporada', filtroS).eq('episodio', filtroE)
       .maybeSingle();
-    if (cache && cache.disponible === false) return null;
+    disponible = cache?.disponible === true;
     netflixIdCache = (cache as any)?.netflix_id ?? null;
     idiomasCache = (cache as any)?.idiomas_audio ?? null;
     dominioHls = (cache as any)?.dominio_hls ?? null;
-  } catch { /* si la tabla no existe aun, seguimos por el camino largo */ }
+  } catch { return null; }
+  // Regla de producto: NetMirror sólo se publica primero si el master demuestra multipista Y una
+  // pista Español Latino. Un MP4 inglés, placeholder o master extranjero no desplaza a fuentes
+  // latinas reales. Nunca se inventan pistas que el proveedor no entrega.
+  if (!disponible || !netflixIdCache || !Array.isArray(idiomasCache) || idiomasCache.length < 2
+    || !tieneEspanolLatino(idiomasCache)) return null;
 
-  // A partir de aqui `contexto.tipo === 'movie'` es la unica rama posible (el corte para 'tv'
-  // esta arriba), pero se conserva la logica de series en el resto para que reactivarla en el
-  // futuro sea quitar el `return null` sin tocar nada mas.
-  const fuente = await netmirrorPelicula(tmdbId).catch(() => null);
-  if (!fuente) return null;
+  const netmirror = decodificarIdNetmirror(netflixIdCache);
+  if (!netmirror.id) return null;
 
-  // No esperar al barrido nocturno para habilitar multi-audio en una ficha nueva. La respuesta
-  // de NetMirror ya trae el título indexado por su buscador, así que resolvemos y persistimos su
-  // netflix_id en la primera apertura. Sin este paso el servidor reproduce, pero no incluye
-  // `netmirror_hls` y el cliente no puede pedir ni descubrir sus pistas extra.
-  if (!netflixIdCache && fuente.meta.title) {
-    const encontrado = await buscarNetflixId(fuente.meta.title, fuente.meta.year || undefined).catch(() => null);
-    if (encontrado) {
-      netflixIdCache = encontrado;
-      await getSupabaseAdmin().from('netmirror_cache').upsert({
-        tmdb_id: tmdbId,
-        temporada: 0,
-        episodio: 0,
-        disponible: true,
-        netflix_id: encontrado,
-        comprobado_at: new Date().toISOString(),
-      }, { onConflict: 'tmdb_id,temporada,episodio' });
-    }
-  }
-
-  // Una versión vieja del parser descartaba URIs relativas y dejó varias fichas con una única
-  // pista `eng` aunque su master tuviera todas las demás. Al encontrarnos ese estado, refrescamos
-  // una vez con el token que el cliente ya comparte para el escáner. Así la respuesta de esta
-  // misma apertura contiene el multi-audio; si no hay token, mandamos idiomas vacíos para que el
-  // descubrimiento oportunista del cliente repueble la caché en vez de afirmar erróneamente que
-  // English es la única opción.
-  const cacheSoloIngles = Array.isArray(idiomasCache)
-    && idiomasCache.length === 1
-    && /^eng?$/i.test(String(idiomasCache[0]?.lang || ''));
-  if (netflixIdCache && cacheSoloIngles) {
-    try {
-      const ajuste = await leerAjuste<{ token?: string }>('nm-token');
-      if (ajuste?.token) {
-        const master = await masterHls(netflixIdCache, ajuste.token);
-        const pistas = master
-          ? traducirYNormalizar(master.audios.map(a => ({ language: a.language, name: a.name, uri: a.uri })))
-          : [];
-        if (pistas.some(p => p.lang !== 'eng')) {
-          idiomasCache = pistas;
-          const ejemplo = master?.video[0]?.uri || master?.audios[0]?.uri || '';
-          try { dominioHls = new URL(ejemplo).hostname; } catch { /* se conserva el anterior */ }
-          await getSupabaseAdmin().from('netmirror_cache').update({
-            idiomas_audio: pistas,
-            dominio_hls: dominioHls,
-            comprobado_at: new Date().toISOString(),
-          }).eq('tmdb_id', tmdbId).eq('temporada', 0).eq('episodio', 0);
-        } else {
-          // No reutilizar el dato incompleto: el cliente hará el descubrimiento con su sesión.
-          idiomasCache = [];
-        }
-      } else {
-        idiomasCache = [];
-      }
-    } catch {
-      idiomasCache = [];
-    }
-  }
-  // La forma del servidor vive en el scraper (`servidorDePelicula`): es la MISMA que escribe
-  // `scripts/importarNetmirror.ts` cuando trae una ficha nueva, y tienen que coincidir —el
-  // proxy, la cabecera Referer, el modo redirect, el sello— o el importador y la apertura se
-  // contradirían sobre el mismo título.
+  // Versiones anteriores guardaban aquí el host de una pista (`freecdn*`) en vez del master.
+  // Esos dominios no publican `/newtv/hls`; se corrigen al backend NewTV conocido.
+  const dominioMaster = dominioHls && !/(?:freecdn|hakunaymatata|subscdn|^net\d+\.)/i.test(dominioHls)
+    ? dominioHls
+    : 'tv.imgcdn.kim';
   const server: ServerOption = {
-    ...servidorDePelicula(tmdbId, fuente),
-    // Metadata multi-audio para el cliente Android. Cuando el cache tiene los idiomas del
-    // master HLS (poblados por el escaneo o por un cliente previo), se los damos aqui para que
-    // Media3 pueda montar el HLS con multi-audio en vez del mp4 mono-audio. Sin idiomas, el
-    // campo va ausente y el cliente cae al mp4 como hoy.
-    // Con netflix_id basta para armar el master, PERO el cliente arma un `MergingMediaSource`
-    // que usa el mp4 mono-audio como video base y adjunta cada pista de audio como HLS externo.
-    // Sin URIs de audio poblados en cache, el cliente no puede montar nada — asi que solo se
-    // envia `netmirror_hls` cuando el escaneo ya midio el master con NM_TOKEN_ESCANEO y guardo
-    // las URIs. Ver `scanNetmirror.ts` y la nota del descubrimiento del video placeholder.
-    // Se envia SIEMPRE que haya netflix_id — aunque no haya idiomas todavia. Con idiomas
-    // vacios el cliente cae al mp4 mono-audio como antes, PERO ademas dispara un
-    // descubrimiento oportunista en background: baja el master con su propio token de
-    // sesion, extrae audios, y los sube via POST /api/v1/panel/nm-idiomas para que la
-    // proxima persona que abra la ficha ya la encuentre poblada. Ver
-    // NetmirrorSesion.descubrirYSubirIdiomas() en el cliente Android.
-    netmirror_hls: netflixIdCache ? {
-      netflix_id: netflixIdCache,
-      dominio_hls: dominioHls || 'net52.cc',
-      idiomas: idiomasCache || [],
-    } : undefined,
-  } as any;
-  return { server, fuente };
+    ...servidorVirtualDePelicula(tmdbId),
+    // Con el master identificado sí hay selector de idiomas; sin él el MP4 sigue siendo original.
+    language: 'latino',
+    netmirror_hls: {
+      netflix_id: netmirror.id,
+      ott: netmirror.ott,
+      dominio_hls: dominioMaster,
+      master_url: `https://${dominioMaster}/newtv/hls/${netmirror.ott}/${encodeURIComponent(netmirror.id)}.m3u8`,
+      idiomas: idiomasCache,
+    },
+  };
+  return server;
+}
+
+/**
+ * Recupera el `netflix_id` ya descubierto sin volver a tocar NetMirror en el request de Play.
+ *
+ * Los servidores se persistieron antes de existir `netmirror_hls`, mientras que el escáner y
+ * los televisores escriben esa metadata en `netmirror_cache`. Si no se unen aquí, el dato existe
+ * pero nunca llega al cliente y este abre el MP4 mono-audio (normalmente inglés).
+ *
+ * El techo evita que una caída de nuestra base vuelva a convertir esta mejora opcional en varios
+ * segundos de pantalla negra. El siguiente request lo intentará otra vez.
+ */
+async function enriquecerNetmirrorDesdeCache(
+  servers: ServerOption[],
+  tmdbId?: number | null,
+): Promise<ServerOption[]> {
+  if (!tmdbId || tmdbId <= 0) return servers;
+  const indice = servers.findIndex(s =>
+    s.source_id === 'netmirror' || s.id === `nm-${tmdbId}` || /\/netmirror\/stream\//i.test(s.direct_stream || s.embed_url),
+  );
+  if (indice < 0) return servers;
+
+  const metadata = await Promise.race<ServerOption | null>([
+    serverDeNetmirror(tmdbId, { tipo: 'movie' }),
+    // Una lectura fría de Supabase puede superar 750 ms. Ese techo hacía desaparecer NetMirror
+    // justo al pulsar Play aunque su metadata multipista ya estuviera guardada. Sigue siendo una
+    // espera acotada y no toca al upstream: sólo consulta nuestra propia tabla.
+    new Promise<null>(resolve => setTimeout(() => resolve(null), 2_500)),
+  ]).catch(() => null);
+  if (!metadata?.netmirror_hls?.netflix_id) {
+    return servers.filter((_, i) => i !== indice);
+  }
+
+  return servers.map((server, i) => i === indice
+    ? { ...server, netmirror_hls: metadata.netmirror_hls }
+    : server);
 }
 
 /**

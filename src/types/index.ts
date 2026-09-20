@@ -83,6 +83,24 @@ export interface ServerOption {
   ttfb_ms?: number;
   source_id?: string;
   source_priority?: number;
+  /**
+   * Metadata del master HLS multi-audio de NetMirror.
+   *
+   * El MP4 de `/embed-tmdb` solo lleva la pista original; cuando existe este bloque el cliente
+   * abre el master interno con su propia sesion y Media3 puede ofrecer todos sus idiomas.
+   */
+  netmirror_hls?: {
+    netflix_id: string;
+    ott?: 'nf' | 'pv' | 'hs';
+    dominio_hls: string;
+    master_url?: string;
+    idiomas: Array<{
+      lang: string;
+      name_es: string;
+      uri?: string;
+      default?: boolean;
+    }>;
+  };
 }
 
 export interface CastMember {

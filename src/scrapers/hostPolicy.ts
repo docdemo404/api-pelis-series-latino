@@ -350,11 +350,9 @@ const POLICIES: HostPolicy[] = [
      * la entrada de abajo. Sin esta entrada caía en CONSERVATIVE —«atado por IP, por proxy»— y
      * cada reproducción pasaba por el Worker de Cloudflare.
      *
-     * MEDIDO el 2026-09-16 con token recién acuñado, en maestro, variante y segmento: 200 sin
-     * Referer, con Referer ajeno, sin UA de navegador y sin ninguna cabecera; `ACAO: *` en los
-     * tres; y un segmento acuñado desde Vercel se bajó desde otra IP. Abierto del todo, con UNA
-     * pega: cada url firmada se ata al primer cliente que la usa (`tokenDeUnSoloCliente`), así
-     * que el modo es `manifest` y no `redirect`. Ver el campo.
+     * REMEDIDO el 2026-09-19: el maestro y la variante siguen respondiendo, pero TODOS los
+     * segmentos acuñados por Vercel dan 403 desde otra IP. El CDN endureció la atadura y el modo
+     * `manifest` dejó de ser reproducible; ahora debe proxearse el árbol HLS completo.
      *
      * Y HAY UN MOTIVO MÁS PARA NO PASAR POR EL WORKER: ese mismo día el CDN empezó a contestar
      * 403 a TODO lo que sale del runtime de Cloudflare Workers —misma url, mismas cabeceras,
@@ -362,7 +360,7 @@ const POLICIES: HostPolicy[] = [
      * ninguna. Por 302 el aparato habla con el CDN directamente, que es lo más rápido que hay.
      */
     match: ['videoapi.la', 'videoapp.zip'],
-    ipBound: false,
+    ipBound: true,
     tokenDeUnSoloCliente: true,
     refererRequired: false,
     refererChecked: false,
@@ -372,7 +370,7 @@ const POLICIES: HostPolicy[] = [
     segmentRefererChecked: false,
     segmentCors: true,
     tokenTtlSeconds: null,
-    measuredAt: '2026-09-16',
+    measuredAt: '2026-09-19',
   },
   {
     // Abierto de arriba abajo aunque cada escalón esté en un host distinto: maestro en
@@ -384,8 +382,8 @@ const POLICIES: HostPolicy[] = [
     // en la lista, pero eso es el CDN y `policyFor` compara contra el host del EMBED, así que sus
     // 276 servidores se quedaban en `CONSERVATIVE` pagando proxy sin motivo.
     match: ['vimeos.net', 'unlimplay'],
-    ipBound: false,
-    // Mismo CDN que videoapi: el token se ata al primer cliente (medido el 2026-09-16). Ver el campo.
+    // Mismo CDN que VideoAPI y mismo endurecimiento medido el 2026-09-19.
+    ipBound: true,
     tokenDeUnSoloCliente: true,
     refererRequired: false,
     refererChecked: false,

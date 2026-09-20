@@ -13,6 +13,7 @@ import { traducirYNormalizar } from '../utils/idiomas';
 import { getSupabaseAdmin } from '../services/supabaseService';
 import { hostsDelCatalogo } from '../services/catalogService';
 import { medidaDeAparatos, refrescarMedidasDeAparatos } from '../services/medidasDeAparatos';
+import { codificarIdNetmirror, decodificarIdNetmirror, normalizarNetmirrorOtt } from '../scrapers/netmirror';
 
 /**
  * Panel de administración: página estática + API de fuentes y overrides.
@@ -287,41 +288,69 @@ router.post('/api/v1/panel/nm-token', async (req: Request, res: Response, next: 
  * El cliente envia `{tmdb_id, netflix_id, audios: [{language, name, uri, defaultTrack}]}`. Aqui
  * se traducen los nombres al español (regla spa Latino/Castellano) y se guarda en la fila
  * correspondiente de `netmirror_cache`.
+ *
+ * ES UN UPSERT, NO UN UPDATE. Este servidor corre en Vercel y desde esa IP el buscador de
+ * NetMirror no contesta (medido el 2026-09-16: el mismo codigo, contra la misma base, resolvia
+ * Scarface → 60029681 desde una IP residencial y desde Vercel dejaba la tabla vacia). O sea que
+ * la fila de una ficha nueva NO existe cuando el TV llega aqui, y con `update` lo que subia se
+ * perdia sin error. El TV resuelve el `netflix_id` por su cuenta (ver
+ * `NetmirrorSesion.resolverNetflixId` en la app) y lo trae; con el se crea la fila. Por lo mismo
+ * se acepta `audios` vacio cuando viene `netflix_id`: ya solo el id vale para armar el master.
  */
 router.post('/api/v1/panel/nm-idiomas', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { tmdb_id, netflix_id, audios, temporada, episodio } = req.body || {};
+    const { tmdb_id, netflix_id, ott, audios, temporada, episodio } = req.body || {};
     if (!Number.isInteger(tmdb_id) || tmdb_id <= 0) {
       return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'Se requiere `tmdb_id` entero positivo.');
     }
-    if (!Array.isArray(audios) || audios.length === 0) {
-      return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'Se requiere `audios` no vacio.');
+    const netflixId = typeof netflix_id === 'string' && /^[A-Za-z0-9_-]{5,}$/.test(netflix_id.trim()) ? netflix_id.trim() : null;
+    const plataforma = normalizarNetmirrorOtt(ott);
+    const normalizados = Array.isArray(audios)
+      ? traducirYNormalizar(
+          audios.map((a: any) => ({
+            language: String(a?.language || a?.lang || ''),
+            name: String(a?.name || a?.name_es || ''),
+            uri: String(a?.uri || ''),
+          })).filter((a: any) => a.uri),
+          netflixId || '',
+        )
+      : [];
+    if (normalizados.length === 0 && !netflixId) {
+      return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'Se requiere `netflix_id` o `audios` con URI valida.');
     }
-    const normalizados = traducirYNormalizar(
-      audios.map((a: any) => ({
-        language: String(a?.language || a?.lang || ''),
-        name: String(a?.name || a?.name_es || ''),
-        uri: String(a?.uri || ''),
-      })).filter((a: any) => a.uri),
-    );
-    if (normalizados.length === 0) {
-      return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'Ningun audio con URI valida.');
-    }
-    let dominio_hls: string | null = null;
-    try { dominio_hls = new URL(normalizados[0].uri).hostname; } catch { /* ignore */ }
     const s = Number.isInteger(temporada) ? temporada : 0;
     const e = Number.isInteger(episodio) ? episodio : 0;
     const sb = getSupabaseAdmin();
-    const patch: Record<string, unknown> = {
-      idiomas_audio: normalizados,
+    const ahora = new Date().toISOString();
+    const { data: previa } = await sb.from('netmirror_cache')
+      .select('netflix_id,idiomas_audio,dominio_hls')
+      .eq('tmdb_id', tmdb_id).eq('temporada', s).eq('episodio', e)
+      .maybeSingle();
+    const previo = decodificarIdNetmirror((previa as any)?.netflix_id);
+    const idCrudoFinal = netflixId || previo.id || null;
+    const ottFinal = netflixId ? plataforma : previo.ott;
+    if (!idCrudoFinal) {
+      return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'Ficha sin `netflix_id` conocido: hay que enviarlo.');
+    }
+    const idFinal = codificarIdNetmirror(ottFinal, idCrudoFinal);
+    // Sin audios nuevos se conservan los que hubiera: subir solo el id no puede borrar pistas.
+    const idiomas = normalizados.length > 0 ? normalizados : ((previa as any)?.idiomas_audio ?? null);
+    let dominio_hls: string | null = (previa as any)?.dominio_hls ?? null;
+    if (normalizados.length > 0) {
+      try { dominio_hls = new URL(normalizados[0].uri).hostname; } catch { /* se conserva el anterior */ }
+    }
+    const { error } = await sb.from('netmirror_cache').upsert({
+      tmdb_id,
+      temporada: s,
+      episodio: e,
+      disponible: true,
+      netflix_id: idFinal,
+      idiomas_audio: idiomas,
       dominio_hls,
-      comprobado_at: new Date().toISOString(),
-    };
-    if (netflix_id && typeof netflix_id === 'string') patch.netflix_id = netflix_id;
-    const { error } = await sb.from('netmirror_cache').update(patch)
-      .eq('tmdb_id', tmdb_id).eq('temporada', s).eq('episodio', e);
+      comprobado_at: ahora,
+    }, { onConflict: 'tmdb_id,temporada,episodio' });
     if (error) return sendErrorResponse(res, 500, 'STORE_FAILED', error.message);
-    res.json({ status: 'success', message: 'Idiomas guardados.', audios: normalizados.length });
+    res.json({ status: 'success', message: 'Idiomas guardados.', netflix_id: idCrudoFinal, ott: ottFinal, audios: normalizados.length });
   } catch (err) { next(err); }
 });
 

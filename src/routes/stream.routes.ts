@@ -853,7 +853,10 @@ router.get([DIRECT_BASE, `${DIRECT_BASE}/v.mp4`, `${DIRECT_BASE}/v.m3u8`], async
      * Va antes del presupuesto a propósito: si el vídeo sale por fuera, no hay presupuesto que
      * gastar.
      */
-    if (!sinDelegar && mode === 'proxy' && externalProxyEnabled()) {
+    // VideoAPI/vimeos rechaza ahora todo segmento servido por Cloudflare Workers. Su política
+    // `tokenDeUnSoloCliente` obliga a mantener este proxy en Vercel, donde `/seg` puede reacuñar
+    // la firma dentro de la misma invocación si cambia la IP serverless.
+    if (!sinDelegar && mode === 'proxy' && externalProxyEnabled() && !policyFor(embedUrl).tokenDeUnSoloCliente) {
       /**
        * SI YA SABEMOS CUÁL ES EL FICHERO, SE LE MANDA EL FICHERO — no el embed.
        *

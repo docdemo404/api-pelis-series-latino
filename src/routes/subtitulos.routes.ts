@@ -1,6 +1,6 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { getSupabaseAdmin } from '../services/supabaseService';
-import { pelicula as netmirrorPelicula, episodio as netmirrorEpisodio, CaptionNetmirror } from '../scrapers/netmirror';
+import { CaptionNetmirror } from '../scrapers/netmirror';
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -58,8 +58,11 @@ const CACHE_DE_LA_LISTA = 'public, max-age=0, s-maxage=30, stale-while-revalidat
 
 /**
  * Trae las pistas que ofrece NetMirror para esta ficha/episodio, si tiene tmdb_id.
- * El catalogo guarda tmdb_id en `media_items`; consultamos la API por el id y devolvemos las
- * captions ya con la URL que sirve nuestro endpoint (`nm-<lang>.vtt`, que hace proxy y convierte).
+ *
+ * No se hace una sonda previa con `netmirrorPelicula`: esa función filtra a español y se usaba
+ * como puerta para pedir después TODOS los idiomas. Una película con nueve subtítulos pero ninguno
+ * español quedaba, por tanto, con cero. Además eran dos llamadas idénticas al upstream. Se consulta
+ * una vez y manda la lista completa.
  */
 async function pistasDeNetmirror(mediaId: string, epQuery: string): Promise<CaptionNetmirror[]> {
   try {
@@ -70,15 +73,13 @@ async function pistasDeNetmirror(mediaId: string, epQuery: string): Promise<Capt
     if (!data?.tmdb_id) return [];
     const tmdb = Number(data.tmdb_id);
     if (data.type === 'movie') {
-      const r = await netmirrorPelicula(tmdb);
-      return r?.subtitulosEs ? await todosLosCaptionsNetmirror(tmdb, 0, 0) : [];
+      return todosLosCaptionsNetmirror(tmdb, 0, 0);
     }
     // Serie: episodio N-M viene en `epQuery` como 'N-M' o '1-3' segun formato.
     const m = /^(\d+)[-x](\d+)$/.exec(epQuery);
     if (!m) return [];
     const s = Number(m[1]), e = Number(m[2]);
-    const r = await netmirrorEpisodio(tmdb, s, e);
-    return r?.subtitulosEs ? await todosLosCaptionsNetmirror(tmdb, s, e) : [];
+    return todosLosCaptionsNetmirror(tmdb, s, e);
   } catch { return []; }
 }
 
@@ -116,6 +117,7 @@ router.get('/api/v1/subtitles/:id', async (req: Request, res: Response, next: Ne
     const consulta = episodio ? `?episodio=${encodeURIComponent(episodio)}` : '';
     res.setHeader('Cache-Control', CACHE_DE_LA_LISTA);
     const propias = (data || []).map(fila => ({
+      id: `${fila.origen || 'propio'}-${fila.idioma}`,
       idioma: fila.idioma,
       etiqueta: fila.etiqueta,
       /*
@@ -133,11 +135,14 @@ router.get('/api/v1/subtitles/:id', async (req: Request, res: Response, next: Ne
     // que el reproductor las vea junto a las de nuestra BD. Sin esto, la pista de audio ingles del
     // mp4 salia sola, sin ninguna traduccion.
     const captions = await pistasDeNetmirror(req.params.id, episodio);
-    const netmirror = captions.map(c => ({
+    const netmirror = captions.map((c, indice) => ({
+      // El idioma no identifica una pista: puede haber English, English SDH y Forced con el
+      // mismo `lang`. El índice conserva las tres tanto en la URL como en la caché del Android.
+      id: `netmirror-${indice}-${c.lang}`,
       idioma: c.lang,
       etiqueta: c.name || c.lang,
       origen: 'netmirror',
-      url: `/api/v1/subtitles/${encodeURIComponent(req.params.id)}/nm-${encodeURIComponent(c.lang)}.vtt${consulta}`,
+      url: `/api/v1/subtitles/${encodeURIComponent(req.params.id)}/nm-${indice}-${encodeURIComponent(c.lang)}.vtt${consulta}`,
     }));
 
     // `{ status, data }` como el resto de la API: un cliente no tiene por qué aprenderse dos
@@ -166,9 +171,15 @@ router.get(
       // Pistas de NetMirror: se identifican con prefijo `nm-` y se sirven via proxy al CDN.
       // Convertimos SRT -> VTT porque el reproductor solo entiende VTT nativamente.
       if (req.params.idioma.startsWith('nm-')) {
-        const lang = req.params.idioma.slice(3);
+        const clave = req.params.idioma.slice(3);
         const captions = await pistasDeNetmirror(req.params.id, episodioDe(req));
-        const c = captions.find(x => x.lang === lang);
+        // Forma nueva: índice + idioma, para no perder dos pistas del mismo idioma. Se conserva
+        // `nm-<lang>` como compatibilidad con APKs anteriores y URLs ya cacheadas.
+        const porIndice = /^(\d+)-(.+)$/.exec(clave);
+        const indice = porIndice ? Number(porIndice[1]) : -1;
+        const lang = porIndice?.[2] || clave;
+        const candidata = indice >= 0 ? captions[indice] : undefined;
+        const c = candidata?.lang === lang ? candidata : captions.find(x => x.lang === lang);
         if (!c) return res.status(404).json({ error: 'NetMirror ya no ofrece este idioma' });
         const upstream = await fetch(c.url, { headers: { Referer: 'https://videodownloader.site/', 'User-Agent': 'Mozilla/5.0' } });
         if (!upstream.ok) return res.status(502).json({ error: `subtitulo netmirror ${upstream.status}` });

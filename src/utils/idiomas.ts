@@ -3,8 +3,8 @@
  *
  * NetMirror devuelve nombres en inglés ("Spanish", "French", "English") y el reproductor mostraba
  * eso literalmente. Regla del usuario: SIEMPRE en español, y cuando hay varias pistas `spa`, la
- * primera pasa a "Español (Latino)" y la segunda a "Español (Castellano)" (medido: el orden del
- * master respeta esa convención). Con una sola pista `spa`, se etiqueta a secas "Español".
+ * primera suele ser Latino y la segunda Castellano. NewTV no publica la región en el master y
+ * algunos títulos vienen al revés; esos casos comprobados se corrigen por `netflix_id`.
  *
  * Este módulo tiene un espejo en el cliente Android (`core/model/Idiomas.kt`) para que las
  * pistas que vienen "desnudas" del propio HLS (sin pasar por el backend) también se traduzcan.
@@ -126,32 +126,58 @@ interface EntradaBruta {
 /**
  * Convierte la lista cruda de #EXT-X-MEDIA TYPE=AUDIO a pistas normalizadas.
  *
- * Regla del usuario para `spa`:
- *   - 1 pista `spa`  → "Español" a secas.
- *   - ≥2 pistas `spa` → la 1ª "Español (Latino)", la 2ª "Español (Castellano)", el resto "(N)".
+ * Regla observada en NewTV para `spa`: la primera pista española es Latino; cuando existe una
+ * segunda, es Castellano. Una única pista `spa` también se rotula explícitamente como Latino:
+ * además de ser más claro para el cliente, permite aplicar el requisito de catálogo sin inferirlo
+ * a partir de una etiqueta ambigua como "Español".
  *
  * La primera pista `spa` (o `eng` si no hay español) queda marcada `default: true`.
  */
-export function traducirYNormalizar(brutas: EntradaBruta[]): PistaAudio[] {
+const CASTELLANO_PRIMERO = new Set([
+  '70047102', // Shrek Tercero: pista 24 castellano, pista 25 latino.
+]);
+
+/** Corrige metadata histórica ya guardada cuando NewTV publica ambos dialectos sólo como `spa`. */
+export function corregirDialectosNetmirror<T extends { lang?: string; name_es?: string; default?: boolean }>(
+  pistas: T[],
+  netflixId: string,
+): T[] {
+  if (!CASTELLANO_PRIMERO.has(String(netflixId))) return pistas;
+  const totalSpa = pistas.filter(p => normalizarISO(String(p.lang || '')) === 'spa').length;
+  if (totalSpa < 2) return pistas;
+  let indiceSpa = 0;
+  return pistas.map(p => {
+    if (normalizarISO(String(p.lang || '')) !== 'spa') return p;
+    const indice = indiceSpa++;
+    return {
+      ...p,
+      name_es: indice === 0 ? 'Español (Castellano)'
+        : indice === 1 ? 'Español (Latino)'
+        : 'Español',
+      default: indice === 1,
+    };
+  });
+}
+
+export function traducirYNormalizar(brutas: EntradaBruta[], netflixId = ''): PistaAudio[] {
   const iso = brutas.map(b => {
     const normalizado = normalizarISO(b.language);
     return normalizado === 'und' ? idiomaDesdeNombre(b.name || '') : normalizado;
   });
   const cuentaSpa = iso.filter(x => x === 'spa').length;
+  const castellanoPrimero = cuentaSpa >= 2 && CASTELLANO_PRIMERO.has(String(netflixId));
   let indiceSpa = 0;
 
   const pistas: PistaAudio[] = brutas.map((b, i) => {
     const lang = iso[i];
     let name_es: string;
     if (lang === 'spa') {
-      if (cuentaSpa === 1) {
-        name_es = 'Español';
-      } else if (indiceSpa === 0) {
-        name_es = 'Español (Latino)';
+      if (indiceSpa === 0) {
+        name_es = castellanoPrimero ? 'Español (Castellano)' : 'Español (Latino)';
       } else if (indiceSpa === 1) {
-        name_es = 'Español (Castellano)';
+        name_es = castellanoPrimero ? 'Español (Latino)' : 'Español (Castellano)';
       } else {
-        name_es = `Español (${indiceSpa + 1})`;
+        name_es = 'Español';
       }
       indiceSpa++;
     } else {
@@ -160,11 +186,25 @@ export function traducirYNormalizar(brutas: EntradaBruta[]): PistaAudio[] {
     return { lang, name_es, uri: b.uri, default: false };
   });
 
-  // Elegir default: primera spa, si no primera eng, si no la primera del master.
+  // Elegir default: Latino comprobado, si no primera spa, luego inglés o primera del master.
+  const iLatino = pistas.findIndex(p => p.name_es === 'Español (Latino)');
   const iSpa = pistas.findIndex(p => p.lang === 'spa');
   const iEng = pistas.findIndex(p => p.lang === 'eng');
-  const iDefault = iSpa >= 0 ? iSpa : iEng >= 0 ? iEng : 0;
+  const iDefault = iLatino >= 0 ? iLatino : iSpa >= 0 ? iSpa : iEng >= 0 ? iEng : 0;
   if (pistas[iDefault]) pistas[iDefault].default = true;
 
-  return pistas;
+  return corregirDialectosNetmirror(pistas, netflixId);
+}
+
+/**
+ * Regla única de publicación para NetMirror. Se exige la etiqueta normalizada, no sólo `spa`,
+ * porque una fila histórica llamada "Español" no demuestra qué variante contiene y debe volver
+ * a escanearse antes de anunciarse como latino.
+ */
+export function tieneEspanolLatino(
+  pistas: Array<{ lang?: string; name_es?: string }> | null | undefined,
+): boolean {
+  return Array.isArray(pistas) && pistas.some((p) =>
+    p?.lang === 'spa' && /espa(?:ñ|n)ol\s*\(latino\)/i.test(String(p?.name_es || '')),
+  );
 }

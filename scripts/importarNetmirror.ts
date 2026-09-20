@@ -64,7 +64,18 @@
  */
 import 'dotenv/config';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
-import { consultarPelicula, servidorDePelicula, ConsultaNetmirror, FuenteNetmirror } from '../src/scrapers/netmirror';
+import {
+  consultarPelicula,
+  servidorDePelicula,
+  servidorVirtualDePelicula,
+  buscarNetmirrorId,
+  masterHls,
+  codificarIdNetmirror,
+  NetmirrorOtt,
+  ConsultaNetmirror,
+  FuenteNetmirror,
+} from '../src/scrapers/netmirror';
+import { tieneEspanolLatino, traducirYNormalizar } from '../src/utils/idiomas';
 import { puedeAbrirse, Arranque } from '../src/services/arranqueMp4';
 import { TmdbService, TMDB_API_KEY } from '../src/services/tmdbService';
 import { CatalogService } from '../src/services/catalogService';
@@ -98,8 +109,8 @@ const PAGINAS = Math.min(bandera('paginas', 500) || 500, 500);
  * fichas fuera sin que nadie se entere.
  */
 const A_LA_VEZ = bandera('a-la-vez', 3);
-const REGIONES = texto('regiones', 'IN,MX,ES,US').split(',').map((r) => r.trim().toUpperCase()).filter(Boolean);
-const PROVEEDOR = texto('proveedor', 'prime').toLowerCase();
+const REGIONES = texto('regiones', 'IN,MX,AR,CL,CO,PE,BR,ES,US,CA,GB,AU,DE,FR,IT').split(',').map((r) => r.trim().toUpperCase()).filter(Boolean);
+const PROVEEDOR = texto('proveedor', 'todos').toLowerCase();
 const TMDB = texto('tmdb', '').split(',').map(Number).filter((n) => n > 0);
 /**
  * Por dónde se le pregunta a NetMirror. `directo` va a su API; `api` pasa por la nuestra en
@@ -125,9 +136,15 @@ const NO_VALE_DIAS = 14;
  * Los ids de proveedor de TMDB. Prime Video tiene DOS: el 9 es el de Estados Unidos y el 119 el
  * del resto del mundo (India, México, España…). Pedir el 9 en India devuelve cero, medido.
  */
-const PROVEEDORES: Record<string, (region: string) => number> = {
-  prime: (region) => (region === 'US' ? 9 : 119),
-  netflix: () => 8,
+const PROVEEDORES: Record<string, { ott: NetmirrorOtt; ids: (region: string) => number[] }> = {
+  netflix: { ott: 'nf', ids: () => [8] },
+  nf: { ott: 'nf', ids: () => [8] },
+  prime: { ott: 'pv', ids: (region) => region === 'US' ? [9, 119] : [119, 9] },
+  pv: { ott: 'pv', ids: (region) => region === 'US' ? [9, 119] : [119, 9] },
+  // NewTV agrupa Hotstar y Disney+ bajo `hs`; se unen ambos proveedores de TMDB.
+  hotstar: { ott: 'hs', ids: () => [122, 337] },
+  disney: { ott: 'hs', ids: () => [337, 122] },
+  hs: { ott: 'hs', ids: () => [122, 337] },
 };
 
 const fin = MINUTOS === SIN_TOPE ? SIN_TOPE : Date.now() + MINUTOS * 60_000;
@@ -140,6 +157,7 @@ const cuenta = {
   noLoTiene: 0,
   sinRespuesta: 0,
   noArranca: 0,
+  sinLatino: 0,
   otraObra: 0,
   sinTmdb: 0,
   errores: 0,
@@ -148,7 +166,9 @@ const cuenta = {
 interface Candidata {
   tmdbId: number;
   titulo: string;
+  tituloOriginal?: string;
   anio: string;
+  otts: NetmirrorOtt[];
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -174,13 +194,34 @@ async function tmdb(ruta: string, params: Record<string, string | number>): Prom
 }
 
 async function descubrir(): Promise<Map<number, Candidata>> {
-  const proveedor = PROVEEDORES[PROVEEDOR];
-  if (!proveedor) throw new Error(`proveedor desconocido: ${PROVEEDOR} (vale: ${Object.keys(PROVEEDORES).join(', ')})`);
+  // Una reparación puntual no debe enumerar ocho mil títulos para terminar usando dos. TMDB
+  // explícitos se resuelven directamente y conservan exactamente el mismo camino de validación.
+  if (TMDB.length) {
+    const lista = new Map<number, Candidata>();
+    const detalles = await Promise.all(TMDB.map((id) => tmdb(`movie/${id}`, { language: 'es-MX' })));
+    detalles.forEach((m, i) => {
+      const id = TMDB[i];
+      if (!m?.title) return;
+      lista.set(id, {
+        tmdbId: id,
+        titulo: String(m.title),
+        tituloOriginal: String(m.original_title || ''),
+        anio: String(m.release_date || '').slice(0, 4),
+        otts: ['nf', 'pv', 'hs'],
+      });
+    });
+    return lista;
+  }
+
+  const proveedores = PROVEEDOR === 'todos' || PROVEEDOR === 'all'
+    ? [PROVEEDORES.netflix, PROVEEDORES.prime, PROVEEDORES.hotstar]
+    : [PROVEEDORES[PROVEEDOR]].filter(Boolean);
+  if (!proveedores.length) throw new Error(`proveedor desconocido: ${PROVEEDOR} (vale: todos, ${Object.keys(PROVEEDORES).join(', ')})`);
 
   const lista = new Map<number, Candidata>();
-  for (const region of REGIONES) {
+  for (const proveedor of proveedores) for (const region of REGIONES) for (const providerId of proveedor.ids(region)) {
     const primera = await tmdb('discover/movie', {
-      with_watch_providers: proveedor(region),
+      with_watch_providers: providerId,
       watch_region: region,
       sort_by: 'popularity.desc',
       page: 1,
@@ -193,8 +234,19 @@ async function descubrir(): Promise<Map<number, Candidata>> {
     const anotar = (j: any) => {
       for (const m of j?.results || []) {
         const id = Number(m?.id);
-        if (!(id > 0) || lista.has(id)) continue;
-        lista.set(id, { tmdbId: id, titulo: String(m.title || ''), anio: String(m.release_date || '').slice(0, 4) });
+        if (!(id > 0)) continue;
+        const existente = lista.get(id);
+        if (existente) {
+          if (!existente.otts.includes(proveedor.ott)) existente.otts.push(proveedor.ott);
+        } else {
+          lista.set(id, {
+            tmdbId: id,
+            titulo: String(m.title || ''),
+            tituloOriginal: String(m.original_title || ''),
+            anio: String(m.release_date || '').slice(0, 4),
+            otts: [proveedor.ott],
+          });
+        }
       }
     };
     anotar(primera);
@@ -203,11 +255,11 @@ async function descubrir(): Promise<Map<number, Candidata>> {
     for (let p = 2; p <= paginas; p += 4) {
       const tanda = [];
       for (let k = p; k < p + 4 && k <= paginas; k++) {
-        tanda.push(tmdb('discover/movie', { with_watch_providers: proveedor(region), watch_region: region, sort_by: 'popularity.desc', page: k }));
+        tanda.push(tmdb('discover/movie', { with_watch_providers: providerId, watch_region: region, sort_by: 'popularity.desc', page: k }));
       }
       for (const j of await Promise.all(tanda)) anotar(j);
     }
-    console.log(`   ${region}: ${primera.total_results} títulos en ${paginas} páginas → ${lista.size} distintos acumulados`);
+    console.log(`   ${proveedor.ott}/${region}/${providerId}: ${primera.total_results} títulos en ${paginas} páginas → ${lista.size} distintos acumulados`);
   }
   return lista;
 }
@@ -269,7 +321,7 @@ async function descartadosRecientes(): Promise<Set<number>> {
   for (let off = 0; ; off += 1000) {
     const { data, error } = await db
       .from('netmirror_cache')
-      .select('tmdb_id')
+      .select('tmdb_id,dominio_hls')
       .eq('temporada', 0)
       .eq('episodio', 0)
       .eq('disponible', false)
@@ -277,7 +329,14 @@ async function descartadosRecientes(): Promise<Set<number>> {
       .order('tmdb_id')
       .range(off, off + 999);
     if (error) throw new Error(error.message);
-    for (const f of (data || []) as any[]) no.add(Number(f.tmdb_id));
+    const plataformas = PROVEEDOR === 'todos' || PROVEEDOR === 'all'
+      ? 'audit:nf,pv,hs'
+      : `audit:${PROVEEDORES[PROVEEDOR]?.ott || ''}`;
+    for (const f of (data || []) as any[]) {
+      // Los negativos históricos sólo probaron Netflix o el MP4 antiguo. Se reevalúan una vez
+      // contra las tres plataformas; después el sello evita repetir los mismos descartes.
+      if (String(f.dominio_hls || '') === plataformas) no.add(Number(f.tmdb_id));
+    }
     if (!data || data.length < 1000) break;
   }
   console.log(`   descartadas hace menos de ${NO_VALE_DIAS} días: ${no.size}`);
@@ -319,7 +378,21 @@ async function anotarCache(tmdbId: number, disponible: boolean, resolucion: numb
   if (DRY) return;
   try {
     await db.from('netmirror_cache').upsert(
-      { tmdb_id: tmdbId, temporada: 0, episodio: 0, disponible, resolucion, comprobado_at: new Date().toISOString() },
+      {
+        tmdb_id: tmdbId,
+        temporada: 0,
+        episodio: 0,
+        disponible,
+        resolucion,
+        ...(disponible ? {} : {
+          netflix_id: null,
+          idiomas_audio: null,
+          dominio_hls: `audit:${(PROVEEDOR === 'todos' || PROVEEDOR === 'all')
+            ? 'nf,pv,hs'
+            : (PROVEEDORES[PROVEEDOR]?.ott || '')}`,
+        }),
+        comprobado_at: new Date().toISOString(),
+      },
       { onConflict: 'tmdb_id,temporada,episodio' }
     );
   } catch {
@@ -336,39 +409,60 @@ async function anotarCache(tmdbId: number, disponible: boolean, resolucion: numb
  * para verlo, no se guarda.
  */
 async function resolverYVerificar(c: Candidata): Promise<ServerOption | null> {
-  const consulta = await consultar(c.tmdbId, true);
-  if (consulta.estado === 'sin-respuesta') {
-    cuenta.sinRespuesta++;
-    if (++sinRespuestaSeguidos >= SIN_RESPUESTA_PARA_PARAR && !parar) {
-      parar = true;
-      console.log(`   ✗ NetMirror lleva ${sinRespuestaSeguidos} consultas sin contestar (${consulta.detalle}); se para aquí.`);
+  // Una película sólo entra si el master de alguna plataforma demuestra multipista y Latino.
+  // Se prueba siempre en el orden de producto: Netflix, Prime Video y Hotstar/Disney+.
+  const orden: NetmirrorOtt[] = ['nf', 'pv', 'hs'];
+  const plataformas = PROVEEDOR === 'todos' || PROVEEDOR === 'all'
+    ? orden
+    : orden.filter(x => c.otts.includes(x));
+  let encontroId = false;
+  let encontroMaster = false;
+  for (const ott of plataformas) {
+    const id = await buscarNetmirrorId(c.titulo, c.anio, c.tituloOriginal, c.titulo, ott).catch(() => null);
+    if (!id) continue;
+    encontroId = true;
+    const master = await masterHls(id, '', ott).catch(() => null);
+    if (!master || master.audios.length < 2) continue;
+    encontroMaster = true;
+    const idiomas = traducirYNormalizar(
+      master.audios.map(a => ({ language: a.language, name: a.name, uri: a.uri })),
+      id,
+    );
+    if (!tieneEspanolLatino(idiomas)) continue;
+    const dominio = new URL(master.masterUrl).hostname;
+    if (!DRY) {
+      await db.from('netmirror_cache').upsert({
+        tmdb_id: c.tmdbId,
+        temporada: 0,
+        episodio: 0,
+        disponible: true,
+        resolucion: 1080,
+        netflix_id: codificarIdNetmirror(ott, id),
+        idiomas_audio: idiomas,
+        dominio_hls: dominio,
+        comprobado_at: new Date().toISOString(),
+      }, { onConflict: 'tmdb_id,temporada,episodio' });
     }
-    return null;
+    return {
+      ...servidorVirtualDePelicula(c.tmdbId, '1080'),
+      language: 'latino',
+      netmirror_hls: {
+        netflix_id: id,
+        ott,
+        dominio_hls: dominio,
+        master_url: master.masterUrl,
+        idiomas,
+      },
+    };
   }
-  sinRespuestaSeguidos = 0;
-  if (consulta.estado === 'no') {
-    cuenta.noLoTiene++;
-    await anotarCache(c.tmdbId, false, null);
-    return null;
-  }
-  const fuente = consulta.fuente;
-  const anioNm = Number(fuente.meta.year) || 0;
-  const anioTmdb = Number(c.anio) || 0;
-  if (anioNm && anioTmdb && Math.abs(anioNm - anioTmdb) > 1) {
-    console.log(`   ? ${c.tmdbId} «${c.titulo}» (${anioTmdb}): NetMirror dice «${fuente.meta.title}» (${anioNm}) — no se guarda`);
-    cuenta.otraObra++;
-    return null;
-  }
-  const arranque = consulta.arranque ?? (await puedeAbrirse(fuente.mp4, { Referer: fuente.referer }));
-  if (!arranque.ok) {
-    // Un tope agotado no condena (ver `arranqueMp4.ts`), pero tampoco se escribe: el importador
-    // vuelve a pasar por aquí en la siguiente vuelta y lo que hoy fue lento entra mañana.
-    cuenta.noArranca++;
-    if (!arranque.sinVeredicto) console.log(`   ✗ ${c.tmdbId} «${c.titulo}»: ${arranque.causa} (${arranque.detalle})`);
-    return null;
-  }
-  await anotarCache(c.tmdbId, true, Number(fuente.meta.resolution) || null);
-  return servidorDePelicula(c.tmdbId, fuente);
+  if (!encontroId) cuenta.noLoTiene++;
+  else if (!encontroMaster) cuenta.noArranca++;
+  else cuenta.sinLatino++;
+  // Los tres backends se comprobaron después de pasar sus testigos. El negativo se recuerda sólo
+  // 14 días: contenido nuevo o pistas añadidas por NetMirror entran automáticamente en la vuelta
+  // siguiente a su caducidad, sin condenar el título para siempre.
+  await anotarCache(c.tmdbId, false, null);
+  return null;
 }
 
 /**
@@ -538,18 +632,21 @@ async function main() {
       `limite=${rotulo(LIMITE)} minutos=${rotulo(MINUTOS)} a-la-vez=${A_LA_VEZ}${DRY ? ' (DRY)' : ''}`
   );
 
-  // Primero, ¿NetMirror nos contesta desde aquí? Si no, no hay nada que importar y sí mucho
-  // que estropear. Ver la cabecera.
-  const testigo = await consultar(PELICULA_TESTIGO);
-  if (testigo.estado !== 'tiene') {
-    console.error(
-      `NetMirror no contesta «tiene» para la película testigo ${PELICULA_TESTIGO} por la vía «${VIA}»: ` +
-        (testigo.estado === 'no' ? 'dice que no la tiene' : testigo.detalle) +
-        '. No se importa nada. Prueba con --via=api.'
-    );
-    process.exit(1);
+  const plataformas: NetmirrorOtt[] = PROVEEDOR === 'todos' || PROVEEDOR === 'all'
+    ? ['nf', 'pv', 'hs']
+    : [PROVEEDORES[PROVEEDOR]?.ott].filter(Boolean) as NetmirrorOtt[];
+  const testigos: Record<NetmirrorOtt, string> = {
+    nf: '81749852',                       // Intercambiados
+    pv: '0S3P89X75C2DXJ392UIWKUVXDZ',    // Shrek
+    hs: '1260017500',                     // Moana
+  };
+  for (const ott of plataformas) {
+    const testigo = await masterHls(testigos[ott], '', ott);
+    if (!testigo || testigo.audios.length < 2) {
+      throw new Error(`NewTV ${ott} no entrega el master testigo multipista`);
+    }
+    console.log(`NewTV ${ott} contesta (testigo: ${testigo.audios.length} audios)`);
   }
-  console.log(`NetMirror contesta por la vía «${VIA}» (testigo ${PELICULA_TESTIGO}: ${testigo.fuente.meta.title} ${testigo.fuente.meta.year})`);
 
   const lista = await descubrir();
   console.log(`lista: ${lista.size} películas de TMDB con ${PROVEEDOR}`);
@@ -598,7 +695,7 @@ async function main() {
 
   console.log(
     `\n${cuenta.fichasNuevas} fichas nuevas · ${cuenta.fichasEnriquecidas} enriquecidas · ${cuenta.reselladas} reselladas · ` +
-      `${cuenta.noLoTiene} no las tiene · ${cuenta.sinRespuesta} sin respuesta · ${cuenta.noArranca} no arrancan · ${cuenta.otraObra} otra obra · ` +
+      `${cuenta.noLoTiene} no las tiene · ${cuenta.sinLatino} sin Español Latino · ${cuenta.sinRespuesta} sin respuesta · ${cuenta.noArranca} no arrancan · ${cuenta.otraObra} otra obra · ` +
       `${cuenta.sinTmdb} sin ficha TMDB · ${cuenta.errores} errores`
   );
   console.log(`Quedan ~${Math.max(0, cola.length - tanda.length)} en cola para la próxima vuelta.`);

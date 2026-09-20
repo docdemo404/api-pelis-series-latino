@@ -4,6 +4,7 @@ import { bestMode } from '../scrapers/hostPolicy';
 import { directEndpointUrl, isPubliclyShareable, esFicheroDirecto, ficheroPermanenteDentroDelEmbed } from '../scrapers/directStream';
 import { cacheUrlFor, ficheroDentroDeNuestraCache } from '../utils/externalProxy';
 import { medidaDeAparatos } from './medidasDeAparatos';
+import { corregirDialectosNetmirror } from '../utils/idiomas';
 
 /**
  * ¿Esta URL se puede entregar TAL CUAL, sin pasar por esta API?
@@ -532,9 +533,9 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
    */
   const directScore = (s: ServerOption): number => {
     if (!s.direct_stream) return 0;
-    // NetMirror es la fuente prioritaria cuando está viva: además del vídeo aporta el master
-    // HLS multi-audio. Sin este desempate el criterio genérico de coste dejaba primero un MP4/HLS
-    // mono-audio de menor prioridad y NetMirror quedaba como respaldo.
+    // NetMirror va primero por decisión de producto: es la fuente que combina mayor calidad con
+    // master HLS multi-audio y subtítulos. Su URL estable acuña el 302 al pulsar Play, así que no
+    // se sacrifica vigencia por priorizarla. Si falla, el cliente conserva el failover completo.
     if (getSourceId(s) === 'netmirror') return 5;
     // `public` es el más rápido que hay y estaba puntuando como `proxy`: su URL no caduca ni va
     // atada a una IP, así que se entrega tal cual y el reproductor habla DIRECTAMENTE con el CDN —
@@ -809,6 +810,14 @@ export function paraElCliente<T extends ServerOption>(servers: T[] | undefined |
       if (medido) {
         (resto as Record<string, unknown>).kbps_dispositivos = medido.kbps;
         (resto as Record<string, unknown>).muestras_dispositivos = medido.muestras;
+      }
+
+      const hls = resto.netmirror_hls;
+      if (hls?.netflix_id && Array.isArray(hls.idiomas)) {
+        resto.netmirror_hls = {
+          ...hls,
+          idiomas: corregirDialectosNetmirror(hls.idiomas, hls.netflix_id),
+        };
       }
 
       return resto as T;

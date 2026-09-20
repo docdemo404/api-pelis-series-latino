@@ -22,6 +22,28 @@ const router = Router();
 
 const REFERER_MP4 = 'https://videodownloader.site/';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+const NEWTV_API = 'https://tv.imgcdn.kim';
+
+/**
+ * Sesion oficial de NewTV para el cliente Android.
+ *
+ * El `usertoken` no es el token efimero de una URL HLS: NewTV lo usa para emitir, desde la IP
+ * del propio televisor, el master completo y firmado de cada titulo. Mantenerlo en una variable
+ * de produccion permite renovarlo sin publicar otro APK. Nunca se cachea en navegador ni CDN.
+ */
+router.get('/api/v1/netmirror/session', (_req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store, max-age=0');
+  res.setHeader('CDN-Cache-Control', 'no-store');
+  res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+  const userToken = String(process.env.NETMIRROR_USER_TOKEN || '').trim();
+  if (!userToken) {
+    return sendErrorResponse(res, 503, 'NETMIRROR_SESSION_UNAVAILABLE', 'La sesion de NetMirror no esta configurada.');
+  }
+  return res.json({
+    status: 'success',
+    data: { api_url: NEWTV_API, ott: 'nf', user_token: userToken },
+  });
+});
 
 async function resolver(req: Request): Promise<FuenteNetmirror | null> {
   const tmdbId = Number(req.params.tmdbId);

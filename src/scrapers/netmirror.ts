@@ -206,26 +206,38 @@ export async function pelicula(tmdbId: number): Promise<FuenteNetmirror | null> 
  * guardar en la base aunque el mp4 de detrás caduque en horas.
  */
 export function servidorDePelicula(tmdbId: number, fuente: FuenteNetmirror): ServerOption {
+  return servidorVirtualDePelicula(tmdbId, fuente.meta.resolution);
+}
+
+/**
+ * Construye la URL estable de NetMirror sin consultar su API.
+ *
+ * El listado de servidores no necesita la URL MP4 firmada: `/netmirror/stream/:tmdbId` la
+ * obtiene recién cuando Media3 va a reproducir. Separar esta forma barata evita pagar la llamada
+ * a `net27.cc` al abrir cada ficha; la disponibilidad se decide con `netmirror_cache` y el endpoint
+ * conserva la resolución en vivo como último paso.
+ */
+export function servidorVirtualDePelicula(tmdbId: number, resolution?: string): ServerOption {
   const ruta = `/api/v1/netmirror/stream/${tmdbId}`;
   const calidad: ServerOption['quality'] =
-    fuente.meta.resolution === '1080' ? '1080p' :
-    fuente.meta.resolution === '720'  ? '720p'  :
-    fuente.meta.resolution === '4K'   ? '4K'    : '480p';
+    resolution === '1080' ? '1080p' :
+    resolution === '720'  ? '720p'  :
+    resolution === '4K' || resolution === '2160' ? '4K' : '480p';
   const ahora = new Date().toISOString();
   const altura =
-    fuente.meta.resolution === '2160' || fuente.meta.resolution === '4K' ? 2160 :
-    fuente.meta.resolution === '1080' ? 1080 :
-    fuente.meta.resolution === '720'  ? 720  :
-    fuente.meta.resolution === '360'  ? 360  : 480;
+    resolution === '2160' || resolution === '4K' ? 2160 :
+    resolution === '1080' ? 1080 :
+    resolution === '720'  ? 720  :
+    resolution === '360'  ? 360  : 480;
   const rutaRedirect = ruta + '?mode=redirect';
   return {
     id: `nm-${tmdbId}`,
     name: 'NetMirror',
     quality: calidad,
-    // Marcamos latino: la API devuelve audio original con subs es; nuestro proxy inyecta la pista
-    // subtitulada latina como default (ver `filtrarYordenarEsp`). El cliente lo trata como
-    // "latino disponible" a efectos de ordenación — es lo que ve el espectador.
-    language: 'latino',
+    // Este MP4 lleva la pista original (habitualmente inglés) y subtítulos en español. Solo el
+    // master HLS interno es multi-audio; anunciar el MP4 como `latino` hacía que el sorter lo
+    // eligiera como si ya trajera doblaje y el usuario terminaba oyendo inglés.
+    language: 'subtitulado',
     embed_url: rutaRedirect,
     direct_stream: rutaRedirect,
     direct_kind: 'mp4',
@@ -261,17 +273,54 @@ export async function episodio(
 }
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════
-// MULTI-AUDIO via HLS master (/hls/{netflix_id}.m3u8?in=<token>)
+// MULTI-AUDIO via HLS master (NewTV, sin cookie ni token)
 //
 // La API `/api/embed-tmdb/{tmdb}` que se usa arriba devuelve mp4 mono-audio. Multi-audio real
 // vive en el reproductor interno de NetMirror, que se sirve como HLS master con multiples pistas
-// `#EXT-X-MEDIA TYPE=AUDIO`. Requiere netflix_id (no tmdb) y token de sesion (?in=).
+// `#EXT-X-MEDIA TYPE=AUDIO`. La ruta NewTV actual solo requiere netflix_id (no tmdb); se conserva
+// el flujo antiguo con `?in=<token>` exclusivamente como respaldo.
 // ══════════════════════════════════════════════════════════════════════════════════════════════
 
 /** Origen actual del site donde vive /search.php. Rota cada mes. */
 const NM_SITE_ORIGEN = 'https://net77.cc';
 /** Origen actual del reproductor donde vive /hls. Rota cada mes. */
 const NM_PLAY_ORIGEN = 'https://net52.cc';
+
+const NEWTV_DISCOVERY = [
+  'https://mobiledetects.com',
+  'https://mobiledetect.app',
+  'https://mobiledetect.art',
+  'https://mobiledetect.cc',
+] as const;
+const NEWTV_HEADERS = {
+  'Cache-Control': 'no-cache, no-store, must-revalidate',
+  Pragma: 'no-cache',
+  'X-Requested-With': 'NetmirrorNewTV v1.0',
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) Gecko/20100101 Firefox/136.0 /OS.GatuNewTV v1.0',
+  Accept: 'application/json, text/plain, */*',
+};
+
+let newTvBaseCache: { url: string; hasta: number } | null = null;
+
+/** Resuelve el backend rotativo que publica NetMirror para sus clientes NewTV. */
+async function resolverNewTvBase(): Promise<string | null> {
+  if (newTvBaseCache && newTvBaseCache.hasta > Date.now()) return newTvBaseCache.url;
+  for (const origen of NEWTV_DISCOVERY) {
+    try {
+      const r = await fetch(`${origen}/checknewtv.php`, {
+        headers: NEWTV_HEADERS,
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (!r.ok) continue;
+      const j = await r.json() as { token_hash?: string };
+      const url = Buffer.from(String(j.token_hash || ''), 'base64').toString('utf8').trim().replace(/\/$/, '');
+      if (!/^https:\/\/[^/]+$/i.test(url)) continue;
+      newTvBaseCache = { url, hasta: Date.now() + 6 * 60 * 60 * 1000 };
+      return url;
+    } catch { /* siguiente dominio de descubrimiento */ }
+  }
+  return null;
+}
 
 export interface AudioHls {
   /** ISO 639-2 tal como venga del master (`spa`, `eng`, `und`, ...). */
@@ -298,6 +347,29 @@ export interface VideoVariante {
 export interface MasterNetmirror {
   audios: AudioHls[];
   video: VideoVariante[];
+  /** URL exacta del master comprobado; puede ser firmada y efimera. */
+  masterUrl: string;
+  referer: string;
+}
+
+/** Plataformas publicadas por el backend NewTV de NetMirror. `hs` incluye Disney+. */
+export type NetmirrorOtt = 'nf' | 'pv' | 'hs';
+
+export function normalizarNetmirrorOtt(valor: unknown): NetmirrorOtt {
+  const ott = String(valor || '').trim().toLowerCase();
+  return ott === 'pv' || ott === 'hs' ? ott : 'nf';
+}
+
+/** La columna histórica se llama `netflix_id`; el prefijo permite guardar cualquier OTT. */
+export function codificarIdNetmirror(ott: NetmirrorOtt, id: string): string {
+  return `${normalizarNetmirrorOtt(ott)}:${String(id || '').trim()}`;
+}
+
+/** Los valores antiguos sin prefijo siguen siendo Netflix. */
+export function decodificarIdNetmirror(valor: string | null | undefined): { ott: NetmirrorOtt; id: string } {
+  const crudo = String(valor || '').trim();
+  const m = /^(nf|pv|hs):(.*)$/i.exec(crudo);
+  return m ? { ott: normalizarNetmirrorOtt(m[1]), id: m[2].trim() } : { ott: 'nf', id: crudo };
 }
 
 /** Lee un atributo HLS incluso cuando la lista usa valores sin comillas. */
@@ -308,10 +380,19 @@ function atributoHls(linea: string, clave: string): string {
 }
 
 /** HLS permite URI relativas; NetMirror las usa en parte de sus pistas de audio. */
-function uriHlsAbsoluta(uri: string, masterUrl: string): string {
+function uriHlsAbsoluta(uri: string, masterUrl: string, permitirUnknown = false): string {
   try {
-    const absoluta = new URL(uri.trim(), masterUrl).toString();
-    return /^https?:\/\/[^/]+\//i.test(absoluta) && !/\bunknown\b/i.test(absoluta) ? absoluta : '';
+    const cruda = uri.trim();
+    // Placeholder de ID inexistente: `https:///files/<id>/...`. WHATWG lo interpreta como
+    // host `files`, convirtiendo una pista rota en un falso positivo aparentemente válido.
+    if (/^https?:\/{3,}/i.test(cruda)) return '';
+    const u = new URL(cruda, masterUrl);
+    const absoluta = u.toString();
+    return /^https?:$/i.test(u.protocol)
+      && u.hostname.includes('.')
+      && (permitirUnknown || !/\bunknown\b/i.test(absoluta))
+      ? absoluta
+      : '';
   } catch {
     return '';
   }
@@ -325,12 +406,14 @@ function uriHlsAbsoluta(uri: string, masterUrl: string): string {
  * titulo": exige año). Cuando NetMirror devuelve varios resultados, se queda con el primero cuyo
  * titulo normalizado coincida.
  */
-export async function buscarNetflixId(
+export async function buscarNetmirrorId(
   titulo: string,
   anio?: string | number,
   tituloOriginal?: string,
   tituloIngles?: string,
+  ott: NetmirrorOtt = 'nf',
 ): Promise<string | null> {
+  ott = normalizarNetmirrorOtt(ott);
   // NetMirror indexa SIEMPRE en INGLES. TMDB nos da:
   //   - title (traducido al idioma de la region \u2014 aqui, espa\u00f1ol)
   //   - original_title (idioma nativo: puede ser ingles, coreano '\uc624\uc9d5\uc5b4 \uac8c\uc784', ruso, arabe...)
@@ -371,6 +454,32 @@ export async function buscarNetflixId(
   if (candidatos.length === 0) return null;
 
   for (const q of candidatos) {
+    // La API NewTV es el buscador oficial del cliente actual y no depende de cookies. Se usa
+    // primero; `/search.php` del sitio queda como respaldo mientras convivan ambas versiones.
+    try {
+      const apiBase = await resolverNewTvBase();
+      if (apiBase) {
+        const r = await fetch(`${apiBase}/newtv/search.php?s=${encodeURIComponent(q)}`, {
+          headers: { ...NEWTV_HEADERS, Ott: ott },
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (r.ok) {
+          const j = await r.json() as { searchResult?: Array<{ id: string; t?: string }> };
+          const items = Array.isArray(j?.searchResult) ? j.searchResult.filter(x => x?.id && x?.t) as Array<{ id: string; t: string }> : [];
+          const buscado = norm(q);
+          const exacto = items.find(x => norm(x.t) === buscado);
+          if (exacto?.id) { void anio; return exacto.id; }
+          const contenido = items.find(x => {
+            const t = norm(x.t);
+            return t.length >= 5 && buscado.length >= 5 && (t.includes(buscado) || buscado.includes(t));
+          });
+          if (contenido?.id) { void anio; return contenido.id; }
+        }
+      }
+    } catch { /* respaldo del sitio */ }
+
+    // El buscador del sitio clásico sólo indexa Netflix; pv/hs ya se consultaron por NewTV.
+    if (ott !== 'nf') continue;
     try {
       // OJO: sin Referer, NetMirror devuelve `type:1, head:"Top Searches"` con una lista
       // canned que es igual para toda consulta y con `t:""` vacios. Medido en produccion:
@@ -404,18 +513,60 @@ export async function buscarNetflixId(
 
 /**
  * Descarga el HLS master de NetMirror y parsea audios + variantes de video.
- * Devuelve null si el master está vacío (netflix_id inexistente) o si el token no vale.
+ * NewTV es el camino primario. Con `NETMIRROR_USER_TOKEN`, player.php devuelve el master real
+ * firmado; sin esa credencial sólo entrega un manifiesto de inventario cuyo vídeo es un señuelo
+ * truncado. `token` conserva el flujo antiguo como respaldo.
  */
-export async function masterHls(netflixId: string, token: string): Promise<MasterNetmirror | null> {
-  if (!netflixId || !token) return null;
+export async function masterHls(
+  netflixId: string,
+  token = '',
+  ott: NetmirrorOtt = 'nf',
+): Promise<MasterNetmirror | null> {
+  if (!netflixId) return null;
+  ott = normalizarNetmirrorOtt(ott);
+
+  const candidatos: Array<{ masterUrl: string; referer: string }> = [];
   try {
-    const masterUrl = `${NM_PLAY_ORIGEN}/hls/${encodeURIComponent(netflixId)}.m3u8?in=${encodeURIComponent(token)}`;
-    const r = await fetch(masterUrl, {
-      headers: { 'User-Agent': UA, Referer: `${NM_PLAY_ORIGEN}/` },
+    const apiBase = await resolverNewTvBase();
+    if (apiBase) {
+      const userToken = String(process.env.NETMIRROR_USER_TOKEN || '').trim();
+      const player = await fetch(`${apiBase}/newtv/player.php?id=${encodeURIComponent(netflixId)}`, {
+        headers: {
+          ...NEWTV_HEADERS,
+          Ott: ott,
+          ...(userToken ? { Usertoken: userToken } : {}),
+        },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (player.ok) {
+        const j = await player.json() as { status?: string; video_link?: string; referer?: string };
+        // Incluso con credencial vencida (`status=otp`) NewTV entrega el master público de
+        // inventario. Sirve para auditar idiomas y catálogo; el Android exige `status=ok` y
+        // renueva por OTP antes de reproducir el master completo.
+        if (/^https?:\/\//i.test(String(j.video_link || ''))) {
+          candidatos.push({ masterUrl: String(j.video_link), referer: String(j.referer || apiBase) });
+        }
+      }
+    }
+  } catch { /* se prueba el flujo antiguo */ }
+
+  if (token && ott === 'nf') {
+    candidatos.push({
+      masterUrl: `${NM_PLAY_ORIGEN}/hls/${encodeURIComponent(netflixId)}.m3u8?in=${encodeURIComponent(token)}`,
+      referer: `${NM_PLAY_ORIGEN}/`,
     });
-    if (!r.ok) return null;
+  }
+
+  for (const candidato of candidatos) {
+    try {
+      const { masterUrl, referer } = candidato;
+    const r = await fetch(masterUrl, {
+        headers: { 'User-Agent': UA, Referer: referer, Origin: referer.replace(/\/$/, '') },
+        signal: AbortSignal.timeout(12_000),
+    });
+      if (!r.ok) continue;
     const txt = await r.text();
-    if (!txt.startsWith('#EXTM3U')) return null;
+      if (!txt.startsWith('#EXTM3U')) continue;
 
     const audios: AudioHls[] = [];
     const video: VideoVariante[] = [];
@@ -437,7 +588,13 @@ export async function masterHls(netflixId: string, token: string): Promise<Maste
         const bandwidth = Number(atributoHls(l, 'BANDWIDTH')) || 0;
         const resolution = atributoHls(l, 'RESOLUTION') || null;
         const defaultTrack = /^yes$/i.test(atributoHls(l, 'DEFAULT'));
-        const uri = uriHlsAbsoluta(lineas[i + 1] || '', r.url || masterUrl);
+        // NewTV usa literalmente `?in=unknown::lc` en variantes válidas; el filtro `unknown`
+        // solo detecta placeholders del flujo legacy.
+        const uri = uriHlsAbsoluta(
+          lineas[i + 1] || '',
+          r.url || masterUrl,
+          /\/newtv\//i.test(r.url || masterUrl),
+        );
         // Solo variantes reales; las de placeholder tienen `in=unknown` cuando el netflix_id no
         // existe (medido: `s21.freecdn4.top/files/220884/...` para ids no reconocidos).
         if (uri) {
@@ -447,7 +604,21 @@ export async function masterHls(netflixId: string, token: string): Promise<Maste
     }
 
     // Sin audios reales el master no vale (netflix_id inexistente o token muerto).
-    if (audios.length === 0) return null;
-    return { audios, video };
-  } catch { return null; }
+      // “Multipista” significa al menos dos pistas reales. Una sola `und/Unknown` es además la
+      // firma exacta del placeholder que NewTV devuelve cuando el ID no existe.
+      if (audios.length < 2) continue;
+      return { audios, video, masterUrl: r.url || masterUrl, referer };
+    } catch { /* siguiente candidato */ }
+  }
+  return null;
+}
+
+/** Alias histórico para los escáneres que recorren exclusivamente Netflix. */
+export async function buscarNetflixId(
+  titulo: string,
+  anio?: string | number,
+  tituloOriginal?: string,
+  tituloIngles?: string,
+): Promise<string | null> {
+  return buscarNetmirrorId(titulo, anio, tituloOriginal, tituloIngles, 'nf');
 }

@@ -1,0 +1,35 @@
+name: Completar multi-audio de NetMirror
+
+# El MP4 de embed-tmdb es mono-audio. Este trabajo resuelve, fuera del request de Play, el
+# netflix_id con el que la app puede abrir el master HLS que contiene todos los idiomas.
+on:
+  schedule:
+    - cron: '30 1,7,13,19 * * *'
+  workflow_dispatch:
+    inputs:
+      limite:
+        description: 'Cuantas fichas completar en esta corrida'
+        required: false
+        default: '500'
+
+concurrency:
+  group: netmirror-audios
+  cancel-in-progress: false
+
+jobs:
+  completar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Resolver IDs y pistas de audio
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+        run: npx ts-node scripts/scanNetmirror.ts --sin-audios --tipo=movie --limite=${{ inputs.limite || 500 }}
