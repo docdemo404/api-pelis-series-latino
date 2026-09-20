@@ -320,6 +320,78 @@ npm run importar:videoapi -- --dry                                 # qué entrar
 
 ---
 
+## 4 sexies. Y hay un TERCER tipo: la API ajena cuyo `tmdb_id` es una conjetura (2026-09-20)
+
+El apartado anterior parte en dos el mundo —webs que se crawlean, proveedores que direccionan por
+`tmdb_id`— y esa raya se queda corta. `lamoviebot.tvymas.workers.dev` es un Worker de un tercero
+que scrapea lamovie.org y lo sirve en JSON, con `tmdb_id`, `imdb_id`, `original_title`,
+`release_date` y póster de TMDB ya puestos. **Tiene la puerta de videoapi y el riesgo de FuegoCine**,
+y confundirlas sale caro.
+
+La diferencia está en de dónde sale el número:
+
+| | videoapi | lamoviebot |
+|---|---|---|
+| ¿Quién pone el `tmdb_id`? | **La fuente**: direcciona por él (`/e/movie/550`) | **Su matcher**, después de scrapear |
+| ¿Puede equivocarse de obra? | No: contesta por ese número o por ninguno | **Sí** |
+| ¿Aplica el §1? | No llega a aplicar | **Entero** |
+
+Y se equivoca. Medido sobre 119 películas: acierta el **97 %** y falla el **3 %**, siempre por el
+mismo sitio — el homónimo, que es exactamente el fallo del que sale casi todo lo de este documento:
+
+```
+ficha «Los Malditos (2025)»  →  dice tmdb 1059010 = «Los malditos» / I dannati (2024)
+su propio enlace apuntaba a      tmdb  850439    = «Los condenados» / The Damned (2025)
+```
+
+Los tres fallos de la muestra eran homónimos **del mismo año**, o sea el caso que el año no puede
+separar: los cazó el título original, y por eso `juzgarIdentidad` lo pone por delante del año.
+
+> **La regla, para la próxima fuente de este tipo: que una API te dé un `tmdb_id` no lo convierte
+> en un dato publicado.** Pregúntate quién lo calculó. Si lo dedujo un matcher —el suyo o el
+> nuestro—, es una CANDIDATURA y se verifica contra una señal independiente del nombre regional
+> antes de adoptar nada. Adoptarlo a ciegas habría metido ~20 fichas con el póster, la sinopsis y
+> la identidad de otra obra, y ese número es justo lo que después suelda dos filas en una (§3).
+
+**Sobre depender de la infraestructura de otro**, que es la pregunta obvia al añadir una fuente que
+vive en el Worker de un desconocido: se mide qué se le compra exactamente.
+
+* **Los enlaces NO son suyos.** Son `goodstream.one`, `hlswish.com`, `voe.sx`: hosts de terceros.
+  Una vez guardados, el Worker **sobra para reproducir** — los resuelve `extractDirect` al darle a
+  Reproducir, como con todas las demás.
+* **Su resolución ni se usa.** `/streamurl` devuelve urls con `i=172.64&asn=13335` dentro: atadas a
+  la IP del Worker. Al cliente le darían 403. Se guarda el **embed**, nunca el directo suyo.
+* **El índice sí depende de él**, y es lo único. Si cae, dejamos de enterarnos de títulos NUEVOS;
+  no se pierde ni uno de los importados. Por eso `importarLamoviebot.ts` **vuelca el índice a
+  disco** (`data/lamoviebot_indice.json`) antes de trabajarlo: si el Worker muere a mitad, la
+  corrida siguiente termina contra el volcado.
+
+Y no, «copiar el Worker» no era la alternativa: medido el 2026-09-20, lamovie.org no se deja leer
+directamente — sitemaps a 500, `/peliculas/` pinta el catálogo con JavaScript y no trae un solo
+enlace de ficha, y sus urls de ficha dan 404 desde nuestra IP. **Importar es lo que independiza;
+reimplementar sería pelearse a ciegas con un sitio que no podemos ni abrir.**
+
+Una trampa más, que no dio error y por eso merece estar escrita:
+
+> **Las fichas de serie NO llevan embeds; los llevan sus capítulos.** Eso es bueno —es lo que evita
+> rellenar un capítulo con los enlaces de su serie— pero el primer intento componía la ruta del
+> episodio a mano (`detalle(clase, slug + '/1/1')`) y `encodeURIComponent` convertía las barras en
+> `%2F`. La fuente contestaba 404 y el importador lo apuntaba como «este capítulo no tiene vídeo»:
+> series enteras fuera, con el mismo mensaje que usa un título sin enlaces y un recuento final que
+> parecía plausible. Por eso el episodio tiene su propia función (`detalleEpisodio`).
+
+Cómo se vigila:
+
+```bash
+npx ts-node --transpile-only scripts/dev/diag_lamoviebot_identidad.ts  # ¿sigue acertando su tmdb_id?
+npx ts-node --transpile-only scripts/dev/diag_lamoviebot_extrae.ts     # ¿sus hosts reproducen?
+npx ts-node --transpile-only scripts/dev/diag_lamoviebot_hosts.ts      # ¿es redundante con vimeos?
+npx ts-node --transpile-only scripts/dev/diag_fuentes_candidatas.ts    # ¿cuánto aporta?
+npm run importar:lamoviebot -- --dry                                   # qué entraría
+```
+
+---
+
 ## 5. Los SERVIDORES de tu fuente: extraer el vídeo y no ofrecer lo que está muerto
 
 Todo lo anterior va de que la ficha sea la correcta. Esto va de que lo que hay dentro **reproduzca**.

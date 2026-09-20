@@ -217,8 +217,27 @@ export function candidateIdsForUrl(url: string): string[] {
    * devolver solo una dejaría a la otra sin reconocer su propia página.
    */
   const videoapi = deVideoapi ? [`va-${deVideoapi[1]}`, `va-tv-${deVideoapi[1]}`] : [];
+  /**
+   * EL MOLDE DE LAMOVIEBOT, que tiene el mismo problema que videoapi por el otro extremo.
+   *
+   * Sus urls son `/pelicula/<slug>`, `/serie/<slug>` y `/serie/<slug>/<temporada>/<capitulo>`. En
+   * las de episodio el último tramo es «1»: un número pelado que no identifica nada y que chocaría
+   * con cualquier slug numérico de otra web. El slug vive en MEDIO de la ruta, así que se saca de
+   * ahí, y se devuelve el id de la SERIE y no el del capítulo — la página de un episodio pertenece
+   * a la ficha de su serie, y es esa la que tiene que reconocerla como propia para que
+   * `duenosDeLasPaginas` no se quede ciega con esta fuente (FUENTES.md §4 ter).
+   *
+   * Las dos formas, por lo mismo que en videoapi: el mismo slug puede designar una película y una
+   * serie, y quien pregunta por una url no sabe cuál de las dos es.
+   */
+  const deLamoviebot = String(url).match(
+    /(?:lamoviebot\.[a-z0-9.-]+\.workers\.dev|lamovie\.org)\/(?:pelicula|serie|anime)\/([^/?#]+)/i
+  );
+  const lamoviebot = deLamoviebot
+    ? [`lmb-${deLamoviebot[1].toLowerCase()}`, `lmb-tv-${deLamoviebot[1].toLowerCase()}`]
+    : [];
   return Array.from(
-    new Set([...deArchive, ...videoapi, last, last.toLowerCase(), slugify(path)])
+    new Set([...deArchive, ...videoapi, ...lamoviebot, last, last.toLowerCase(), slugify(path)])
   ).filter(Boolean);
 }
 

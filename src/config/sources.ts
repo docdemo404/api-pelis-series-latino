@@ -99,6 +99,25 @@ export const DEFAULT_SOURCES: SourceConfig[] = [
    * del CDN. Ver `src/scrapers/netmirror.ts`.
    */
   { id: 'netmirror', name: 'NetMirror (por TMDB id)', enabled: true, priority: 1 },
+  /**
+   * LAMOVIEBOT va DETRÁS de las tres indexadas por `tmdb_id` y DELANTE de las dos webs, y ese
+   * sitio intermedio es exactamente lo que es.
+   *
+   * Se parece a videoapi en la puerta —se le habla por una API JSON, no se recorre un índice— pero
+   * NO en lo que importa para la identidad: videoapi DIRECCIONA por `tmdb_id`, o sea que su número
+   * es un dato publicado; este Worker scrapea lamovie.org y le pega después un id que dedujo su
+   * propio matcher. Medido sobre 119 películas: acierta el 97 % y falla el 3 %, siempre por el
+   * mismo sitio —el homónimo del mismo año, que solo el título original separa—. Por eso su id
+   * entra como candidatura y `identidadRespaldada` lo verifica antes de escribir nada.
+   *
+   * Delante de tioplus y fuegocine porque sus servidores se guardan ya COMPROBADOS (se baja un
+   * segmento real antes de escribirlos) y porque su embed es de un tercero estable que volvemos a
+   * resolver al reproducir, no una url acuñada que caduca.
+   *
+   * Medido al entrar (2026-09-20): ~656 fichas que el catálogo no tenía, y de 164 servidores solo
+   * el 18 % cae en el CDN de vimeos que ya servíamos — o sea que NO es el caso cinecalidad.
+   */
+  { id: 'lamoviebot', name: 'LaMovie (API)', enabled: true, priority: 5 },
   { id: 'tioplus', name: 'TioPlus / PelisPlus Latino', enabled: true, priority: 6 },
   { id: 'fuegocine', name: 'FuegoCine', enabled: true, priority: 7 },
 ];
