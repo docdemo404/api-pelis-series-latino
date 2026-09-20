@@ -86,6 +86,21 @@ function llaveDe(url, indice) {
   return `v2/${id}/${String(indice).padStart(6, '0')}`;
 }
 
+/**
+ * El tipo del fichero, SEGÚN SU EXTENSIÓN y no según lo que nos venga bien.
+ *
+ * Esto anunciaba `video/mp4` para todo, y mientras por aquí solo pasaban mp4 era verdad. Al
+ * meter un Matroska por la caché deja de serlo, y no es una mentira inocua: hay reproductores que
+ * eligen el extractor por el tipo declarado antes de olfatear el contenido, así que anunciar mp4
+ * sobre un mkv es pedirle a la app que lo abra con la herramienta equivocada.
+ */
+function tipoDe(url) {
+  const ruta = String(url).split('?')[0].toLowerCase();
+  if (ruta.endsWith('.mkv')) return 'video/x-matroska';
+  if (ruta.endsWith('.webm')) return 'video/webm';
+  return 'video/mp4';
+}
+
 /** El rango que pide el cliente, o el trozo cero si no pide ninguno. */
 function rangoPedido(cabecera) {
   const m = /bytes=(\d+)-(\d*)/i.exec(String(cabecera || ''));
@@ -591,7 +606,7 @@ export async function servirConCache(request, env, ctx, url) {
     status: 206,
     headers: {
       ...CORS,
-      'Content-Type': 'video/mp4',
+      'Content-Type': tipoDe(url),
       'Accept-Ranges': 'bytes',
       'Content-Range': 'bytes ' + desde + '-' + ultimo + '/' + total,
       'Content-Length': String(ultimo - desde + 1),
@@ -674,4 +689,259 @@ export async function calentarIndice(env, ctx, url) {
     yaEstaban: hechos.filter(h => h === 'ya').length,
     fallaron: hechos.filter(h => h === 'falló').length,
   };
+}
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * LLENAR LA CACHÉ DE UNA PASADA, LEYENDO DE CORRIDO.
+ *
+ * `calentarIndice` pide siete trozos sueltos por rango, y eso vale para un origen cuyo problema
+ * es la latencia (archive.org: 10-25 s por petición, vengan de donde vengan los bytes). Hay otra
+ * clase de origen para el que es exactamente lo peor que se puede hacer, y se midió el 2026-09-20
+ * sobre `permanent-video-share.lovable.app`:
+ *
+ *   una conexión desde el byte 0, 250 MB seguidos ......... 10,8 MB/s
+ *   4 MB pedidos en el offset 100 MB ....................... 0,67 MB/s
+ *   4 MB pedidos en el offset 1,2 GB ....................... 0,08 MB/s  (48 s)
+ *   100 MB pedidos en el offset 1,2 GB ..................... 2,0 MB/s   (52 s)
+ *
+ * Que 4 MB y 100 MB desde el mismo sitio cuesten LO MISMO dice qué pasa: el coste no es por byte,
+ * es un peaje FIJO por petición que crece con la profundidad — el origen no sabe saltar, recorre
+ * el fichero desde el principio a ~25 MB/s. O sea que la forma de trabajar de la caché (un trozo
+ * de 4 MB por petición) paga el peaje entero por cada 4 MB, y los trozos del final se pasan de
+ * `TOPE_ORIGEN_MS` y fallan. Con un host así, la caché tal cual deja la reproducción PEOR que ir
+ * directo al origen.
+ *
+ * Leyendo de corrido el peaje se paga UNA vez: 1,6 GB en unos dos minutos y medio, y a partir de
+ * ahí cualquier salto sale de R2 al instante. Que es justo lo que el reproductor no podía hacer.
+ *
+ * ─── Por qué guarda por trozos y no el fichero entero de un `put` ──────────────────────────
+ *
+ * Porque lo que quede en R2 tiene que ser lo MISMO que escribe `traerTrozo`: mismas llaves, mismo
+ * tamaño, mismos metadatos. Guardarlo bajo otra llave sería llenar R2 para nada — `servirConCache`
+ * no lo encontraría.
+ *
+ * ─── Y por qué se puede reanudar ───────────────────────────────────────────────────────────
+ *
+ * Porque no se puede dar por hecho que una invocación llegue al final: hay topes de CPU, de
+ * memoria y de tiempo, y esto dura minutos. Antes de tocar el origen se salta lo que ya esté en
+ * R2, y la última línea de la respuesta dice por qué trozo se quedó. Quien llama vuelve a llamar
+ * desde ahí, y repetir la pasada entera no cuesta tránsito: cuesta unos cuantos `head`.
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ */
+
+/**
+ * Lo que se espera a un llenado, que no es lo que se espera a un espectador.
+ *
+ * `TOPE_ORIGEN_MS` son 45 s porque al otro lado hay alguien mirando una pantalla. Aquí no hay
+ * nadie: lo que importa es terminar. Y tiene que cubrir la pasada ENTERA, porque
+ * `AbortSignal.timeout` corta también la lectura del cuerpo, no solo la espera a las cabeceras.
+ */
+const TOPE_LLENADO_MS = 600000;
+
+/** Cuántas escrituras a R2 se dejan en vuelo. Sin esto, el origen espera a cada `put`. */
+const PUTS_EN_VUELO = 4;
+
+/**
+ * Llena R2 leyendo el fichero de corrido desde `desdeTrozo`, como mucho `cuantos` trozos.
+ *
+ * Contesta en NDJSON y MIENTRAS TRABAJA, una línea cada dieciséis trozos. No es cosmético: una
+ * respuesta que tarda dos minutos en emitir su primer byte la corta Cloudflare por el camino, y
+ * quien llama se queda sin saber si iba bien. Con el goteo, además, se ve el progreso.
+ */
+export function llenarSecuencial(env, ctx, url, desdeTrozo, cuantos) {
+  const { readable, writable } = new TransformStream();
+  const texto = new TextEncoder();
+
+  const trabajo = async () => {
+    const escritor = writable.getWriter();
+    const decir = obj => escritor.write(texto.encode(JSON.stringify(obj) + '\n'));
+
+    try {
+      if (!env.CACHE) { await decir({ ok: false, motivo: 'sin R2' }); return; }
+
+      /*
+       * PRIMERO SE MIRA QUÉ HAY YA, y se empieza en el primer hueco. Un `head` cuesta
+       * milisegundos y no gasta tránsito; volver a bajar 800 MB que ya estaban, sí.
+       */
+      let indice = desdeTrozo;
+      const tope = desdeTrozo + cuantos;
+      let yaEstaban = 0;
+      let totalConocido = 0;
+      while (indice < tope) {
+        const cabeza = await env.CACHE.head(llaveDe(url, indice)).catch(() => null);
+        if (!cabeza) break;
+        totalConocido = Number(cabeza.customMetadata && cabeza.customMetadata.total) || totalConocido;
+        yaEstaban++;
+        indice++;
+      }
+
+      if (totalConocido && indice * TROZO >= totalConocido) {
+        await decir({ ok: true, completo: true, total: totalConocido, yaEstaban, guardados: 0, siguiente: indice });
+        return;
+      }
+
+      /*
+       * Si lo que ya estaba se comió el presupuesto entero, no hay nada que pedirle al origen.
+       * Sin esto, una tanda que cae sobre trozos ya guardados abría igualmente la conexión, leía
+       * el primer paquete y la cerraba al ver que no cabía nada: un peaje entero a cambio de
+       * nada. Se paraba solo, pero pagando.
+       */
+      if (indice >= tope) {
+        await decir({ ok: true, total: totalConocido, yaEstaban, guardados: 0, siguiente: indice, completo: false });
+        return;
+      }
+
+      const inicio = indice * TROZO;
+      await decir({ evento: 'empieza', desde: indice, yaEstaban });
+
+      const respuesta = await fetch(url, {
+        headers: { 'User-Agent': UA, Range: 'bytes=' + inicio + '-' },
+        signal: AbortSignal.timeout(TOPE_LLENADO_MS),
+      });
+      if (!respuesta.ok || !respuesta.body) {
+        await decir({ ok: false, motivo: 'origen ' + respuesta.status, siguiente: indice });
+        return;
+      }
+
+      const total = totalDe(respuesta);
+      if (!total) {
+        respuesta.body.cancel();
+        await decir({ ok: false, motivo: 'el origen no dice cuánto mide el fichero', siguiente: indice });
+        return;
+      }
+
+      // Con un 200 el origen ignoró el rango y manda desde cero: hay que tirar lo anterior.
+      let porTirar = respuesta.status === 200 ? inicio : 0;
+
+      const lector = respuesta.body.getReader();
+
+      /*
+       * LOS BYTES NO SE TOCAN, SE DEJAN PASAR. Y no es una optimización: es la diferencia entre
+       * que esto funcione y que no.
+       *
+       * La primera versión juntaba cada paquete que llegaba en un buffer de 4 MB (`buffer.set`) y
+       * se lo daba a R2 ya completo. Cloudflare la mataba a media tanda con `Worker exceeded CPU
+       * time limit`: copiar 192 MB —más reservar cuarenta y ocho buffers de 4 MB que hay que
+       * poner a cero— es trabajo de CPU de verdad, y el plan gratuito no deja subir ese tope
+       * (`CPU limits are not supported for the Free plan`). El trabajo se quedaba a medias sin
+       * decir por qué, y encima de forma intermitente, que es la peor manera de fallar.
+       *
+       * `FixedLengthStream` le da la vuelta: se le declara a R2 cuánto va a medir el trozo y se
+       * le enchufa el flujo. Lo que llega de la red se reenvía TAL CUAL —`subarray` en el corte
+       * entre trozos no copia, solo apunta—, así que en JS no se mueve un solo byte. El trasiego
+       * lo hace el runtime, que para eso está.
+       */
+      let escritorTrozo = null;
+      let escritoEnTrozo = 0;
+      let guardados = 0;
+      const enVuelo = [];
+
+      const abrirTrozo = n => {
+        const flujo = new FixedLengthStream(TROZO);
+        enVuelo.push(env.CACHE.put(llaveDe(url, n), flujo.readable, {
+          customMetadata: { total: String(total), visto: String(Date.now()) },
+        }));
+        escritorTrozo = flujo.writable.getWriter();
+        escritoEnTrozo = 0;
+      };
+
+      /*
+       * Y LA COLA, que no mide un trozo entero, sí se junta en memoria.
+       *
+       * `FixedLengthStream` exige saber el tamaño por adelantado y el último trozo solo se sabe
+       * cuando el fichero se acaba. Son 4 MB como mucho y UNA vez por fichero: ahí sí sale a
+       * cuenta guardar los pedazos y unirlos al final.
+       */
+      const colaSuelta = [];
+      let bytesDeCola = 0;
+
+      for (;;) {
+        const { done, value } = await lector.read();
+        if (done) break;
+
+        let util = value;
+        if (porTirar > 0) {
+          if (porTirar >= util.length) { porTirar -= util.length; continue; }
+          util = util.subarray(porTirar);
+          porTirar = 0;
+        }
+
+        let puesto = 0;
+        while (puesto < util.length) {
+          if (!escritorTrozo) {
+            // ¿Queda sitio para otro trozo entero? Si el fichero se acaba antes, esto es la cola.
+            if ((indice + 1) * TROZO <= total) abrirTrozo(indice);
+            else break;
+          }
+
+          const cabe = Math.min(TROZO - escritoEnTrozo, util.length - puesto);
+          await escritorTrozo.write(util.subarray(puesto, puesto + cabe));
+          escritoEnTrozo += cabe;
+          puesto += cabe;
+
+          if (escritoEnTrozo === TROZO) {
+            await escritorTrozo.close();
+            escritorTrozo = null;
+            guardados++;
+            indice++;
+            if (enVuelo.length >= PUTS_EN_VUELO) await enVuelo.shift();
+            if (guardados % 4 === 0) await decir({ evento: 'va', trozo: indice, de: Math.ceil(total / TROZO) });
+            if (indice >= tope) break;
+          }
+        }
+
+        // Lo que quede después del último trozo entero del fichero es la cola.
+        if (puesto < util.length && (indice + 1) * TROZO > total) {
+          const resto = util.subarray(puesto);
+          colaSuelta.push(resto);
+          bytesDeCola += resto.length;
+        }
+
+        if (indice >= tope) { try { await lector.cancel(); } catch (e) { /* ya cerrado */ } break; }
+      }
+
+      /*
+       * Un trozo a medias NO se guarda: sería un agujero silencioso bajo una llave que promete
+       * 4 MB, y el que lo leyera se encontraría menos bytes de los prometidos. Se aborta, no
+       * queda nada en R2, y la vuelta siguiente lo rehace entero.
+       */
+      if (escritorTrozo) {
+        await escritorTrozo.abort(new Error('trozo incompleto')).catch(() => {});
+        escritorTrozo = null;
+      }
+
+      if (bytesDeCola > 0 && indice < tope) {
+        const cola = new Uint8Array(bytesDeCola);
+        let n = 0;
+        for (const pedazo of colaSuelta) { cola.set(pedazo, n); n += pedazo.length; }
+        enVuelo.push(env.CACHE.put(llaveDe(url, indice), cola, {
+          customMetadata: { total: String(total), visto: String(Date.now()) },
+        }));
+        guardados++;
+        indice++;
+      }
+
+      await Promise.all(enVuelo);
+      await decir({
+        ok: true,
+        total,
+        trozosDelFichero: Math.ceil(total / TROZO),
+        yaEstaban,
+        guardados,
+        siguiente: indice,
+        completo: indice * TROZO >= total,
+      });
+    } catch (e) {
+      // Las líneas anteriores ya salieron; esta dice por qué se paró.
+      await decir({ ok: false, motivo: String(e && e.message ? e.message : e) }).catch(() => {});
+    } finally {
+      await escritor.close().catch(() => {});
+    }
+  };
+
+  ctx.waitUntil(trabajo());
+  return new Response(readable, {
+    headers: { ...CORS, 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store' },
+  });
 }

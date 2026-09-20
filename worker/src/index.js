@@ -1,4 +1,4 @@
-import { servirConCache, calentarIndice } from './cacheDeTrozos.js';
+import { servirConCache, calentarIndice, llenarSecuencial } from './cacheDeTrozos.js';
 /**
  * ───────────────────────────────────────────────────────────────────────────────────────────
  * PROXY DE VÍDEO EN CLOUDFLARE — el que quita el techo de ancho de banda.
@@ -467,6 +467,26 @@ export default {
       const guardado = await env.CACHE.get(clave);
       if (!guardado) return new Response('null', { headers: { ...CORS, 'Content-Type': 'application/json' } });
       return new Response(guardado.body, { headers: { ...CORS, 'Content-Type': 'application/json' } });
+    }
+
+    /**
+     * LLENAR LA CACHÉ DE CORRIDO, para los hosts a los que pedir trozos sueltos les sale caro.
+     *
+     * `d` es el trozo por el que empezar y `n` cuántos como mucho. No van firmados y no hace
+     * falta que lo vayan: solo eligen QUÉ PARTE del fichero que la firma ya autorizó se guarda,
+     * así que lo peor que puede hacer quien los toquetee es cachear un trozo de más de algo que
+     * ya podía pedir entero.
+     *
+     * El tope de 512 trozos (2 GB) no es por gusto: cada trozo es una escritura a R2, y una
+     * invocación con miles de escrituras es la forma de descubrir un límite de Cloudflare en
+     * mitad de un trabajo que dura minutos. Lo que no quepa se pide en otra llamada, que para eso
+     * la respuesta dice por dónde se quedó.
+     */
+    if (url.pathname === '/llena') {
+      const desde = Math.max(0, Math.trunc(Number(url.searchParams.get('d')) || 0));
+      const pedidos = Math.trunc(Number(url.searchParams.get('n')) || 512);
+      const cuantos = Math.min(512, Math.max(1, pedidos));
+      return llenarSecuencial(env, ctx, embedUrl, desde, cuantos);
     }
 
     if (url.pathname === '/calienta') {
