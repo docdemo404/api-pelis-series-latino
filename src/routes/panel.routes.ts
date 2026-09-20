@@ -226,9 +226,20 @@ router.post('/api/v1/panel/manual', async (req: Request, res: Response, next: Ne
      * suma a lo que hubiera, como siempre.
      */
     const reemplazar = b.reemplazar === true;
-    const r = await CatalogService.anadirFichaManual({ tmdbId, tipo: tipo as any, urls, episodios, reemplazar });
+    /**
+     * `forzar` guarda también lo que la comprobación no pudo aprobar. Lo manda el panel solo
+     * cuando se marca la casilla a mano: hay hosts a los que Vercel no llega —piden sesión de
+     * navegador, bloquean IPs de datacenter, no aceptan `Range`— y el reproductor sí. Las que
+     * entran así vuelven listadas en `forzadas`, para que la respuesta no las confunda con las
+     * que sí se vieron entregar vídeo.
+     */
+    const forzar = b.forzar === true;
+    const r = await CatalogService.anadirFichaManual({ tmdbId, tipo: tipo as any, urls, episodios, reemplazar, forzar });
     if (!r.ok) {
-      return res.status(422).json({ status: 'error', message: r.error, aceptadas: r.aceptadas, rechazadas: r.rechazadas });
+      return res.status(422).json({
+        status: 'error', message: r.error,
+        aceptadas: r.aceptadas, rechazadas: r.rechazadas, motivos: r.motivos,
+      });
     }
     res.json({ status: 'success', ...r });
   } catch (err) {

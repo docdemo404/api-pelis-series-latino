@@ -1544,9 +1544,28 @@ export class CatalogService {
      * «todavía no lo he escrito».
      */
     reemplazar?: boolean;
+    /**
+     * GUARDARLA AUNQUE EL SERVIDOR NO PUEDA COMPROBARLA. Bajo la palabra de quien la pega.
+     *
+     * La comprobación se hace desde Vercel, y hay hosts perfectamente buenos a los que Vercel no
+     * llega pero el reproductor sí: los que exigen sesión del navegador (un preview de Lovable
+     * contesta `401 Unauthorized` a todo el que no lleve su cookie), los que bloquean IPs de
+     * datacenter, los que rechazan `Range`, o uno que simplemente tardó más de 25 s esta vez.
+     * Sin escape, la única salida era no poder poner la url — y esto es la FUENTE PROPIA, donde
+     * la autoridad es la persona, no el rastreo.
+     *
+     * Lo que NO hace: mentir sobre lo comprobado. Las urls que entran por aquí se devuelven
+     * aparte en `forzadas`, se marcan `sin_comprobar` en la fila, y el verificador las mira como
+     * a cualquier otra: si de verdad no abren, les quita el sello y dejan de anunciarse solas —
+     * la dirección se queda en `manual_servers`, que para eso existe el libro.
+     */
+    forzar?: boolean;
   }): Promise<{
     ok: boolean; id?: string; titulo?: string;
-    aceptadas: string[]; rechazadas: string[]; capitulos_ok?: number; quitadas?: number; error?: string;
+    aceptadas: string[]; rechazadas: string[]; forzadas?: string[];
+    /** Por qué falló cada url rechazada o forzada, para que el panel lo pueda enseñar. */
+    motivos?: Record<string, string>;
+    capitulos_ok?: number; quitadas?: number; error?: string;
   }> {
     /**
      * Se normaliza ANTES de comprobar, para que lo que se prueba sea lo que se guarda.
@@ -1610,23 +1629,87 @@ export class CatalogService {
     // Cada url se prueba de verdad: 64 KB bastan para ver la cabecera del contenedor.
     const aceptadas: string[] = [];
     const rechazadas: string[] = [];
+    /** Las que no pasaron la prueba pero se guardan igual porque se pidió `forzar`. */
+    const forzadas: string[] = [];
+    /** Qué le pasó a cada url que no pasó limpia. Sin esto, «no entregó vídeo» no es accionable. */
+    const motivos: Record<string, string> = {};
+
+    /**
+     * LOS PRIMEROS 64 KB, SIN DESCARGAR LA PELÍCULA ENTERA.
+     *
+     * Va por `stream` y no por `arraybuffer` a propósito: así se puede cortar en cuanto hay
+     * bastante, que es lo que permite el segundo intento SIN `Range`. Hay hosts que contestan
+     * `403` o `501` a una petición con rango —o la ignoran— y con `arraybuffer` reintentar sin él
+     * significaba tragarse el fichero completo en memoria. Aquí se leen 64 KB y se cierra.
+     */
+    const leerCabecera = async (url: string, conRango: boolean) => {
+      const r = await httpClient.get(url, {
+        headers: conRango ? { Range: 'bytes=0-65535' } : {},
+        responseType: 'stream',
+        timeout: 25000,
+        validateStatus: () => true,
+        maxRedirects: 5,
+      } as any);
+      const tipo = String(r.headers['content-type'] || '');
+      const flujo = r.data as NodeJS.ReadableStream;
+      const trozos: Buffer[] = [];
+      if (r.status >= 400) {
+        (flujo as any)?.destroy?.();
+        return { status: r.status, tipo, cuerpo: Buffer.alloc(0) };
+      }
+      let total = 0;
+      await new Promise<void>(resolve => {
+        const fin = () => resolve();
+        flujo.on('data', (c: Buffer) => {
+          trozos.push(c);
+          total += c.length;
+          if (total >= 65536) { (flujo as any)?.destroy?.(); resolve(); }
+        });
+        flujo.on('end', fin);
+        flujo.on('close', fin);
+        flujo.on('error', fin);
+      });
+      return { status: r.status, tipo, cuerpo: Buffer.concat(trozos).subarray(0, 65536) };
+    };
+
+    /** Una frase que se pueda leer en el panel y saber qué hacer con ella. */
+    const porQue = (status: number) => {
+      if (status === 401 || status === 403) {
+        return `HTTP ${status}: el host solo sirve el fichero a quien lleve su sesión o desde ` +
+          'ciertas IPs. Tu navegador lo abre; este servidor y la app, no.';
+      }
+      if (status === 404 || status === 410) return `HTTP ${status}: ahí no hay ningún fichero.`;
+      if (status === 429) return 'HTTP 429: el host está limitando las peticiones.';
+      if (status >= 500) return `HTTP ${status}: el host falló al servirlo.`;
+      return `HTTP ${status}`;
+    };
+
     const comprobar = async (lista: string[]): Promise<string[]> => {
       const buenas: string[] = [];
+      /** Un solo sitio donde se decide qué pasa con la que no pasó: se tira, o se guarda forzada. */
+      const noPaso = (url: string, motivo: string) => {
+        motivos[url] = motivo;
+        if (opts.forzar) { buenas.push(url); aceptadas.push(url); forzadas.push(url); }
+        else rechazadas.push(url);
+      };
       await Promise.all(lista.map(async url => {
         try {
-          const r = await httpClient.get(url, {
-            headers: { Range: 'bytes=0-65535' },
-            responseType: 'arraybuffer',
-            timeout: 25000,
-            validateStatus: () => true,
-            maxRedirects: 5,
-          } as any);
-          if (r.status >= 400) { rechazadas.push(url); return; }
+          let r = await leerCabecera(url, true);
+          /**
+           * `Range` no es obligatorio, y hay hosts que lo castigan. Si la petición con rango se
+           * va en un error que huele a «no entiendo esta cabecera» (403, 405, 416, 501), se
+           * repite sin ella antes de dar la url por mala.
+           */
+          if ([403, 405, 416, 501].includes(r.status)) r = await leerCabecera(url, false);
 
-          const tipo = String(r.headers['content-type'] || '');
-          if (/text\/html/i.test(tipo)) { rechazadas.push(url); return; }
+          if (r.status >= 400) { noPaso(url, porQue(r.status)); return; }
+          if (/text\/html/i.test(r.tipo)) {
+            noPaso(url, 'el host devolvió una página web, no un vídeo (¿es el enlace del reproductor y no el del fichero?)');
+            return;
+          }
 
-          const cuerpo = Buffer.from(new Uint8Array(r.data as ArrayBuffer));
+          const cuerpo = r.cuerpo;
+          const tipo = r.tipo;
           const bytes = cuerpo.byteLength;
 
           /**
@@ -1651,9 +1734,13 @@ export class CatalogService {
 
           const vale = esHls ? await manifiestoTraeVideo(texto, url) : bytes > 8192;
           if (vale) { buenas.push(url); aceptadas.push(url); }
-          else rechazadas.push(url);
-        } catch {
-          rechazadas.push(url);
+          else if (esHls) noPaso(url, 'es un manifiesto HLS pero no declara ni trozos ni calidades: está vacío');
+          else noPaso(url, `solo entregó ${bytes} bytes; un vídeo de verdad suelta más en los primeros 64 KB`);
+        } catch (e: any) {
+          const causa = String(e?.code || e?.message || '');
+          noPaso(url, /timeout|ETIMEDOUT|ECONNABORTED/i.test(causa)
+            ? 'el host no contestó en 25 s'
+            : `no se pudo conectar (${causa || 'error de red'})`);
         }
       }));
       return buenas;
@@ -1667,7 +1754,7 @@ export class CatalogService {
     }
 
     if (!buenasDeLaFicha.length && !capitulosBuenos.length) {
-      return { ok: false, aceptadas, rechazadas, error: 'Ninguna url entregó vídeo' };
+      return { ok: false, aceptadas, rechazadas, motivos, error: 'Ninguna url entregó vídeo' };
     }
 
     const titulo = detalle.title || detalle.name || `TMDB ${opts.tmdbId}`;
@@ -1675,17 +1762,30 @@ export class CatalogService {
     // El id lleva el año: dos obras del mismo nombre no pueden pisarse (FUENTES.md §1).
     const id = `manual-${slugify(titulo)}${fecha ? '-' + fecha.slice(0, 4) : ''}`;
 
-    const servers = buenasDeLaFicha.map((url, i) => ({
-      id: `${id}_manual_${i}`,
-      name: `Manual ${i + 1}`,
+    /**
+     * `sin_comprobar` queda escrito en la que entró forzada, y no es decorativo: es lo que
+     * distingue, al mirar la fila dentro de un mes, una url que este servidor vio entregar vídeo
+     * de otra que se guardó porque alguien dijo que funcionaba. El sello se pone igual —si no, no
+     * se anunciaría y forzar no serviría de nada—, pero deja de ser la única historia que cuenta
+     * el dato.
+     */
+    const sello = new Date().toISOString();
+    const forzada = new Set(forzadas);
+    const servidorManual = (idServidor: string, nombre: string, url: string) => ({
+      id: idServidor,
+      name: nombre,
       embed_url: url,
       direct_stream: url,
       direct_mode: 'public' as const,
       direct_kind: /\.m3u8(\?|$)/i.test(url) ? ('hls' as const) : ('mp4' as const),
       status: 'online' as const,
       source_id: 'manual',
-      verified_at: new Date().toISOString(),
-    }));
+      verified_at: sello,
+      ...(forzada.has(url) ? { sin_comprobar: true } : {}),
+    });
+
+    const servers = buenasDeLaFicha.map((url, i) =>
+      servidorManual(`${id}_manual_${i}`, `Manual ${i + 1}`, url));
 
     const fila: Record<string, unknown> = {
       id,
@@ -1707,7 +1807,7 @@ export class CatalogService {
        * vive aquí, no en `servers`, y confundirlo es lo que hacía que una serie se anunciara
        * entera por lo que traía su portada (FUENTES.md §4).
        */
-      seasons: await this.temporadasConCapitulosManuales(opts.tmdbId, detalle, id, capitulosBuenos),
+      seasons: await this.temporadasConCapitulosManuales(opts.tmdbId, detalle, id, capitulosBuenos, forzada),
       has_streams: true,
       source_url: null,
       source_urls: [],
@@ -1775,7 +1875,7 @@ export class CatalogService {
         })
         .eq('id', yaEstaba.id);
 
-      if (errorFusion) return { ok: false, aceptadas, rechazadas, error: errorFusion.message };
+      if (errorFusion) return { ok: false, aceptadas, rechazadas, forzadas, motivos, error: errorFusion.message };
 
       // Y ahora, si esto era una edición, se va lo que el formulario ya no lista.
       const quitadas = opts.reemplazar
@@ -1794,6 +1894,8 @@ export class CatalogService {
         titulo,
         aceptadas,
         rechazadas,
+        forzadas,
+        motivos,
         capitulos_ok: capitulosBuenos.length,
         quitadas,
         fusionada_con_existente: true,
@@ -1827,7 +1929,7 @@ export class CatalogService {
     }
 
     const { error } = await db.from('media_items').upsert(fila, { onConflict: 'id' });
-    if (error) return { ok: false, aceptadas, rechazadas, error: error.message };
+    if (error) return { ok: false, aceptadas, rechazadas, forzadas, motivos, error: error.message };
 
     const quitadas = opts.reemplazar
       ? await this.podarManualesNoListados(id, listadoParaPodar)
@@ -1837,7 +1939,7 @@ export class CatalogService {
 
     await this.invalidateItem({ id });
     await this.invalidateListings();
-    return { ok: true, id, titulo, aceptadas, rechazadas, capitulos_ok: capitulosBuenos.length, quitadas };
+    return { ok: true, id, titulo, aceptadas, rechazadas, forzadas, motivos, capitulos_ok: capitulosBuenos.length, quitadas };
   }
 
 
@@ -2784,7 +2886,9 @@ export class CatalogService {
     tmdbId: number,
     detalle: any,
     id: string,
-    capitulos: Array<{ season: number; episode: number; urls: string[] }>
+    capitulos: Array<{ season: number; episode: number; urls: string[] }>,
+    /** Las que se guardan bajo palabra, para marcarlas igual que las de la ficha. */
+    forzadas: Set<string> = new Set()
   ): Promise<any[]> {
     const servidoresDe = (season: number, episode: number, urls: string[]) =>
       urls.map((url, i) => ({
@@ -2797,6 +2901,7 @@ export class CatalogService {
         status: 'online' as const,
         source_id: 'manual',
         verified_at: new Date().toISOString(),
+        ...(forzadas.has(url) ? { sin_comprobar: true } : {}),
       }));
 
     const poster = detalle?.poster_path ? `https://image.tmdb.org/t/p/w500${detalle.poster_path}` : null;

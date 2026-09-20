@@ -288,6 +288,23 @@
               </div>
               <div id="manualCapitulos" class="mb-3" style="max-height:340px;overflow:auto"></div>
             </div>
+            <!--
+              LA CASILLA DE «FÍATE DE MÍ». Apagada siempre que se abre el formulario.
+
+              La comprobación se hace desde el servidor, y hay hosts buenos a los que el servidor
+              no llega pero el reproductor sí: los que exigen la sesión del navegador (un preview
+              de Lovable contesta 401 a todo el que no lleve su cookie), los que bloquean IPs de
+              datacenter o los que no aceptan peticiones por rango. Marcándola, esas urls se
+              guardan igual y salen rotuladas como lo que son: sin comprobar.
+            -->
+            <div class="form-check mb-3">
+              <input class="form-check-input" type="checkbox" id="manualForzar">
+              <label class="form-check-label text-secondary small" for="manualForzar">
+                Guardar también las que no pueda comprobar (hosts que piden sesión del navegador,
+                que bloquean servidores o que tardan demasiado). <b>Van bajo tu palabra</b>: se
+                anuncian en la app, y si de verdad no abren el verificador las retirará solo.
+              </label>
+            </div>
             <button id="manualGuardar" class="btn btn-info fw-bold">💾 Comprobar y guardar</button>
             <div id="manualAviso" class="mt-3"></div>
           </div>
@@ -517,6 +534,8 @@
       manualGuardado = null;
       manualCapUrls = {};
       document.getElementById('manualUrls').value = '';
+      // Forzar es una decisión por envío, no un modo: no se hereda del guardado anterior.
+      document.getElementById('manualForzar').checked = false;
       document.getElementById('manualEstado').innerHTML =
         '<div class="text-secondary small">Mirando qué hay guardado de este título…</div>';
 
@@ -670,6 +689,7 @@
       manualTemporadas = [];
       document.getElementById('manualElegido').style.display = 'none';
       document.getElementById('manualUrls').value = '';
+      document.getElementById('manualForzar').checked = false;
       document.getElementById('manualEstado').innerHTML = '';
       document.getElementById('manualCapitulos').innerHTML = '';
       document.getElementById('manualAviso').innerHTML = '';
@@ -732,20 +752,37 @@
             episodios: episodios,
             // Solo va en true si ANTES se cargó lo guardado; si no, esto sigue sumando.
             reemplazar: editando,
+            forzar: document.getElementById('manualForzar').checked,
           }),
         });
         const j = await res.json();
+        /**
+         * Cada url con su MOTIVO al lado. «No entregó vídeo» no se puede accionar; «HTTP 401: el
+         * host solo sirve el fichero a quien lleve su sesión» sí — dice que el enlace no está
+         * roto, que es privado, y que la casilla de abajo es la salida.
+         */
+        const motivos = j.motivos || {};
         const lista = function (arr, clase) {
           return (arr || []).map(function (u) {
-            return '<div class="' + clase + ' small text-break">' + u + '</div>';
+            const m = motivos[u];
+            return '<div class="' + clase + ' small text-break">' + u +
+              (m ? '<div class="text-secondary" style="font-size:.78em">↳ ' + m + '</div>' : '') +
+              '</div>';
           }).join('');
         };
+        // Lo forzado viaja dentro de `aceptadas`, pero contarlo junto sería decir que se comprobó.
+        const forzadas = j.forzadas || [];
+        const comprobadas = (j.aceptadas || []).filter(function (u) { return forzadas.indexOf(u) < 0; });
         if (j.status === 'success') {
           aviso.innerHTML = '<div class="alert alert-success mb-0">' +
             '✅ Guardado «' + j.titulo + '» con ' + (j.aceptadas || []).length + ' url(s)' +
             (j.capitulos_ok ? ' en ' + j.capitulos_ok + ' capítulo(s)' : '') + '.' +
             (j.quitadas ? ' Se quitaron ' + j.quitadas + ' url(s) de las que había guardadas.' : '') +
-            lista(j.aceptadas, 'text-success') +
+            lista(comprobadas, 'text-success') +
+            (forzadas.length
+              ? '<div class="mt-2">Guardadas <b>sin comprobar</b>, bajo tu palabra — si no abren, ' +
+                'el verificador las retirará solo:</div>' + lista(forzadas, 'text-warning')
+              : '') +
             ((j.rechazadas || []).length
               ? '<div class="mt-2">No entregaron vídeo y NO se guardaron' +
                 (editando ? ' — las que ya estaban guardadas SIGUEN ahí, fallar hoy no es lo mismo que pedir que se borren' : '') +
@@ -762,7 +799,12 @@
           loadEstado();
         } else {
           aviso.innerHTML = '<div class="alert alert-danger mb-0">❌ ' + (j.message || 'No se pudo guardar') +
-            lista(j.rechazadas, 'text-warning') + '</div>';
+            lista(j.rechazadas, 'text-warning') +
+            ((j.rechazadas || []).length && !document.getElementById('manualForzar').checked
+              ? '<div class="mt-2 small">Si sabes que el enlace funciona en tu reproductor, marca ' +
+                '<b>«Guardar también las que no pueda comprobar»</b> y vuelve a darle.</div>'
+              : '') +
+            '</div>';
         }
       } catch (e) {
         aviso.innerHTML = '<div class="alert alert-danger mb-0">Error de conexión</div>';
