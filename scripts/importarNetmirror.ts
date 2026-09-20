@@ -402,37 +402,13 @@ async function anotarCache(tmdbId: number, disponible: boolean, resolucion: numb
 }
 
 async function buscarIdPlataforma(c: Candidata, ott: NetmirrorOtt): Promise<string | null> {
-  if (VIA !== 'api') {
-    return buscarNetmirrorId(c.titulo, c.anio, c.tituloOriginal, c.titulo, ott).catch(() => null);
-  }
-  const q = new URLSearchParams({
-    title: c.titulo,
-    year: c.anio,
-    original: c.tituloOriginal || '',
-    english: c.titulo,
-    ott,
-  });
-  try {
-    const r = await fetch(`${API_PELIS}/api/v1/netmirror/newtv/search?${q}`, {
-      signal: AbortSignal.timeout(20_000),
-    });
-    if (!r.ok) return null;
-    const j = await r.json() as { data?: { id?: string } };
-    return String(j?.data?.id || '').trim() || null;
-  } catch { return null; }
+  // NewTV search no usa credenciales. El puente de Vercel queda como herramienta de diagnóstico,
+  // pero varios POP no alcanzan su CDN; el runner consulta directamente y el testigo lo protege.
+  return buscarNetmirrorId(c.titulo, c.anio, c.tituloOriginal, c.titulo, ott).catch(() => null);
 }
 
 async function masterPlataforma(id: string, ott: NetmirrorOtt): Promise<MasterNetmirror | null> {
-  if (VIA !== 'api') return masterHls(id, '', ott).catch(() => null);
-  try {
-    const q = new URLSearchParams({ id, ott });
-    const r = await fetch(`${API_PELIS}/api/v1/netmirror/newtv/master?${q}`, {
-      signal: AbortSignal.timeout(25_000),
-    });
-    if (!r.ok) return null;
-    const j = await r.json() as { data?: MasterNetmirror };
-    return j?.data || null;
-  } catch { return null; }
+  return masterHls(id, '', ott).catch(() => null);
 }
 
 /**
