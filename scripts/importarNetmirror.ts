@@ -72,6 +72,7 @@ import {
   masterHls,
   codificarIdNetmirror,
   NetmirrorOtt,
+  MasterNetmirror,
   ConsultaNetmirror,
   FuenteNetmirror,
 } from '../src/scrapers/netmirror';
@@ -400,6 +401,40 @@ async function anotarCache(tmdbId: number, disponible: boolean, resolucion: numb
   }
 }
 
+async function buscarIdPlataforma(c: Candidata, ott: NetmirrorOtt): Promise<string | null> {
+  if (VIA !== 'api') {
+    return buscarNetmirrorId(c.titulo, c.anio, c.tituloOriginal, c.titulo, ott).catch(() => null);
+  }
+  const q = new URLSearchParams({
+    title: c.titulo,
+    year: c.anio,
+    original: c.tituloOriginal || '',
+    english: c.titulo,
+    ott,
+  });
+  try {
+    const r = await fetch(`${API_PELIS}/api/v1/netmirror/newtv/search?${q}`, {
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!r.ok) return null;
+    const j = await r.json() as { data?: { id?: string } };
+    return String(j?.data?.id || '').trim() || null;
+  } catch { return null; }
+}
+
+async function masterPlataforma(id: string, ott: NetmirrorOtt): Promise<MasterNetmirror | null> {
+  if (VIA !== 'api') return masterHls(id, '', ott).catch(() => null);
+  try {
+    const q = new URLSearchParams({ id, ott });
+    const r = await fetch(`${API_PELIS}/api/v1/netmirror/newtv/master?${q}`, {
+      signal: AbortSignal.timeout(25_000),
+    });
+    if (!r.ok) return null;
+    const j = await r.json() as { data?: MasterNetmirror };
+    return j?.data || null;
+  } catch { return null; }
+}
+
 /**
  * ¿Lo tiene, es la misma obra y arranca? Devuelve el servidor listo para guardar, o null.
  *
@@ -418,10 +453,10 @@ async function resolverYVerificar(c: Candidata): Promise<ServerOption | null> {
   let encontroId = false;
   let encontroMaster = false;
   for (const ott of plataformas) {
-    const id = await buscarNetmirrorId(c.titulo, c.anio, c.tituloOriginal, c.titulo, ott).catch(() => null);
+    const id = await buscarIdPlataforma(c, ott);
     if (!id) continue;
     encontroId = true;
-    const master = await masterHls(id, '', ott).catch(() => null);
+    const master = await masterPlataforma(id, ott);
     if (!master || master.audios.length < 2) continue;
     encontroMaster = true;
     const idiomas = traducirYNormalizar(
@@ -641,7 +676,7 @@ async function main() {
     hs: '1260017500',                     // Moana
   };
   for (const ott of plataformas) {
-    const testigo = await masterHls(testigos[ott], '', ott);
+    const testigo = await masterPlataforma(testigos[ott], ott);
     if (!testigo || testigo.audios.length < 2) {
       throw new Error(`NewTV ${ott} no entrega el master testigo multipista`);
     }

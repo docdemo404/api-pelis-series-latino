@@ -525,7 +525,13 @@ export async function masterHls(
   if (!netflixId) return null;
   ott = normalizarNetmirrorOtt(ott);
 
-  const candidatos: Array<{ masterUrl: string; referer: string }> = [];
+  // Inventario público y estable: no reproduce el metraje completo, pero sí enumera exactamente
+  // audios/subtítulos/variantes. Es el camino ideal para barridos y además funciona desde runners
+  // donde `player.php` está bloqueado. El Android nunca lo usa para reproducir: pide firma+OTP.
+  const candidatos: Array<{ masterUrl: string; referer: string }> = [{
+    masterUrl: `https://tv.imgcdn.kim/newtv/hls/${ott}/${encodeURIComponent(netflixId)}.m3u8`,
+    referer: `${NM_PLAY_ORIGEN}/`,
+  }];
   try {
     const apiBase = await resolverNewTvBase();
     if (apiBase) {

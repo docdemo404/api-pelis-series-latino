@@ -1,5 +1,13 @@
 import { Router, Request, Response, NextFunction } from 'express';
-import { pelicula, episodio, consultarPelicula, FuenteNetmirror } from '../scrapers/netmirror';
+import {
+  pelicula,
+  episodio,
+  consultarPelicula,
+  FuenteNetmirror,
+  buscarNetmirrorId,
+  masterHls,
+  normalizarNetmirrorOtt,
+} from '../scrapers/netmirror';
 import { sendErrorResponse } from '../utils/apiHelpers';
 import { puedeAbrirse } from '../services/arranqueMp4';
 
@@ -43,6 +51,39 @@ router.get('/api/v1/netmirror/session', (_req: Request, res: Response) => {
     status: 'success',
     data: { api_url: NEWTV_API, ott: 'nf', user_token: userToken },
   });
+});
+
+/**
+ * Puente de inventario para los barridos. NetMirror bloquea las IP de GitHub Actions, pero sí
+ * atiende a producción; sólo se devuelven ids y metadata pública del master, nunca credenciales.
+ */
+router.get('/api/v1/netmirror/newtv/search', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const titulo = String(req.query.title || '').trim();
+    if (!titulo) return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'Falta `title`.');
+    const id = await buscarNetmirrorId(
+      titulo,
+      String(req.query.year || ''),
+      String(req.query.original || ''),
+      String(req.query.english || ''),
+      normalizarNetmirrorOtt(req.query.ott),
+    );
+    if (!id) return sendErrorResponse(res, 404, 'NOT_FOUND', 'Sin coincidencia en esta plataforma.');
+    return res.json({ status: 'success', data: { id } });
+  } catch (err) { next(err); }
+});
+
+router.get('/api/v1/netmirror/newtv/master', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const id = String(req.query.id || '').trim();
+    if (!/^[A-Za-z0-9_-]{5,}$/.test(id)) {
+      return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'Falta `id` válido.');
+    }
+    const master = await masterHls(id, '', normalizarNetmirrorOtt(req.query.ott));
+    if (!master) return sendErrorResponse(res, 404, 'NOT_FOUND', 'Master multipista no disponible.');
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    return res.json({ status: 'success', data: master });
+  } catch (err) { next(err); }
 });
 
 async function resolver(req: Request): Promise<FuenteNetmirror | null> {
