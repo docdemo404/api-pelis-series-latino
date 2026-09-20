@@ -10,6 +10,11 @@ import {
 } from '../scrapers/netmirror';
 import { sendErrorResponse } from '../utils/apiHelpers';
 import { puedeAbrirse } from '../services/arranqueMp4';
+import {
+  asignarTareasNetmirror,
+  estadoNetmirrorDistribuido,
+  recibirInformeNetmirror,
+} from '../services/netmirrorDistribuido';
 
 /**
  * NetMirror — endpoints por tmdb id.
@@ -31,6 +36,46 @@ const router = Router();
 const REFERER_MP4 = 'https://videodownloader.site/';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const NEWTV_API = 'https://tv.imgcdn.kim';
+
+/**
+ * Cola residencial de comprobacion. La IP nunca forma parte de la respuesta ni se guarda en
+ * claro: el servicio conserva solo una huella de red para impedir que dos aparatos de la misma
+ * casa formen quorum. Los clientes no eligen URLs ni IDs; solo resuelven la tarea asignada.
+ */
+router.get('/api/v1/netmirror/tasks', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const deviceId = String(req.query.device_id || '');
+    const tareas = await asignarTareasNetmirror(req, deviceId, Number(req.query.limit || 3));
+    res.setHeader('Cache-Control', 'no-store, max-age=0');
+    return res.json({ status: 'success', data: tareas });
+  } catch (err: any) {
+    if (err?.message === 'DEVICE_ID_INVALID') {
+      return sendErrorResponse(res, 400, 'INVALID_DEVICE', 'Identificador de instalacion invalido.');
+    }
+    next(err);
+  }
+});
+
+router.post('/api/v1/netmirror/tasks/report', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const resultado = await recibirInformeNetmirror(req, req.body || {});
+    res.setHeader('Cache-Control', 'no-store, max-age=0');
+    return res.json({ status: 'success', data: resultado });
+  } catch (err: any) {
+    const codigo = String(err?.message || '');
+    if (codigo === 'REPORT_INVALID') return sendErrorResponse(res, 400, codigo, 'Informe invalido.');
+    if (codigo === 'ASSIGNMENT_INVALID' || codigo === 'ASSIGNMENT_EXPIRED') {
+      return sendErrorResponse(res, 409, codigo, 'La tarea no existe, vencio o pertenece a otra instalacion.');
+    }
+    next(err);
+  }
+});
+
+router.get('/api/v1/netmirror/tasks/status', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    return res.json({ status: 'success', data: await estadoNetmirrorDistribuido() });
+  } catch (err) { next(err); }
+});
 
 /**
  * Sesion oficial de NewTV para el cliente Android.

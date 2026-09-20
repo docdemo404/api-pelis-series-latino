@@ -15,6 +15,7 @@
     "metadatos:rellenar": "ts-node scripts/rellenarMetadatos.ts",
     "importar:videoapi": "ts-node scripts/importarVideoapi.ts",
     "importar:netmirror": "ts-node scripts/importarNetmirror.ts",
+    "preparar:netmirror": "ts-node scripts/prepararColaNetmirror.ts",
     "check:catalog": "ts-node scripts/checkCatalog.ts",
     "check:sources": "ts-node scripts/checkSources.ts",
     "calentar:indices": "ts-node scripts/calentarIndices.ts",

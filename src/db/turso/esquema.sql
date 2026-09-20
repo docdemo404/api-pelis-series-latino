@@ -202,6 +202,53 @@ CREATE TABLE IF NOT EXISTS netmirror_cache (
 CREATE INDEX IF NOT EXISTS idx_netmirror_cache_comprobado ON netmirror_cache (comprobado_at);
 CREATE INDEX IF NOT EXISTS idx_netmirror_cache_netflix    ON netmirror_cache (netflix_id) WHERE netflix_id IS NOT NULL;
 
+-- ── Verificacion distribuida de NetMirror (migracion 021) ────────────────────────────────
+-- GitHub/TMDB prepara candidatos sin tocar NewTV. Los aparatos voluntarios comprueban lotes
+-- pequenos desde su propia red. Nunca se guarda la IP: `red_hash` solo permite exigir acuerdo
+-- entre dos redes distintas antes de publicar y cambia si rota el secreto del servidor.
+CREATE TABLE IF NOT EXISTS netmirror_trabajos (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    tmdb_id         INTEGER NOT NULL,
+    ott             TEXT NOT NULL CHECK (ott IN ('nf', 'pv', 'hs')),
+    titulo          TEXT NOT NULL,
+    titulo_original TEXT,
+    anio            TEXT,
+    prioridad       INTEGER NOT NULL DEFAULT 0,
+    ronda           INTEGER NOT NULL DEFAULT 1,
+    estado          TEXT NOT NULL DEFAULT 'pendiente' CHECK (estado IN ('pendiente', 'confirmado', 'descartado')),
+    proxima_revision TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    creado_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    actualizado_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    CONSTRAINT netmirror_trabajo_unico UNIQUE (tmdb_id, ott)
+);
+CREATE INDEX IF NOT EXISTS idx_netmirror_trabajos_cola
+    ON netmirror_trabajos (estado, proxima_revision, prioridad DESC, actualizado_at);
+
+CREATE TABLE IF NOT EXISTS netmirror_asignaciones (
+    token             TEXT PRIMARY KEY,
+    trabajo_id        INTEGER NOT NULL REFERENCES netmirror_trabajos(id) ON DELETE CASCADE,
+    ronda             INTEGER NOT NULL,
+    dispositivo_hash  TEXT NOT NULL,
+    red_hash          TEXT NOT NULL,
+    expira_at         TEXT NOT NULL,
+    creado_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    CONSTRAINT netmirror_asignacion_unica UNIQUE (trabajo_id, ronda, dispositivo_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_netmirror_asignaciones_expira ON netmirror_asignaciones (expira_at);
+
+CREATE TABLE IF NOT EXISTS netmirror_verificaciones (
+    trabajo_id        INTEGER NOT NULL REFERENCES netmirror_trabajos(id) ON DELETE CASCADE,
+    ronda             INTEGER NOT NULL,
+    dispositivo_hash  TEXT NOT NULL,
+    red_hash          TEXT NOT NULL,
+    resultado_hash    TEXT NOT NULL,
+    resultado_json    TEXT NOT NULL,
+    recibido_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (trabajo_id, ronda, dispositivo_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_netmirror_verificaciones_quorum
+    ON netmirror_verificaciones (trabajo_id, ronda, resultado_hash, red_hash);
+
 -- ═══════════════════════════════════════════════════════════════════════════════════════════════
 -- VISTAS (migraciones 018, 019 y 020). Un servidor / un capítulo por fila, para que los barridos
 -- pregunten sin bajarse el catálogo. Van con DROP + CREATE porque SQLite no tiene CREATE OR
