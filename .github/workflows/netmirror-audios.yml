@@ -3,8 +3,7 @@ name: Completar multi-audio de NetMirror
 # El MP4 de embed-tmdb es mono-audio. Este trabajo resuelve, fuera del request de Play, el
 # netflix_id con el que la app puede abrir el master HLS que contiene todos los idiomas.
 on:
-  schedule:
-    - cron: '30 1,7,13,19 * * *'
+  # Requiere salida residencial; los runners cloud reciben 403 de NewTV.
   workflow_dispatch:
     inputs:
       limite:

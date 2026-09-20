@@ -39,8 +39,9 @@ name: Sincronizar catálogo completo de NetMirror (Netflix, Prime y Hotstar/Disn
 # Mismo reloj que `videoapi.yml`, desplazado una hora, para no coincidir con él ni con el crawl.
 
 on:
-  schedule:
-    - cron: '0 1,5,9,13,17,21 * * *'
+  # NetMirror bloquea los ASN de GitHub/Vercel/Cloudflare. No se programa aquí porque una corrida
+  # sin acceso residencial repetiría falsos negativos o fallaría; se conserva el disparo manual
+  # para el futuro worker con salida residencial.
   workflow_dispatch:
     inputs:
       limite:
