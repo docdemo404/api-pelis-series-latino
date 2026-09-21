@@ -68,7 +68,8 @@ app.use((req: Request, res: Response, next: NextFunction) => {
       res.setHeader('Vercel-CDN-Cache-Control', 'public, max-age=604800');
     // `/stream/direct` NO puede cachearse en el borde: acuña una URL nueva en cada reproducción
     // y, según el host, responde con un 302 distinto cada vez.
-    } else if (req.path.includes('/panel') || req.path.includes('/stream/resolve') || req.path.includes('/stream/direct') || req.path.includes('/revalidate') || req.path.includes('/cache')) {
+    // `/pluto/` son informes del móvil y su estado: nada que cachear.
+    } else if (req.path.includes('/panel') || req.path.includes('/pluto/') || req.path.includes('/stream/resolve') || req.path.includes('/stream/direct') || req.path.includes('/revalidate') || req.path.includes('/cache')) {
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
     } else if (req.path.includes('/search')) {

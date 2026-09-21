@@ -40,8 +40,6 @@ router.post('/api/v1/pluto/audios', async (req: Request, res: Response, next: Ne
 router.get('/api/v1/pluto/estado', async (_req: Request, res: Response, next: NextFunction) => {
   try {
     res.setHeader('Cache-Control', 'no-store, max-age=0');
-    // El envoltorio global pone `CDN-Cache-Control` de 5 min a los GET; un estado no se cachea.
-    res.setHeader('CDN-Cache-Control', 'no-store');
     return res.json({ status: 'success', data: await estadoPluto() });
   } catch (err) { next(err); }
 });
