@@ -23,6 +23,10 @@ import { paraElCliente } from '../src/services/streamSorter';
 import { searchIndexKey } from '../src/utils/text';
 import { esServidorPluto, identificarPeliPluto, servidorDePluto, PeliPluto } from '../src/scrapers/pluto';
 import { MediaItem, ServerOption } from '../src/types';
+import { DEFAULT_SOURCES } from '../src/config/sources';
+
+/** El interruptor de la fuente. Apagada, este script solo retira. */
+const PLUTO_ACTIVO = DEFAULT_SOURCES.find((s) => s.id === 'pluto')?.enabled !== false;
 
 const argv = process.argv.slice(2);
 const bandera = (n: string, d: number) => {
@@ -162,6 +166,49 @@ async function publicar(): Promise<void> {
   console.log(`   ${cuenta.nuevas} fichas nuevas · ${cuenta.renovadas} renovadas`);
 }
 
+// ─── APAGADA: RETIRAR TODO ───────────────────────────────────────────────────────────────────
+
+/**
+ * Quita el servidor de Pluto de TODAS las fichas, recalcula `has_streams` con lo que queda (las
+ * `pl-` que solo tenían Pluto dejan de anunciarse; no se borran) y marca nada como publicado.
+ */
+async function retirarTodo(): Promise<void> {
+  const PAGINA = 200;
+  const ids: string[] = [];
+  for (let desde = 0; ; desde += PAGINA) {
+    const { data, error } = await db.from('media_items').select('id')
+      .like('servers', '%pluto://%').order('id').range(desde, desde + PAGINA - 1);
+    if (error) throw new Error(error.message);
+    ids.push(...(data || []).map((r: any) => String(r.id)));
+    if (!data || data.length < PAGINA) break;
+  }
+  console.log(`
+Pluto APAGADA: ${ids.length} fichas con servidor de Pluto${DRY ? ' (en seco)' : ''}`);
+  if (DRY) return;
+  let sinNada = 0;
+  for (const id of ids) {
+    try {
+      const { data: f, error: errL } = await db.from('media_items').select('id,servers').eq('id', id).maybeSingle();
+      if (errL) throw new Error(errL.message);
+      if (!f) continue;
+      const restantes = ((f as any).servers || []).filter((s: any) => !esServidorPluto(s));
+      const vivas = paraElCliente(restantes).length > 0;
+      if (!vivas) sinNada++;
+      const ahora = new Date().toISOString();
+      const { error } = await db.from('media_items').update({
+        servers: restantes, has_streams: vivas, streams_checked_at: ahora, updated_at: ahora,
+      }).eq('id', id);
+      if (error) throw new Error(error.message);
+      cuenta.retiradas++;
+    } catch (e: any) {
+      cuenta.errores++;
+      console.log(`   ! ${id}: ${e?.message}`);
+    }
+  }
+  await getDb().execute('UPDATE pluto_titulos SET publicado_at=NULL WHERE publicado_at IS NOT NULL');
+  console.log(`   ${cuenta.retiradas} retiradas · ${sinNada} se quedan sin fuente y dejan de anunciarse`);
+}
+
 // ─── 3. RETIRAR ──────────────────────────────────────────────────────────────────────────────
 
 async function retirar(): Promise<void> {
@@ -207,9 +254,13 @@ async function main() {
   console.log(`pluto_titulos: ${fila.n} · último informe del móvil: ${fila.m || 'ninguno'}${DRY ? ' · EN SECO' : ''}`);
   if (!Number(fila.n)) { console.log('Sin informes del móvil todavía. Nada que hacer.'); return; }
 
-  await identificar();
-  await publicar();
-  await retirar();
+  if (!PLUTO_ACTIVO) {
+    await retirarTodo();
+  } else {
+    await identificar();
+    await publicar();
+    await retirar();
+  }
   if (!DRY && (cuenta.nuevas || cuenta.renovadas || cuenta.retiradas)) await CatalogService.invalidateListings().catch(() => {});
   console.log(`\nResumen: ${JSON.stringify(cuenta)}`);
 }

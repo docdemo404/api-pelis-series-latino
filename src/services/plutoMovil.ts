@@ -14,6 +14,13 @@
  */
 import { asegurarEsquema, getDb } from '../db/libsql';
 import { ID_PLUTO, norm } from '../scrapers/pluto';
+import { DEFAULT_SOURCES } from '../config/sources';
+
+/**
+ * Con la fuente apagada los informes se aceptan (200, para que el móvil no reintente) pero no se
+ * guardan: cada informe son ~1.800 filas escritas, y las escrituras de Turso son lo que se agota.
+ */
+const plutoActivo = () => DEFAULT_SOURCES.find((s) => s.id === 'pluto')?.enabled !== false;
 
 const MAX_LOTE = 400;
 
@@ -50,7 +57,7 @@ export async function recibirCatalogoPluto(cuerpo: any): Promise<{ guardados: nu
         (Array.isArray(i.directores) ? i.directores : []).slice(0, 8).map((d: unknown) => norm(texto(d, 80))).filter(Boolean),
       ),
     }));
-  if (!filas.length) return { guardados: 0, audios_pendientes: [] };
+  if (!filas.length || !plutoActivo()) return { guardados: 0, audios_pendientes: [] };
 
   await asegurarEsquema();
   const db = getDb();
@@ -87,7 +94,7 @@ export async function recibirAudiosPluto(cuerpo: any): Promise<{ guardados: numb
         [...new Set<string>(i.audios.slice(0, 12).map((a: unknown) => texto(a, 12).toLowerCase()).filter(Boolean))],
       ),
     }));
-  if (!items.length) return { guardados: 0 };
+  if (!items.length || !plutoActivo()) return { guardados: 0 };
   await asegurarEsquema();
   const ahora = new Date().toISOString();
   await getDb().batch(items.map((i: any) => ({

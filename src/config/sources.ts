@@ -163,8 +163,12 @@ export const DEFAULT_SOURCES: SourceConfig[] = [
    * PLUTO TV, la última: es gratis y legal pero lleva ANUNCIOS dentro del stream, así que sirve de
    * fuente única y nunca pasa por delante de otro vídeo. Su catálogo lo reporta el móvil porque
    * Pluto decide por IP; ver src/scrapers/pluto.ts.
+   *
+   * APAGADA el 2026-09-21 a petición del usuario: los anuncios a mitad de película no compensan.
+   * Con `enabled: false` el importador, en vez de publicar, RETIRA todo lo de Pluto. Los datos de
+   * `pluto_titulos` se conservan: volver a encenderla es poner `true` y lanzar pluto.yml.
    */
-  { id: 'pluto', name: 'Pluto TV (desde el móvil)', enabled: true, priority: 8 },
+  { id: 'pluto', name: 'Pluto TV (desde el móvil)', enabled: false, priority: 8 },
 ];
 
 /**
