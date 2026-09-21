@@ -6,6 +6,7 @@ import { sortServersBySourcePriority, getPrimaryStream, paraElCliente, descartes
 import { hostNormalizado } from './hostsConCache';
 import { ficheroDentroDeNuestraCache } from '../utils/externalProxy';
 import { normalizeTitle, slugify, yearFromSlug, searchIndexKey } from '../utils/text';
+import { idDeFicha as idDeHfpro } from '../scrapers/hfpro';
 import { httpClient } from '../utils/httpClient';
 import { CacheStore } from '../cache/store';
 import { unwrapRedirector, canonicalArchiveOrg } from '../scrapers/directStream';
@@ -236,8 +237,22 @@ export function candidateIdsForUrl(url: string): string[] {
   const lamoviebot = deLamoviebot
     ? [`lmb-${deLamoviebot[1].toLowerCase()}`, `lmb-tv-${deLamoviebot[1].toLowerCase()}`]
     : [];
+  /**
+   * EL MOLDE DE HFPRO. Sus urls son
+   * `/datasets/<usuario>/<repo>/resolve/<sha>/SERIES/<CAT>/<Serie_Año>/TEMPORADA1/<fichero>.mp4`,
+   * y el último tramo —el nombre del fichero— NO sirve: identifica al episodio, no a la obra, y
+   * cambia en cada capítulo. La llave es la CARPETA DE LA SERIE, que está en medio de la ruta.
+   *
+   * Y el `<sha>` es la razón de que esto no pueda ser un simple `slugify(path)`: cambia cada vez
+   * que el dueño sube algo al repositorio, así que una url guardada ayer y otra de hoy apuntan al
+   * mismo fichero con rutas distintas.
+   */
+  const deHfpro = String(url).match(/\/resolve\/[^/]+\/(?:SERIES|PELICULAS)\/[^/]+\/([^/]+)/i);
+  const hfpro = deHfpro
+    ? [idDeHfpro('movie', deHfpro[1]), idDeHfpro('tvseries', deHfpro[1])]
+    : [];
   return Array.from(
-    new Set([...deArchive, ...videoapi, ...lamoviebot, last, last.toLowerCase(), slugify(path)])
+    new Set([...deArchive, ...videoapi, ...lamoviebot, ...hfpro, last, last.toLowerCase(), slugify(path)])
   ).filter(Boolean);
 }
 

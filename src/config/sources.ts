@@ -138,6 +138,25 @@ export const DEFAULT_SOURCES: SourceConfig[] = [
    * el CDN de vimeos que ya servíamos), pero es una fuente de unos cientos de fichas, no de miles.
    */
   { id: 'lamoviebot', name: 'LaMovie (API)', enabled: true, priority: 5 },
+  /**
+   * HFPRO va JUSTO DETRÁS DE ARCHIVE, y por la misma razón exacta que puso a Archive el segundo:
+   * sus urls NO CADUCAN Y NO DEPENDEN DE NADIE.
+   *
+   * Son ficheros, no embeds. La url del worker se vuelve a acuñar sola en cada petición y su firma
+   * solo lleva `Expires`, sin condición de dirección — o sea que **no va atada a IP** (medido el
+   * 2026-09-20, con 206 y 1 MB de Matroska real). Lo que se guarda hoy sirve dentro de un mes,
+   * mientras que todo lo que hay por debajo en esta lista publica enlaces que hay que volver a
+   * acuñar en cada reproducción.
+   *
+   * Y lo que la separa de Archive: su identidad es aún más pobre. Archive tiene tres sitios donde
+   * mirar el nombre; aquí hay UNO, el del fichero. Por eso el importador exige `verified` de
+   * nuestro propio matcher y tira lo que solo se parece — el 17 % de la muestra se queda fuera por
+   * no traer año, y se paga a sabiendas.
+   *
+   * Medido al entrar: 100 películas, 789 series y 13.340 episodios; 83 % identificables y
+   * proyección de ~513 series nuevas con ~7.193 episodios.
+   */
+  { id: 'hfpro', name: 'HFPro (ficheros directos)', enabled: true, priority: 3 },
   { id: 'tioplus', name: 'TioPlus / PelisPlus Latino', enabled: true, priority: 6 },
   { id: 'fuegocine', name: 'FuegoCine', enabled: true, priority: 7 },
 ];
