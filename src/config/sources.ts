@@ -114,8 +114,24 @@ export const DEFAULT_SOURCES: SourceConfig[] = [
    * segmento real antes de escribirlos) y porque su embed es de un tercero estable que volvemos a
    * resolver al reproducir, no una url acuñada que caduca.
    *
-   * Medido al entrar (2026-09-20): ~656 fichas que el catálogo no tenía, y de 164 servidores solo
-   * el 18 % cae en el CDN de vimeos que ya servíamos — o sea que NO es el caso cinecalidad.
+   * SU APORTE REAL ES MUCHO MENOR DE LO QUE PROYECTÉ, y el número corregido vale más que el
+   * bonito. Al entrar medí «~656 fichas nuevas» comparando `tmdb_id` contra el catálogo. Ese
+   * número contaba SOLAPE, no contenido reproducible, y son cosas distintas:
+   *
+   *   · su catálogo se parte en dos poblaciones: fichas con embeds de terceros (goodstream,
+   *     hlswish, videoapp, vimeos) y fichas cuyo único «reproductor» es
+   *     `lamovie.org/embed.html?v=1` — la MISMA página estática para todas, titulada «Contenido
+   *     no disponible». Detrás no hay vídeo ni lo hubo;
+   *   · las primeras entraron en las corridas del 2026-09-20; las ~415 que quedaron en cola son
+   *     casi todas de la segunda clase y **no se recuperan escribiendo código**.
+   *
+   * Real, contado sobre la base: **277 fichas, 210 con servidores que reproducen**. Y ojo — el
+   * 54-de-60 de la primera tanda estaba inflado por el señuelo de `voe.sx`, que pasaba la
+   * verificación con un clip de prueba. Sin él, una tanda de 50 minutos dio 8 fichas y 45
+   * capítulos.
+   *
+   * Sigue mereciendo la pena (no es el caso cinecalidad: de 164 servidores solo el 18 % caía en
+   * el CDN de vimeos que ya servíamos), pero es una fuente de unos cientos de fichas, no de miles.
    */
   { id: 'lamoviebot', name: 'LaMovie (API)', enabled: true, priority: 5 },
   { id: 'tioplus', name: 'TioPlus / PelisPlus Latino', enabled: true, priority: 6 },

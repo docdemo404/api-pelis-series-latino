@@ -98,6 +98,18 @@ const HOSTS_QUE_NO_ENTREGAN = [
    * material de demostración. Esto es la segunda cerradura: ni se guarda el embed.
    */
   'voe.sx',
+  /**
+   * `lamovie.org` COMO «reproductor» ES UN ESTANTE VACÍO, no un extractor que nos falte.
+   *
+   * Cuando una ficha suya no tiene ningún host de terceros, publica como embed
+   * `https://lamovie.org/embed.html?v=1` — **la misma url para todas**, una página estática de
+   * 2,5 KB titulada «Contenido no disponible». No hay vídeo detrás ni lo hubo.
+   *
+   * Importa saberlo porque explica el rendimiento real de la fuente: de las 415 fichas que
+   * quedaban en cola el 2026-09-20, la inmensa mayoría son de esta clase. No se recuperan
+   * escribiendo código.
+   */
+  'lamovie.org/embed',
   'filemoon',    // prueba de trabajo (`pow.js`) antes de soltar el vídeo — §5.5
   'waaw',        // exige prueba de interacción humana y firma antifraude — §5.5
   'krakenfiles', // reCAPTCHA — §5.5
