@@ -540,8 +540,9 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
     // se sacrifica vigencia por priorizarla. Si falla, el cliente conserva el failover completo.
     if (getSourceId(s) === 'netmirror') return 5;
     // Pluto lleva anuncios dentro del stream: vale como fuente única, pero si la ficha tiene otro
-    // vídeo directo, ese va antes.
-    if (getSourceId(s) === 'pluto') return 1;
+    // vídeo directo, ese va antes. Por DEBAJO de `proxy` (1), no empatado: con 1 empataba con
+    // videoapi y el desempate lo ponía primero.
+    if (getSourceId(s) === 'pluto') return 0.5;
     // `public` es el más rápido que hay y estaba puntuando como `proxy`: su URL no caduca ni va
     // atada a una IP, así que se entrega tal cual y el reproductor habla DIRECTAMENTE con el CDN —
     // cero saltos, cero bytes nuestros, y adelantar cuesta lo que el CDN tarde. Empatarlo con el
