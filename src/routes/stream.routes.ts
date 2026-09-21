@@ -961,13 +961,23 @@ router.get(`${DIRECT_BASE}/seg`, async (req: Request, res: Response, next: NextF
       ? serveManifest(res, url, referer, embedParam, cacheControl, rewriteMode)
       : pipeUpstream(req, res, url, referer, embedParam, cacheControl, rewriteMode));
 
+    const t0 = Date.now();
+    let host = '';
+    try { host = new URL(target).hostname; } catch {}
     const failed = await serve(target);
-    if (failed === null) return;
+    if (failed === null) {
+      if (Date.now() - t0 > 3000) console.log(`[seg] lento ${Date.now() - t0}ms ${host}`);
+      return;
+    }
 
     // 403/410 a mitad de reproducción = token caducado o cambio de IP entre invocaciones.
     if ((failed === 403 || failed === 410) && embedUrl) {
       const refreshed = await refreshTarget(target, embedUrl);
-      if (refreshed && (await serve(refreshed)) === null) return;
+      const segundo = refreshed ? await serve(refreshed) : -1;
+      console.log(`[seg] ${failed}→refresco ${refreshed ? 'acuñado' : 'sin acuñar'} → ${segundo === null ? 'ok' : segundo} ${Date.now() - t0}ms ${host}`);
+      if (segundo === null) return;
+    } else {
+      console.log(`[seg] fallo ${failed} ${Date.now() - t0}ms ${host}`);
     }
     return sendErrorResponse(res, 502, 'DIRECT_UNAVAILABLE', 'El servidor de vídeo rechazó el segmento. Prueba otro servidor directo.');
   } catch (err) {
