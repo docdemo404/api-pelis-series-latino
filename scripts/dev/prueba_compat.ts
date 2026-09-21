@@ -7,6 +7,7 @@
 import 'dotenv/config';
 import { supabase, getSupabaseAdmin } from '../../src/services/supabaseService';
 import { asegurarEsquema, getDb } from '../../src/db/libsql';
+import { filasEscritas } from '../../src/db/contadorEscrituras';
 
 const db = getSupabaseAdmin();
 let fallos = 0;
@@ -115,6 +116,27 @@ async function main() {
   ok('columna ausente → error 42703', eCol?.code === '42703', eCol);
   const { error: eTab } = await db.from('tabla_que_no_existe').select('id').limit(1);
   ok('tabla ausente → error 42P01', eTab?.code === '42P01', eTab);
+
+  // ── no se escribe lo que no cambia (cuota de filas escritas) ──
+  const antes = filasEscritas();
+  const igual = (await db.from('media_items').select('servers,has_streams').eq('id', 'md-1').maybeSingle()).data;
+  const { error: eIg } = await db.from('media_items').update({ servers: igual.servers, has_streams: igual.has_streams, updated_at: new Date().toISOString() }).eq('id', 'md-1');
+  ok('update idéntico (solo cambia updated_at) no escribe', !eIg && filasEscritas() === antes, { eIg, filas: filasEscritas() - antes });
+  const { data: devuelta } = await db.from('media_items').update({ has_streams: igual.has_streams }).eq('id', 'md-1').select('id');
+  ok('update idéntico con .select() devuelve la fila igual', devuelta?.length === 1 && filasEscritas() === antes, devuelta);
+  await db.from('media_items').update({ rating: 8.2 }).eq('id', 'md-1');
+  ok('update que cambia algo sí escribe 1 fila', filasEscritas() === antes + 1, filasEscritas() - antes);
+  // total_changes() sí cuenta lo que escribe el disparador (rowsAffected no).
+  const tc = async () => Number((await getDb().execute('SELECT total_changes() AS n')).rows[0].n);
+  let t0 = await tc();
+  await getDb().execute("UPDATE media_items SET servers = servers WHERE id='md-1'");
+  ok('disparador no reescribe enlace_permanente si no cambia (1 cambio, no 2)', (await tc()) - t0 === 1, (await tc()) - t0);
+  const r0 = filasEscritas();
+  await db.from('media_items').upsert({ id: 'md-1', tmdb_id: 1, type: 'movie', title: 'Dune', original_title: 'Dune' }, { onConflict: 'id' });
+  ok('upsert idéntico no escribe', filasEscritas() === r0, filasEscritas() - r0);
+  await db.from('media_items').upsert({ id: 'md-1', tmdb_id: 1, type: 'movie', title: 'Dune (2021)', original_title: 'Dune' }, { onConflict: 'id' });
+  ok('upsert que cambia sí escribe', filasEscritas() === r0 + 1, filasEscritas() - r0);
+  await db.from('media_items').update({ title: 'Dune' }).eq('id', 'md-1');
 
   // ── vistas y rpc ──
   const { data: emb, error: eEmb } = await db.from('embeds_publicados').select('embed_url,sello,fichas').order('sello', { ascending: true, nullsFirst: true }).limit(10);

@@ -280,6 +280,23 @@ async function esquemaSiHaceFalta(): Promise<void> {
   await asegurarEsquema();
 }
 
+/**
+ * NO SE ESCRIBE LO QUE NO CAMBIA.
+ *
+ * La cuota que se agota en Turso es de FILAS ESCRITAS, y un UPDATE que deja la fila igual cuenta
+ * lo mismo que uno que la cambia. Muchos barridos guardan la ficha entera después de mirarla, cambie
+ * o no. Así que todo UPDATE (y el DO UPDATE de un upsert) lleva además la condición «alguna de las
+ * columnas que se ponen es distinta de la que hay»: si ninguna lo es, SQLite no toca la fila y no
+ * se factura.
+ *
+ * `updated_at` NO cuenta como cambio: guardar la misma ficha solo para moverle la fecha era
+ * justamente el gasto que se quiere quitar, y esa columna no es fiable para nada (ver memoria
+ * «updated_at no es fiable»). El resto de fechas —`streams_checked_at`, sellos dentro de
+ * `servers`— SÍ cuentan: hay barridos que eligen qué mirar por la fecha de la última vez, y si no
+ * se moviera repetirían siempre las mismas fichas.
+ */
+const NO_CUENTA_COMO_CAMBIO = new Set(['updated_at']);
+
 /* ─────────────────────────────── el constructor ─────────────────────────────── */
 
 type Accion = 'select' | 'insert' | 'update' | 'upsert' | 'delete';
@@ -396,7 +413,12 @@ export class Consulta<T = any[]> implements PromiseLike<Respuesta<T>> {
         const set = claves
           .filter(k => !enConflicto.includes(k))
           .map(k => `${ident(k)} = excluded.${ident(k)}`);
-        const accion = this.ignorarDuplicados || !set.length ? 'DO NOTHING' : `DO UPDATE SET ${set.join(', ')}`;
+        // Con RETURNING no se pone la guarda: una fila sin cambios no se devolvería. Nadie lo usa hoy.
+        const distintas = claves
+          .filter(k => !enConflicto.includes(k) && !NO_CUENTA_COMO_CAMBIO.has(k))
+          .map(k => `${t}.${ident(k)} IS NOT excluded.${ident(k)}`);
+        const guarda = !this.devolver && distintas.length ? ` WHERE ${distintas.join(' OR ')}` : '';
+        const accion = this.ignorarDuplicados || !set.length ? 'DO NOTHING' : `DO UPDATE SET ${set.join(', ')}${guarda}`;
         return {
           sql: `INSERT INTO ${t} (${cols}) VALUES (${marcas}) ON CONFLICT (${enConflicto.map(ident).join(', ')}) ${accion}${ret}`,
           args,
@@ -409,7 +431,13 @@ export class Consulta<T = any[]> implements PromiseLike<Respuesta<T>> {
       if (!claves.length) return [];
       const set = claves.map(k => `${ident(k)} = ?`).join(', ');
       const args = claves.map(k => codificar(this.tabla, k, this.valores[k]));
-      return [{ sql: `UPDATE ${t} SET ${set}${w.sql}${ret}`, args: [...args, ...w.args] }];
+      const comparables = claves.filter(k => !NO_CUENTA_COMO_CAMBIO.has(k));
+      const guarda = comparables.length
+        ? `${w.sql ? ' AND' : ' WHERE'} (${comparables.map(k => `${ident(k)} IS NOT ?`).join(' OR ')})`
+        : '';
+      const argsGuarda = comparables.map(k => codificar(this.tabla, k, this.valores[k]));
+      // Sin RETURNING: las filas que ya estaban así no saldrían. Las devuelve `ejecutar` con un SELECT.
+      return [{ sql: `UPDATE ${t} SET ${set}${w.sql}${guarda}`, args: [...args, ...w.args, ...argsGuarda] }];
     }
     if (this.accion === 'delete') {
       return [{ sql: `DELETE FROM ${t}${w.sql}${ret}`, args: w.args }];
@@ -443,6 +471,16 @@ export class Consulta<T = any[]> implements PromiseLike<Respuesta<T>> {
           ? [await db.execute(sentencias[0])]
           : await db.batch(sentencias, 'write');
         const afectadas = resultados.reduce((n, r) => n + (r.rowsAffected || 0), 0);
+        /*
+         * `update(...).select()` devuelve las filas que CUMPLEN EL FILTRO, se hayan reescrito o ya
+         * estuvieran así (ver NO_CUENTA_COMO_CAMBIO). Es lo que esperan `escribirFila` y
+         * `puedeEscribirCatalogo`: «la fila está como pedí». Un bloqueo de escritura no se cuela
+         * por aquí: Turso rechaza la sentencia UPDATE entera aunque no toque ninguna fila.
+         */
+        if (this.accion === 'update' && this.devolver) {
+          const rs = await db.execute(this.sentenciaDeLectura());
+          return this.darForma(filasDe(this.tabla, rs), afectadas, 200);
+        }
         const data = this.devolver ? resultados.flatMap(r => filasDe(this.tabla, r)) : [];
         return this.darForma(data, afectadas, this.devolver ? 200 : 204);
       }

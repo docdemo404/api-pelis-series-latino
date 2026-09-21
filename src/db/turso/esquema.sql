@@ -103,6 +103,12 @@ CREATE INDEX IF NOT EXISTS idx_media_manual_servers    ON media_items (id) WHERE
 -- jsonb_path_exists; aquí lo recalculan estos dos disparadores cada vez que cambian `servers` o
 -- `seasons`. Recorre con json_tree: `fullkey` de un servidor de capítulo acaba en
 -- `.episodes[N].servers[M]`, y el de ficha en `$[N]`.
+-- DESDE v5 SOLO ESCRIBEN SI EL VALOR CAMBIA. Antes cada guardado de `servers`/`seasons` costaba DOS
+-- filas escritas (la del job y la de este disparador), aunque `enlace_permanente` quedara igual; y
+-- la cuota que se agota en Turso es justo de filas escritas. Se recrean (DROP) porque
+-- CREATE TRIGGER IF NOT EXISTS no cambia uno que ya existe.
+DROP TRIGGER IF EXISTS trg_media_enlace_permanente_ins;
+DROP TRIGGER IF EXISTS trg_media_enlace_permanente_upd;
 CREATE TRIGGER IF NOT EXISTS trg_media_enlace_permanente_ins
 AFTER INSERT ON media_items
 BEGIN
@@ -115,7 +121,17 @@ BEGIN
                   AND s.fullkey GLOB '$[[]*].episodes[[]*].servers[[]*]'
                   AND json_extract(s.value, '$.direct_mode') = 'public'
                   AND json_extract(s.value, '$.direct_stream') IS NOT NULL)
-    ) WHERE id = NEW.id;
+    )
+    WHERE id = NEW.id AND enlace_permanente IS NOT (
+        EXISTS (SELECT 1 FROM json_each(NEW.servers) s
+                WHERE json_extract(s.value, '$.direct_mode') = 'public'
+                  AND json_extract(s.value, '$.direct_stream') IS NOT NULL)
+        OR EXISTS (SELECT 1 FROM json_tree(NEW.seasons) s
+                WHERE s.type = 'object'
+                  AND s.fullkey GLOB '$[[]*].episodes[[]*].servers[[]*]'
+                  AND json_extract(s.value, '$.direct_mode') = 'public'
+                  AND json_extract(s.value, '$.direct_stream') IS NOT NULL)
+    );
 END;
 
 CREATE TRIGGER IF NOT EXISTS trg_media_enlace_permanente_upd
@@ -130,7 +146,17 @@ BEGIN
                   AND s.fullkey GLOB '$[[]*].episodes[[]*].servers[[]*]'
                   AND json_extract(s.value, '$.direct_mode') = 'public'
                   AND json_extract(s.value, '$.direct_stream') IS NOT NULL)
-    ) WHERE id = NEW.id;
+    )
+    WHERE id = NEW.id AND enlace_permanente IS NOT (
+        EXISTS (SELECT 1 FROM json_each(NEW.servers) s
+                WHERE json_extract(s.value, '$.direct_mode') = 'public'
+                  AND json_extract(s.value, '$.direct_stream') IS NOT NULL)
+        OR EXISTS (SELECT 1 FROM json_tree(NEW.seasons) s
+                WHERE s.type = 'object'
+                  AND s.fullkey GLOB '$[[]*].episodes[[]*].servers[[]*]'
+                  AND json_extract(s.value, '$.direct_mode') = 'public'
+                  AND json_extract(s.value, '$.direct_stream') IS NOT NULL)
+    );
 END;
 
 -- ── Lo que miden los aparatos (migraciones 008 y 013) ──────────────────────────────────────────

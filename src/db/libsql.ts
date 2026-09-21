@@ -19,6 +19,7 @@
 import type { Client } from '@libsql/client';
 import fs from 'fs';
 import path from 'path';
+import { conContador } from './contadorEscrituras';
 
 /**
  * En Vercel se usa la variante `web` del cliente: solo HTTP, sin el binario nativo de SQLite
@@ -29,7 +30,7 @@ import path from 'path';
 const { createClient } = process.env.VERCEL ? require('@libsql/client/web') : require('@libsql/client');
 
 /** Súbelo cada vez que cambie esquema.sql: es lo que hace que se vuelva a aplicar. */
-export const VERSION_DEL_ESQUEMA = 4;
+export const VERSION_DEL_ESQUEMA = 5;
 
 const ARCHIVO_LOCAL = 'file:data/catalogo.db';
 
@@ -60,7 +61,8 @@ export function getDb(): Client {
     fs.mkdirSync(path.resolve('data'), { recursive: true });
     if (!process.env.SILENCIO_DB) console.log(`   ℹ base local: ${url} (sin TURSO_DATABASE_URL)`);
   }
-  const nuevo: Client = createClient({ url, authToken: process.env.TURSO_AUTH_TOKEN || undefined });
+  // Envuelto para contar filas escritas: la cuota que se agota. Ver contadorEscrituras.ts.
+  const nuevo: Client = conContador(createClient({ url, authToken: process.env.TURSO_AUTH_TOKEN || undefined }));
   cliente = nuevo;
   return nuevo;
 }
@@ -89,7 +91,20 @@ export function asegurarEsquema(): Promise<void> {
       const actual = await versionAplicada();
       if (actual === VERSION_DEL_ESQUEMA) return;
       const archivo = path.join(__dirname, 'turso', 'esquema.sql');
-      await db.executeMultiple(fs.readFileSync(archivo, 'utf8'));
+      try {
+        await db.executeMultiple(fs.readFileSync(archivo, 'utf8'));
+      } catch (e: any) {
+        /*
+         * CON LA CUOTA DE ESCRITURAS AGOTADA, EL DDL TAMBIÉN SE RECHAZA. Lanzar aquí tumbaría todo
+         * el proceso, lecturas incluidas, por no poder subir de versión. Se sigue con el esquema
+         * que haya y se reintenta en el siguiente proceso: el cambio llega solo cuando vuelvan.
+         */
+        if (/BLOCKED|writes are blocked/i.test(String(e?.message || e))) {
+          console.warn(`   ⚠ esquema v${VERSION_DEL_ESQUEMA} pendiente: Turso bloquea escrituras (se sigue con v${actual})`);
+          return;
+        }
+        throw e;
+      }
       await db.execute({
         sql: "INSERT INTO esquema (clave, valor) VALUES ('version', ?) ON CONFLICT (clave) DO UPDATE SET valor = excluded.valor",
         args: [VERSION_DEL_ESQUEMA],

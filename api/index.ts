@@ -10,6 +10,7 @@ import mediaRoutes from '../src/routes/media.routes';
 import streamRoutes from '../src/routes/stream.routes';
 import netmirrorRoutes from '../src/routes/netmirror.routes';
 import plutoRoutes from '../src/routes/pluto.routes';
+import { filasEscritas } from '../src/db/contadorEscrituras';
 import subtitulosRoutes from '../src/routes/subtitulos.routes';
 import { sendErrorResponse } from '../src/utils/apiHelpers';
 import { publicOrigin, withAbsoluteDirectStreams } from '../src/utils/publicUrl';
@@ -23,6 +24,18 @@ const app = express();
 // otro origen no puede LEER el Content-Range que devuelve el proxy, y el salto por la barra de
 // tiempo se degrada aunque el servidor esté respondiendo 206 correctamente.
 app.use(cors({ exposedHeaders: ['Content-Range', 'Content-Length', 'Accept-Ranges'] }));
+
+// Cuántas filas escribe cada petición: la cuota que se agota en Turso es de filas escritas y la API
+// también escribe (guardar servidores al abrir una ficha, informes de la app). Solo se apunta si
+// escribió algo. En una lambda con peticiones simultáneas el reparto es aproximado.
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const antes = filasEscritas();
+  res.on('finish', () => {
+    const escritas = filasEscritas() - antes;
+    if (escritas > 0) console.log(`[escrituras] ${req.method} ${req.path} → ${escritas} filas`);
+  });
+  next();
+});
 
 // El parseo de JSON se salta el camino de vídeo. Esas rutas son GET sin cuerpo y se piden cientos
 // de veces por película: no tiene sentido montarles un parser de body a cada segmento.
