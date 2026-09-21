@@ -346,6 +346,8 @@ SELECT
 FROM servidores_publicados
 WHERE embed_url IS NOT NULL
   AND direct_stream IS NOT NULL
+  -- Pluto solo lo abre el móvil (pluto://): ni --verificar ni --purge pueden juzgarlo.
+  AND embed_url NOT LIKE 'pluto://%'
 GROUP BY embed_url;
 
 -- Hasta ocho servidores por host, el sello más fresco primero. Para --entrega.
@@ -355,7 +357,8 @@ FROM (
     SELECT sp.*,
            row_number() OVER (PARTITION BY host ORDER BY verified_at DESC) AS puesto
     FROM servidores_publicados sp
-    WHERE embed_url IS NOT NULL AND direct_stream IS NOT NULL
+    -- Sin Pluto: --entrega lo envolvería en /stream/direct, daría 400 y le quitaría el sello.
+    WHERE embed_url IS NOT NULL AND direct_stream IS NOT NULL AND embed_url NOT LIKE 'pluto://%'
 )
 WHERE puesto <= 8;
 

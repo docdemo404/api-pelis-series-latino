@@ -29,7 +29,7 @@ import path from 'path';
 const { createClient } = process.env.VERCEL ? require('@libsql/client/web') : require('@libsql/client');
 
 /** Súbelo cada vez que cambie esquema.sql: es lo que hace que se vuelva a aplicar. */
-export const VERSION_DEL_ESQUEMA = 3;
+export const VERSION_DEL_ESQUEMA = 4;
 
 const ARCHIVO_LOCAL = 'file:data/catalogo.db';
 
