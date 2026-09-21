@@ -106,9 +106,13 @@ export const DEFAULT_SOURCES: SourceConfig[] = [
    * Se parece a videoapi en la puerta —se le habla por una API JSON, no se recorre un índice— pero
    * NO en lo que importa para la identidad: videoapi DIRECCIONA por `tmdb_id`, o sea que su número
    * es un dato publicado; este Worker scrapea lamovie.org y le pega después un id que dedujo su
-   * propio matcher. Medido sobre 119 películas: acierta el 97 % y falla el 3 %, siempre por el
-   * mismo sitio —el homónimo del mismo año, que solo el título original separa—. Por eso su id
-   * entra como candidatura y `identidadRespaldada` lo verifica antes de escribir nada.
+   * propio matcher, así que su id entra como CANDIDATURA y `identidadRespaldada` lo verifica antes
+   * de escribir nada.
+   *
+   * (Aquí ponía «acierta el 97 %». Ese número era de una comprobación CIRCULAR —comparaba su
+   * `original_title`, que ella rellena desde TMDB, contra el de TMDB— y se retiró. Lo que vale
+   * está en `juzgarIdentidad`: el segundo voto de `videoapp.zip` y el slug. Un número medido mal
+   * sobrevive a quien lo midió, así que se corrige donde se leyó.)
    *
    * Delante de tioplus y fuegocine porque sus servidores se guardan ya COMPROBADOS (se baja un
    * segmento real antes de escribirlos) y porque su embed es de un tercero estable que volvemos a
