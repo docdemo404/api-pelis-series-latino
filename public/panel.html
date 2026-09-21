@@ -284,7 +284,7 @@
               <div class="d-flex gap-2 align-items-center mb-2">
                 <label class="text-secondary small m-0">Temporada</label>
                 <select id="manualTemporada" class="form-select form-select-sm bg-dark text-white border-secondary" style="max-width:140px"></select>
-                <span class="text-secondary small">una url por capítulo (varias separadas por coma). Vaciar una caja quita esa url.</span>
+                <span class="text-secondary small">una url por capítulo (varias, separadas por coma). Una url que lleve comas dentro —los <code>.urlset</code> de calidades e idiomas— se pega entera, no hace falta tocarla. Vaciar una caja quita esa url.</span>
               </div>
               <div id="manualCapitulos" class="mb-3" style="max-height:340px;overflow:auto"></div>
             </div>
@@ -719,10 +719,20 @@
         Object.keys(manualCapUrls).forEach(function (clave) {
           const partes = clave.split('x');
           const v = String(manualCapUrls[clave] || '').trim();
+          /**
+           * La caja del capítulo viaja TAL CUAL y la parte el servidor.
+           *
+           * Aquí se partía por coma, y hay hosts que meten comas DENTRO de una sola url: el
+           * `.urlset` de nginx-vod lista las calidades y los idiomas separados por comas en la
+           * misma ruta. Una de esas llegaba hecha nueve trozos inválidos y el panel contestaba
+           * «ninguna url entregó vídeo» sobre un enlace que reproduce. Quien decide dónde acaba
+           * una url es `utils/urlsPegadas`, en el servidor, y solo ahí: dos criterios para lo
+           * mismo acaban siempre con uno de los dos sin arreglar.
+           */
           episodios.push({
             season: Number(partes[0]),
             episode: Number(partes[1]),
-            urls: v ? v.split(',').map(function (x) { return x.trim(); }).filter(Boolean) : [],
+            urls: v ? [v] : [],
           });
         });
       }

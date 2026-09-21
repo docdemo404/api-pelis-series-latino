@@ -10,6 +10,7 @@ import { CatalogService } from '../services/catalogService';
 import { refrescarHostsConCache, ponerHostConCache, hostsConCache } from '../services/hostsConCache';
 import { leerAjuste, guardarAjuste } from '../utils/ajustesRemotos';
 import { traducirYNormalizar } from '../utils/idiomas';
+import { urlsDelCuerpo } from '../utils/urlsPegadas';
 import { getSupabaseAdmin } from '../services/supabaseService';
 import { hostsDelCatalogo } from '../services/catalogService';
 import { medidaDeAparatos, refrescarMedidasDeAparatos } from '../services/medidasDeAparatos';
@@ -205,14 +206,21 @@ router.post('/api/v1/panel/manual', async (req: Request, res: Response, next: Ne
     const b = (req.body ?? {}) as Record<string, unknown>;
     const tmdbId = Number(b.tmdb_id);
     const tipo = String(b.type) === 'tvseries' ? 'tvseries' : 'movie';
-    const urls = Array.isArray(b.urls)
-      ? (b.urls as unknown[]).map(u => String(u))
-      : String(b.urls || '').split(/[\s,;]+/);
+    /**
+     * El corte en urls lo hace `urlsDelCuerpo`, y no un `split` por comas aquí.
+     *
+     * Hay hosts que construyen UNA url con comas dentro —el `.urlset` de nginx-vod lista las
+     * calidades y los idiomas así—, y partiendo por coma esa url llegaba hecha nueve trozos
+     * inválidos; el panel contestaba «ninguna url entregó vídeo» sobre un enlace que reproduce.
+     * Ver `utils/urlsPegadas`. Se aplica también a los elementos de la lista, porque el panel
+     * manda una línea por elemento y en una línea puede haber pegadas dos urls.
+     */
+    const urls = urlsDelCuerpo(b.urls);
     const episodios = Array.isArray(b.episodios)
       ? (b.episodios as any[]).map(e => ({
           season: Number(e?.season) || 1,
           episode: Number(e?.episode) || 1,
-          urls: Array.isArray(e?.urls) ? e.urls.map((u: unknown) => String(u)) : [],
+          urls: urlsDelCuerpo(e?.urls),
         }))
       : [];
 
