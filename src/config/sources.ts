@@ -139,6 +139,12 @@ export const DEFAULT_SOURCES: SourceConfig[] = [
    */
   { id: 'lamoviebot', name: 'LaMovie (API)', enabled: true, priority: 5 },
   /**
+   * UNLIMPLAY va AL LADO DE LAMOVIEBOT porque guarda lo mismo: embeds de terceros (streamwish,
+   * filelions) que resolvemos nosotros al reproducir. Pero con la identidad de videoapi: se le
+   * pregunta por un `tmdb_id` y contesta por esa obra o por ninguna. Ver src/scrapers/unlimplay.ts.
+   */
+  { id: 'unlimplay', name: 'UnlimPlay (por TMDB id)', enabled: true, priority: 5 },
+  /**
    * HFPRO va JUSTO DETRÁS DE ARCHIVE, y por la misma razón exacta que puso a Archive el segundo:
    * sus urls NO CADUCAN Y NO DEPENDEN DE NADIE.
    *

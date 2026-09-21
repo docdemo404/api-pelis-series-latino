@@ -251,8 +251,11 @@ export function candidateIdsForUrl(url: string): string[] {
   const hfpro = deHfpro
     ? [idDeHfpro('movie', deHfpro[1]), idDeHfpro('tvseries', deHfpro[1])]
     : [];
+  /** UnlimPlay: `/f/embed/movie/<tmdb>` y `/f/embed/tv/<tmdb>/<t>/<c>`; la identidad es el tmdb de en medio. */
+  const deUnlimplay = String(url).match(/unlimplay\.com\/f\/embed\/(?:movie|tv)\/(\d+)/i);
+  const unlimplay = deUnlimplay ? [`unl-${deUnlimplay[1]}`, `unl-tv-${deUnlimplay[1]}`] : [];
   return Array.from(
-    new Set([...deArchive, ...videoapi, ...lamoviebot, ...hfpro, last, last.toLowerCase(), slugify(path)])
+    new Set([...deArchive, ...videoapi, ...lamoviebot, ...hfpro, ...unlimplay, last, last.toLowerCase(), slugify(path)])
   ).filter(Boolean);
 }
 
