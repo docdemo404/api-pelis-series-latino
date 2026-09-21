@@ -134,6 +134,8 @@ export function effectiveDirectMode(server: ServerOption): DirectMode | undefine
   // como si fuese un embed desconocido la mandaba por `bestMode(CONSERVATIVE)` y la convertía
   // falsamente en `proxy`, aunque el endpoint entrega un 302 fresco al CDN para Android.
   if (getSourceId(server) === 'netmirror') return server.direct_mode || 'redirect';
+  // `pluto://` lo resuelve el móvil al reproducir; no hay nada que decidir aquí.
+  if (getSourceId(server) === 'pluto') return 'public';
 
   /**
    * PRIMERO LO QUE NO LLEVA FIRMA, y va antes que `bestMode` A PROPÓSITO.
@@ -537,6 +539,9 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
     // master HLS multi-audio y subtítulos. Su URL estable acuña el 302 al pulsar Play, así que no
     // se sacrifica vigencia por priorizarla. Si falla, el cliente conserva el failover completo.
     if (getSourceId(s) === 'netmirror') return 5;
+    // Pluto lleva anuncios dentro del stream: vale como fuente única, pero si la ficha tiene otro
+    // vídeo directo, ese va antes.
+    if (getSourceId(s) === 'pluto') return 1;
     // `public` es el más rápido que hay y estaba puntuando como `proxy`: su URL no caduca ni va
     // atada a una IP, así que se entrega tal cual y el reproductor habla DIRECTAMENTE con el CDN —
     // cero saltos, cero bytes nuestros, y adelantar cuesta lo que el CDN tarde. Empatarlo con el

@@ -249,6 +249,29 @@ CREATE TABLE IF NOT EXISTS netmirror_verificaciones (
 CREATE INDEX IF NOT EXISTS idx_netmirror_verificaciones_quorum
     ON netmirror_verificaciones (trabajo_id, ronda, resultado_hash, red_hash);
 
+-- Pluto TV: lo que el MÓVIL ve en su catálogo (Pluto decide por la IP; GitHub vería otro). El
+-- aparato manda datos crudos y los audios del master; el importador identifica contra TMDB y
+-- publica. Ver src/scrapers/pluto.ts.
+CREATE TABLE IF NOT EXISTS pluto_titulos (
+    pluto_id        TEXT PRIMARY KEY,
+    nombre          TEXT NOT NULL,
+    anio            INTEGER,
+    minutos         INTEGER,
+    directores      TEXT NOT NULL DEFAULT '[]',
+    pais            TEXT,
+    primera_vez_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    visto_at        TEXT NOT NULL,
+    -- Idiomas de audio del master ('es', 'en'…), tal como los mira el móvil. NULL = sin mirar.
+    audios          TEXT,
+    audios_at       TEXT,
+    -- 'verificada' | 'ambigua' | 'sin_director' | 'sin_anio' | 'nada'. NULL = sin identificar.
+    veredicto       TEXT,
+    tmdb_id         INTEGER,
+    identificado_at TEXT,
+    publicado_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pluto_titulos_veredicto ON pluto_titulos (veredicto, audios_at);
+
 -- ═══════════════════════════════════════════════════════════════════════════════════════════════
 -- VISTAS (migraciones 018, 019 y 020). Un servidor / un capítulo por fila, para que los barridos
 -- pregunten sin bajarse el catálogo. Van con DROP + CREATE porque SQLite no tiene CREATE OR

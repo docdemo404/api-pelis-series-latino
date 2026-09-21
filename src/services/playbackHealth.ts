@@ -463,6 +463,13 @@ export async function revisarServidores(
     }
 
     /**
+     * Pluto no se sondea NUNCA desde aquí: su `pluto://movie/<id>` solo lo abre el móvil con su
+     * propia sesión (el JWT lleva su IP). Un sondeo lo daría por muerto con una excepción de url.
+     * Lo mantiene vivo el sello que pone el importador cada vez que el móvil lo ve en Pluto.
+     */
+    if (String((servidor as any)?.source_id || '').toLowerCase() === 'pluto') continue;
+
+    /**
      * UN FICHERO NO SE JUZGA CON LAS REGLAS DE UN REPRODUCTOR.
      *
      * Un servidor `public` no lleva detrás una página con un reproductor: su `embed_url` ES el

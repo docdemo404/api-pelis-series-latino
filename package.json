@@ -17,6 +17,7 @@
     "importar:netmirror": "ts-node scripts/importarNetmirror.ts",
     "importar:lamoviebot": "ts-node scripts/importarLamoviebot.ts",
     "importar:hfpro": "ts-node scripts/importarHfpro.ts",
+    "importar:pluto": "ts-node scripts/importarPluto.ts",
     "preparar:netmirror": "ts-node scripts/prepararColaNetmirror.ts",
     "check:catalog": "ts-node scripts/checkCatalog.ts",
     "check:sources": "ts-node scripts/checkSources.ts",

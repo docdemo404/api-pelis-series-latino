@@ -1,0 +1,39 @@
+name: Pluto TV — identificar y publicar lo que ve el móvil
+
+# El catálogo de Pluto lo manda la app desde el móvil (Pluto decide por IP; este runner vería el
+# de EE. UU.). Aquí solo se habla con TMDB y con Turso: identificar, publicar y retirar.
+# Ver la cabecera de `scripts/importarPluto.ts`.
+
+on:
+  schedule:
+    - cron: '50 */3 * * *'
+  workflow_dispatch:
+    inputs:
+      minutos:
+        description: 'Presupuesto de reloj'
+        required: false
+        default: '40'
+
+concurrency:
+  group: pluto
+  cancel-in-progress: false
+
+jobs:
+  importar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+      - run: npm ci
+      - name: Identificar, publicar y retirar
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+        run: npx ts-node --transpile-only scripts/importarPluto.ts --minutos=${{ inputs.minutos || 40 }}

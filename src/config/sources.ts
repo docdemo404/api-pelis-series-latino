@@ -159,6 +159,12 @@ export const DEFAULT_SOURCES: SourceConfig[] = [
   { id: 'hfpro', name: 'HFPro (ficheros directos)', enabled: true, priority: 3 },
   { id: 'tioplus', name: 'TioPlus / PelisPlus Latino', enabled: true, priority: 6 },
   { id: 'fuegocine', name: 'FuegoCine', enabled: true, priority: 7 },
+  /**
+   * PLUTO TV, la última: es gratis y legal pero lleva ANUNCIOS dentro del stream, así que sirve de
+   * fuente única y nunca pasa por delante de otro vídeo. Su catálogo lo reporta el móvil porque
+   * Pluto decide por IP; ver src/scrapers/pluto.ts.
+   */
+  { id: 'pluto', name: 'Pluto TV (desde el móvil)', enabled: true, priority: 8 },
 ];
 
 /**
