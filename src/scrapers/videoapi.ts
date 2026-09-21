@@ -72,7 +72,11 @@ export const UA_NAVEGADOR =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 
 /** Qué clase de obra es, en el vocabulario de la fuente. */
-export type ClaseVideoapi = 'movie' | 'tv' | 'anime' | 'novel';
+/**
+ * `wwe` son PELÍCULAS para TMDB (cada evento es un `movie`: 1005578 es «WrestleMania XL Sunday»)
+ * pero la fuente las sirve por su propia ruta, `/e/wwe/<tmdb>`, sin temporada ni capítulo.
+ */
+export type ClaseVideoapi = 'movie' | 'tv' | 'anime' | 'novel' | 'wwe';
 
 /**
  * LA URL DEL EMBED, QUE SE CONSTRUYE Y NO SE DESCUBRE.
@@ -93,7 +97,7 @@ export function embedDeVideoapi(
   capitulo?: number,
   origen: string = ORIGENES[0]
 ): string {
-  if (clase === 'movie') return `${origen}/e/movie/${tmdbId}`;
+  if (clase === 'movie' || clase === 'wwe') return `${origen}/e/${clase}/${tmdbId}`;
   return `${origen}/e/${clase}/${tmdbId}/${temporada ?? 1}/${capitulo ?? 1}`;
 }
 
@@ -110,7 +114,7 @@ export function datosDeLaUrl(
   if (!m) return null;
   const clase = m[1].toLowerCase();
   return {
-    clase: (clase === 'movie' || clase === 'anime' || clase === 'novel' ? clase : 'tv') as ClaseVideoapi,
+    clase: (clase === 'movie' || clase === 'anime' || clase === 'novel' || clase === 'wwe' ? clase : 'tv') as ClaseVideoapi,
     tmdbId: Number(m[2]),
     temporada: m[3] ? Number(m[3]) : undefined,
     capitulo: m[4] ? Number(m[4]) : undefined,
@@ -171,12 +175,34 @@ export interface CatalogoDeVideoapi {
   anime: number[];
   /** Ver `listarNovelas`: no salen en ninguna lista de texto. */
   novelas: number[];
+  /** Eventos de WWE: películas de TMDB con ruta propia. Tampoco están en las listas. */
+  wwe: number[];
   /** Los capítulos QUE EXISTEN, agrupados por serie. La clave es el `tmdb_id`. */
   capitulosPorSerie: Map<number, CapituloDeVideoapi[]>;
 }
 
+/** Los `tmdb` de una clase según el buscador de la web, que es el único sitio que lista novelas y WWE. */
+async function listarDelBuscador(tipo: 'novel' | 'wwe'): Promise<number[]> {
+  const ids: number[] = [];
+  for (let pagina = 1; pagina <= 50; pagina++) {
+    const j = await pedirJson(`/api/v1/public/catalog?type=${tipo}&page=${pagina}&order=created_at`);
+    if (!j || !Array.isArray(j.items)) {
+      // Sin la primera página no hay nada que hacer, pero tampoco motivo para tumbar la corrida
+      // entera: las películas, las series y el anime siguen saliendo de sus listas.
+      if (pagina === 1) console.log(`   ! videoapi: no se pudo leer el catálogo de ${tipo}`);
+      break;
+    }
+    for (const it of j.items) {
+      const n = Number(it?.tmdb);
+      if (it?.type === tipo && n > 0 && !ids.includes(n)) ids.push(n);
+    }
+    if (!j.pagination?.has_next) break;
+  }
+  return ids;
+}
+
 /**
- * LAS NOVELAS NO ESTÁN EN LAS LISTAS, y por eso no entraba ninguna.
+ * LAS NOVELAS NO ESTÁN EN LAS LISTAS, y por eso no entraba ninguna. (Ni la WWE: 22 eventos, 2026-09-21.)
  *
  * La documentación anuncia `/e/novel/{tmdb}/{t}/{c}` y sus estadísticas cuentan 28 novelas
  * (2026-09-21), pero `ids/*.txt` solo publica películas, series y anime: `novels.txt` da 404, el
@@ -205,21 +231,7 @@ async function pedirJson(ruta: string): Promise<any | null> {
 }
 
 async function listarNovelas(): Promise<{ ids: number[]; capitulos: CapituloDeVideoapi[] }> {
-  const ids: number[] = [];
-  for (let pagina = 1; pagina <= 50; pagina++) {
-    const j = await pedirJson(`/api/v1/public/catalog?type=novel&page=${pagina}&order=created_at`);
-    if (!j || !Array.isArray(j.items)) {
-      // Sin la primera página no hay nada que hacer, pero tampoco motivo para tumbar la corrida
-      // entera: las películas, las series y el anime siguen saliendo de sus listas.
-      if (pagina === 1) console.log('   ! videoapi: no se pudo leer el catálogo de novelas');
-      break;
-    }
-    for (const it of j.items) {
-      const n = Number(it?.tmdb);
-      if (it?.type === 'novel' && n > 0 && !ids.includes(n)) ids.push(n);
-    }
-    if (!j.pagination?.has_next) break;
-  }
+  const ids = await listarDelBuscador('novel');
 
   const capitulos: CapituloDeVideoapi[] = [];
   for (const tmdbId of ids) {
@@ -245,13 +257,14 @@ async function listarNovelas(): Promise<{ ids: number[]; capitulos: CapituloDeVi
  * que no están en su lista no se les cuelga nada.
  */
 export async function listarCatalogo(): Promise<CatalogoDeVideoapi> {
-  const [peliculas, series, capitulos, anime, capitulosAnime, novelas] = await Promise.all([
+  const [peliculas, series, capitulos, anime, capitulosAnime, novelas, wwe] = await Promise.all([
     bajarLista(LISTAS.peliculas),
     bajarLista(LISTAS.series),
     bajarLista(LISTAS.capitulos),
     bajarLista(LISTAS.anime),
     bajarLista(LISTAS.capitulosAnime),
     listarNovelas(),
+    listarDelBuscador('wwe'),
   ]);
 
   const capitulosPorSerie = new Map<number, CapituloDeVideoapi[]>();
@@ -266,6 +279,7 @@ export async function listarCatalogo(): Promise<CatalogoDeVideoapi> {
     series: parsearIds(series),
     anime: parsearIds(anime),
     novelas: novelas.ids,
+    wwe,
     capitulosPorSerie,
   };
 }
@@ -297,5 +311,6 @@ export function claseDeSerie(tmdbId: number, animes: Set<number>, novelas: Set<n
 export function subcategoriaDeClase(clase: ClaseVideoapi): string | null {
   if (clase === 'anime') return 'Anime';
   if (clase === 'novel') return 'Novela';
+  if (clase === 'wwe') return 'WWE';
   return null;
 }

@@ -24,7 +24,7 @@
  *   npm run importar:videoapi -- --dry                 ← qué haría, sin escribir
  *   npm run importar:videoapi                          ← una tanda (300 fichas, 20 min)
  *   npm run importar:videoapi -- --limite=800 --minutos=45
- *   npm run importar:videoapi -- --solo=series        ← o peliculas, anime, novelas
+ *   npm run importar:videoapi -- --solo=series        ← o peliculas, anime, novelas, wwe
  *   npm run importar:videoapi -- --rehacer             ← revisita lo que ya tiene servidor suyo
  *   npm run importar:videoapi -- --tmdb=1399,550       ← solo estos, para probar un caso
  *   npm run importar:videoapi -- --limite=0 --minutos=0 --capitulos=0   ← TODO, de una sentada
@@ -496,7 +496,7 @@ async function actualizarFicha(
 
 /** Una película: una petición, una verificación, una escritura. */
 async function haremosPelicula(t: Trabajo): Promise<void> {
-  const embed = embedDeVideoapi('movie', t.tmdbId);
+  const embed = embedDeVideoapi(t.clase, t.tmdbId);
   const directo = await resolverYVerificar(embed);
   if (!directo) {
     cuenta.sinVideo++;
@@ -513,6 +513,10 @@ async function haremosPelicula(t: Trabajo): Promise<void> {
   if (!ficha) {
     cuenta.sinTmdb++;
     return;
+  }
+  const etiqueta = subcategoriaDeClase(t.clase);
+  if (etiqueta && !(ficha.subcategories || []).includes(etiqueta)) {
+    ficha.subcategories = [...(ficha.subcategories || []), etiqueta];
   }
   if (DRY || (await insertarFicha(ficha, [servidor], []))) cuenta.fichasNuevas++;
 }
@@ -625,13 +629,14 @@ async function haremosSerie(t: Trabajo, catalogo: CatalogoDeVideoapi): Promise<v
  * escribe nada. Se AÑADE a lo que haya, nunca se sustituye: otras fuentes ponen las suyas.
  */
 async function etiquetarPorClase(catalogo: CatalogoDeVideoapi, nuestro: Map<string, { id: string }>): Promise<void> {
-  const pares: Array<[number[], string]> = [
-    [catalogo.anime, subcategoriaDeClase('anime')!],
-    [catalogo.novelas, subcategoriaDeClase('novel')!],
+  const pares: Array<[number[], string, 'movie' | 'tvseries', string]> = [
+    [catalogo.anime, subcategoriaDeClase('anime')!, 'tvseries', 'anime'],
+    [catalogo.novelas, subcategoriaDeClase('novel')!, 'tvseries', 'novelas'],
+    [catalogo.wwe, subcategoriaDeClase('wwe')!, 'movie', 'wwe'],
   ];
-  for (const [tmdbIds, etiqueta] of pares) {
-    if (SOLO && SOLO !== 'series' && SOLO !== (etiqueta === 'Anime' ? 'anime' : 'novelas')) continue;
-    const ids = tmdbIds.map((n) => nuestro.get(`tvseries:${n}`)?.id).filter((x): x is string => Boolean(x));
+  for (const [tmdbIds, etiqueta, tipo, solo] of pares) {
+    if (SOLO && SOLO !== solo && !(SOLO === 'series' && tipo === 'tvseries')) continue;
+    const ids = tmdbIds.map((n) => nuestro.get(`${tipo}:${n}`)?.id).filter((x): x is string => Boolean(x));
     const faltan: Array<{ id: string; subcategories: string[] }> = [];
     for (let i = 0; i < ids.length; i += 200) {
       const { data, error } = await db.from('media_items').select('id,subcategories').in('id', ids.slice(i, i + 200));
@@ -673,7 +678,7 @@ async function main() {
   const catalogo = await listarCatalogo();
   console.log(
     `listas: ${catalogo.peliculas.length} pelis · ${catalogo.series.length} series · ` +
-      `${catalogo.anime.length} anime · ${catalogo.novelas.length} novelas · ` +
+      `${catalogo.anime.length} anime · ${catalogo.novelas.length} novelas · ${catalogo.wwe.length} wwe · ` +
       `${catalogo.capitulosPorSerie.size} series con capítulos`
   );
 
@@ -689,6 +694,15 @@ async function main() {
       const fila = nuestro.get(`movie:${tmdbId}`);
       if (fila && !REHACER && hecho.get(fila.id)?.has('')) continue;
       cola.push({ clase: 'movie', tmdbId, type: 'movie', fila });
+    }
+  }
+  // WWE: películas de TMDB servidas por `/e/wwe/`. No se cruzan con `movies.txt` (comprobado), así
+  // que «ya tiene servidor de videoapi» significa lo mismo que para una película.
+  if (!SOLO || SOLO === 'wwe') {
+    for (const tmdbId of catalogo.wwe) {
+      const fila = nuestro.get(`movie:${tmdbId}`);
+      if (fila && !REHACER && hecho.get(fila.id)?.has('')) continue;
+      cola.push({ clase: 'wwe', tmdbId, type: 'movie', fila });
     }
   }
   if (!SOLO || SOLO === 'series' || SOLO === 'anime' || SOLO === 'novelas') {

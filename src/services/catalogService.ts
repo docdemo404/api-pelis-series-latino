@@ -287,7 +287,8 @@ export function tipoDeLaRuta(url: string): ContentType | null {
    * tipo `null` y el matcher podría buscarla en el catálogo de series.
    */
   if (/\/e\/(movie|tv|anime|novel|wwe)\//i.test(url)) {
-    return /\/e\/movie\//i.test(url) ? 'movie' : 'tvseries';
+    // `/e/wwe/` también es película: cada evento es un `movie` de TMDB, sin capítulos.
+    return /\/e\/(movie|wwe)\//i.test(url) ? 'movie' : 'tvseries';
   }
   if (/\/pelicula\//i.test(url)) return 'movie';
   if (/\/(serie|anime|dorama)\//i.test(url)) return 'tvseries';
@@ -5074,7 +5075,8 @@ export function esServidorManual(sv: any): boolean {
 export function noLoTraeNingunScraper(sv: any): boolean {
   if (esServidorManual(sv)) return true;
   const id = String(sv?.source_id || '').toLowerCase();
-  if (id === 'videoapi' || id === 'netmirror') return true;
+  // Pluto solo lo ve el móvil (el catálogo depende de su IP): ningún scraper lo vuelve a traer.
+  if (id === 'videoapi' || id === 'netmirror' || id === 'pluto') return true;
   return /(?:videoapi\.la|videoapp\.zip)\/e\//i.test(String(sv?.embed_url || ''));
 }
 

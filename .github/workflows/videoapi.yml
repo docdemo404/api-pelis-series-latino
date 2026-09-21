@@ -49,7 +49,7 @@ on:
         required: false
         default: '40'
       solo:
-        description: 'peliculas, series, anime o novelas. Vacío = todo.'
+        description: 'peliculas, series, anime, novelas o wwe. Vacío = todo.'
         required: false
         default: ''
 

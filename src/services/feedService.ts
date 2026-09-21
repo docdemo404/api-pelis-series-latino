@@ -161,6 +161,16 @@ const ROW_DEFINITIONS: RowDefinition[] = [
     endpoint: '/api/v1/series'
   },
   {
+    id: 'wwe',
+    title: 'WWE',
+    subtitle: 'Eventos completos',
+    layout: 'poster',
+    sort: 'shuffled',
+    // Igual que las novelas: la etiqueta la pone el importador de VideoAPI.
+    query: { subcategory: 'WWE' },
+    endpoint: '/api/v1/movies'
+  },
+  {
     id: 'action',
     title: 'Acción sin tregua',
     layout: 'poster',
