@@ -49,27 +49,35 @@ jobs:
 
       # ¿LLEGA ESTE RUNNER A HUGGINGFACE? Y que falle EN ROJO si no.
       #
-      # No es paranoia: los runners de GitHub NO llegan a NetMirror ni a su CDN (medido, ver
-      # `--via=api` en importarNetmirror), y un importador que no alcanza sus ficheros no rompe —
-      # verifica cada capítulo, ninguno entrega, no escribe nada y termina en VERDE diciendo «0
-      # fichas». Una corrida inútil con cara de haber funcionado. Esto lo convierte en un fallo que
-      # se ve.
+      # Los runners de GitHub NO llegan a NetMirror ni a su CDN (medido), y un importador que no
+      # alcanza sus ficheros no rompe: verifica cada capítulo, ninguno entrega, no escribe nada y
+      # termina en VERDE diciendo «0 fichas». Esto lo convierte en un fallo que se ve.
       #
-      # Se pide un rango real: que la lista baje no prueba que los FICHEROS bajen, y son dos saltos
-      # distintos (el worker, y luego el CDN de HuggingFace en AWS).
+      # SE PRUEBAN VARIOS FICHEROS, Y ESO NO ES UN DETALLE. La primera versión probaba UNO —el
+      # primero de la lista de películas— y falló en rojo el 2026-09-21 diciendo que el runner no
+      # alcanzaba HuggingFace. Era mentira: ese fichero concreto está MUERTO (devuelve una página
+      # «XUI.one — notfound» de 1.667 bytes, también desde fuera de GitHub) y los otros 15 medidos
+      # entregaban vídeo completo. Probar un fichero es probar ESE fichero, no la red. Así que aquí
+      # se mira una muestra repartida y solo se para si NO llega NINGUNO.
       - name: Comprobar que el runner alcanza los ficheros
         run: |
           set -e
-          LISTA=$(curl -sfL --max-time 90 "https://hfprolatam.cursolatamsrc.workers.dev/?gatesccn" || true)
-          URL=$(printf '%s\n' "$LISTA" | grep -m1 '^https://.*/resolve/' || true)
-          if [ -z "$URL" ]; then
+          LISTA=$(curl -sfL --max-time 150 "https://hfprolatam.cursolatamsrc.workers.dev/?gatesccn2" || true)
+          mapfile -t URLS < <(printf '%s
+' "$LISTA" | grep '^https://.*/resolve/' | awk 'NR%1500==1' | head -6)
+          if [ "${#URLS[@]}" -eq 0 ]; then
             echo "::error::El runner no consigue la lista de hfpro. No se corre el importador."
             exit 1
           fi
-          BYTES=$(curl -sL --max-time 90 -r 0-262143 -o /tmp/prueba.bin -w '%{size_download}' "$URL" || echo 0)
-          echo "rango de prueba: ${BYTES} bytes"
-          if [ "${BYTES%.*}" -lt 100000 ]; then
-            echo "::error::La lista baja pero los FICHEROS no (${BYTES} bytes). El runner no alcanza el CDN de HuggingFace."
+          OK=0
+          for U in "${URLS[@]}"; do
+            B=$(curl -sL --max-time 60 -r 0-262143 -o /dev/null -w '%{size_download}' "$U" || echo 0)
+            echo "  ${B%.*} bytes  ${U##*/}"
+            if [ "${B%.*}" -ge 100000 ]; then OK=$((OK+1)); fi
+          done
+          echo "entregan vídeo: ${OK} de ${#URLS[@]}"
+          if [ "$OK" -eq 0 ]; then
+            echo "::error::Ningún fichero de la muestra entrega vídeo. El runner no alcanza el CDN de HuggingFace."
             exit 1
           fi
 
