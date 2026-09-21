@@ -152,6 +152,15 @@ const ROW_DEFINITIONS: RowDefinition[] = [
     endpoint: '/api/v1/series'
   },
   {
+    id: 'novelas',
+    title: 'Novelas',
+    layout: 'poster',
+    sort: 'shuffled',
+    // La etiqueta la pone el importador de VideoAPI, que es quien sabe que es novela.
+    query: { subcategory: 'Novela' },
+    endpoint: '/api/v1/series'
+  },
+  {
     id: 'action',
     title: 'Acción sin tregua',
     layout: 'poster',

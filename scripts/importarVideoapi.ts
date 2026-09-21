@@ -24,7 +24,7 @@
  *   npm run importar:videoapi -- --dry                 ← qué haría, sin escribir
  *   npm run importar:videoapi                          ← una tanda (300 fichas, 20 min)
  *   npm run importar:videoapi -- --limite=800 --minutos=45
- *   npm run importar:videoapi -- --solo=series
+ *   npm run importar:videoapi -- --solo=series        ← o peliculas, anime, novelas
  *   npm run importar:videoapi -- --rehacer             ← revisita lo que ya tiene servidor suyo
  *   npm run importar:videoapi -- --tmdb=1399,550       ← solo estos, para probar un caso
  *   npm run importar:videoapi -- --limite=0 --minutos=0 --capitulos=0   ← TODO, de una sentada
@@ -41,6 +41,7 @@ import {
   listarCatalogo,
   embedDeVideoapi,
   claseDeSerie,
+  subcategoriaDeClase,
   UA_NAVEGADOR,
   ClaseVideoapi,
   CatalogoDeVideoapi,
@@ -123,6 +124,7 @@ const cuenta = {
   fichasNuevas: 0,
   fichasEnriquecidas: 0,
   capitulos: 0,
+  etiquetadas: 0,
   sinVideo: 0,
   sinTmdb: 0,
   errores: 0,
@@ -602,8 +604,62 @@ async function haremosSerie(t: Trabajo, catalogo: CatalogoDeVideoapi): Promise<v
      * una serie cuyos capítulos se llaman «INVENCIBLE 1x1». Aquí se conserva el rótulo de TMDB y
      * solo se le añaden los servidores.
      */
+    const etiqueta = subcategoriaDeClase(t.clase);
+    if (etiqueta && !(ficha.subcategories || []).includes(etiqueta)) {
+      ficha.subcategories = [...(ficha.subcategories || []), etiqueta];
+    }
     const conRotulos = fusionarTemporadas((ficha as any).seasons || [], seasons);
     if (await insertarFicha(ficha, [], conRotulos.length ? conRotulos : seasons)) { cuenta.fichasNuevas++; apuntarCapitulos(); }
+  }
+}
+
+/**
+ * PONE LA ETIQUETA DE ANIME O NOVELA A LAS FICHAS QUE YA ESTABAN, y a nada más.
+ *
+ * Al insertar ya va puesta (`haremosSerie`), pero eso no alcanza a las ~800 que entraron antes de
+ * existir la etiqueta ni a las que trajo otra fuente y esta solo enriqueció. Una pasada aparte y
+ * no un campo más en `actualizarFicha` porque esas fichas NO vuelven a la cola: ya tienen todos sus
+ * capítulos, así que nunca pasarían por ahí.
+ *
+ * Solo lee `subcategories` de ~830 filas y solo escribe las que no la tienen; la segunda corrida no
+ * escribe nada. Se AÑADE a lo que haya, nunca se sustituye: otras fuentes ponen las suyas.
+ */
+async function etiquetarPorClase(catalogo: CatalogoDeVideoapi, nuestro: Map<string, { id: string }>): Promise<void> {
+  const pares: Array<[number[], string]> = [
+    [catalogo.anime, subcategoriaDeClase('anime')!],
+    [catalogo.novelas, subcategoriaDeClase('novel')!],
+  ];
+  for (const [tmdbIds, etiqueta] of pares) {
+    if (SOLO && SOLO !== 'series' && SOLO !== (etiqueta === 'Anime' ? 'anime' : 'novelas')) continue;
+    const ids = tmdbIds.map((n) => nuestro.get(`tvseries:${n}`)?.id).filter((x): x is string => Boolean(x));
+    const faltan: Array<{ id: string; subcategories: string[] }> = [];
+    for (let i = 0; i < ids.length; i += 200) {
+      const { data, error } = await db.from('media_items').select('id,subcategories').in('id', ids.slice(i, i + 200));
+      if (error) {
+        console.log(`   ! etiquetas: ${error.message}`);
+        return;
+      }
+      for (const f of (data || []) as any[]) {
+        const actuales: string[] = Array.isArray(f.subcategories) ? f.subcategories : [];
+        if (!actuales.includes(etiqueta)) faltan.push({ id: String(f.id), subcategories: actuales });
+      }
+    }
+    for (let i = 0; i < faltan.length; i += A_LA_VEZ) {
+      await Promise.all(
+        faltan.slice(i, i + A_LA_VEZ).map(async (f) => {
+          if (DRY) return void cuenta.etiquetadas++;
+          const { error } = await db
+            .from('media_items')
+            .update({ subcategories: [...f.subcategories, etiqueta] })
+            .eq('id', f.id);
+          if (error) {
+            console.log(`   ! ${f.id}: ${error.message}`);
+            cuenta.errores++;
+          } else cuenta.etiquetadas++;
+        })
+      );
+    }
+    console.log(`etiqueta «${etiqueta}»: ${ids.length} fichas nuestras, ${faltan.length} sin ella`);
   }
 }
 
@@ -617,13 +673,15 @@ async function main() {
   const catalogo = await listarCatalogo();
   console.log(
     `listas: ${catalogo.peliculas.length} pelis · ${catalogo.series.length} series · ` +
-      `${catalogo.anime.length} anime · ${catalogo.capitulosPorSerie.size} series con capítulos`
+      `${catalogo.anime.length} anime · ${catalogo.novelas.length} novelas · ` +
+      `${catalogo.capitulosPorSerie.size} series con capítulos`
   );
 
   const nuestro = await nuestroCatalogo();
   const hecho = REHACER ? new Map<string, Set<string>>() : await resueltoPorVideoapi();
 
   const animes = new Set(catalogo.anime);
+  const novelas = new Set(catalogo.novelas);
   const cola: Trabajo[] = [];
 
   if (!SOLO || SOLO === 'peliculas') {
@@ -633,8 +691,13 @@ async function main() {
       cola.push({ clase: 'movie', tmdbId, type: 'movie', fila });
     }
   }
-  if (!SOLO || SOLO === 'series' || SOLO === 'anime') {
-    const ids = SOLO === 'anime' ? catalogo.anime : [...catalogo.series, ...catalogo.anime];
+  if (!SOLO || SOLO === 'series' || SOLO === 'anime' || SOLO === 'novelas') {
+    const ids =
+      SOLO === 'anime'
+        ? catalogo.anime
+        : SOLO === 'novelas'
+          ? catalogo.novelas
+          : [...new Set([...catalogo.series, ...catalogo.anime, ...catalogo.novelas])];
     for (const tmdbId of ids) {
       const fila = nuestro.get(`tvseries:${tmdbId}`);
       const capitulos = catalogo.capitulosPorSerie.get(tmdbId) || [];
@@ -642,7 +705,7 @@ async function main() {
       // la tanda para no hacer nada. Ver `capitulosPendientes`.
       const pendientes = capitulosPendientes(fila ? hecho.get(fila.id) : undefined, capitulos);
       if (!pendientes.length) continue;
-      cola.push({ clase: claseDeSerie(tmdbId, animes), tmdbId, type: 'tvseries', fila, pendientes });
+      cola.push({ clase: claseDeSerie(tmdbId, animes, novelas), tmdbId, type: 'tvseries', fila, pendientes });
     }
   }
 
@@ -685,13 +748,17 @@ async function main() {
    * las claves SOBREVIVEN A LOS DESPLIEGUES. Escribir la fila no basta — la ficha vieja seguiría
    * contestando, y una recién creada ni siquiera aparecería en los listados.
    */
-  if (!DRY && (cuenta.fichasNuevas || cuenta.fichasEnriquecidas)) {
+  // Después de las series, para que alcance también a las que esta misma corrida acaba de enriquecer.
+  // Sin `--tmdb`: esa bandera es para probar un caso, no para tocar 800 filas.
+  if (!TMDB.length) await etiquetarPorClase(catalogo, nuestro);
+
+  if (!DRY && (cuenta.fichasNuevas || cuenta.fichasEnriquecidas || cuenta.etiquetadas)) {
     await CatalogService.invalidateListings().catch(() => {});
   }
 
   console.log(
     `\n${cuenta.fichasNuevas} fichas nuevas · ${cuenta.fichasEnriquecidas} enriquecidas · ` +
-      `${cuenta.capitulos} capítulos · ${cuenta.sinVideo} sin vídeo · ${cuenta.sinTmdb} sin ficha TMDB · ` +
+      `${cuenta.capitulos} capítulos · ${cuenta.etiquetadas} etiquetadas · ${cuenta.sinVideo} sin vídeo · ${cuenta.sinTmdb} sin ficha TMDB · ` +
       `${cuenta.errores} errores`
   );
   console.log(`Quedan ~${Math.max(0, elegidos.length - tanda.length)} en cola para la próxima vuelta.`);

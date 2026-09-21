@@ -5,7 +5,8 @@
  * habla cada página y demostrarlo. De ahí salen casi todos los destrozos que documenta FUENTES.md.
  *
  * Esta no. videoapi.la es un proveedor de embeds con documentación pública (https://videoapi.la/api)
- * que direcciona POR TMDB ID y **publica su catálogo entero** en cinco listas de texto plano. O sea:
+ * que direcciona POR TMDB ID y **publica su catálogo entero** en cinco listas de texto plano (menos
+ * las novelas: ver `listarNovelas`). O sea:
  *
  *   · no hay índice que recorrer     — te dan la lista;
  *   · no hay identidad que demostrar — el id lo pone la fuente, no lo deduce el matcher;
@@ -71,7 +72,7 @@ export const UA_NAVEGADOR =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 
 /** Qué clase de obra es, en el vocabulario de la fuente. */
-export type ClaseVideoapi = 'movie' | 'tv' | 'anime';
+export type ClaseVideoapi = 'movie' | 'tv' | 'anime' | 'novel';
 
 /**
  * LA URL DEL EMBED, QUE SE CONSTRUYE Y NO SE DESCUBRE.
@@ -109,7 +110,7 @@ export function datosDeLaUrl(
   if (!m) return null;
   const clase = m[1].toLowerCase();
   return {
-    clase: (clase === 'movie' || clase === 'anime' ? clase : 'tv') as ClaseVideoapi,
+    clase: (clase === 'movie' || clase === 'anime' || clase === 'novel' ? clase : 'tv') as ClaseVideoapi,
     tmdbId: Number(m[2]),
     temporada: m[3] ? Number(m[3]) : undefined,
     capitulo: m[4] ? Number(m[4]) : undefined,
@@ -168,12 +169,74 @@ export interface CatalogoDeVideoapi {
   peliculas: number[];
   series: number[];
   anime: number[];
+  /** Ver `listarNovelas`: no salen en ninguna lista de texto. */
+  novelas: number[];
   /** Los capítulos QUE EXISTEN, agrupados por serie. La clave es el `tmdb_id`. */
   capitulosPorSerie: Map<number, CapituloDeVideoapi[]>;
 }
 
 /**
- * El catálogo entero de la fuente, en cinco peticiones.
+ * LAS NOVELAS NO ESTÁN EN LAS LISTAS, y por eso no entraba ninguna.
+ *
+ * La documentación anuncia `/e/novel/{tmdb}/{t}/{c}` y sus estadísticas cuentan 28 novelas
+ * (2026-09-21), pero `ids/*.txt` solo publica películas, series y anime: `novels.txt` da 404, el
+ * `feed` rechaza `type=novel` y ninguna novela aparece en `tvshows.txt`. Quien se fíe de las listas
+ * cree que la fuente no tiene novelas.
+ *
+ * Donde sí están es en el buscador de su web (`/catalog`), que tira de `/api/v1/public/catalog`
+ * paginado de 24 en 24 y, por título, de `/catalog/episodes` con los capítulos REPRODUCIBLES uno a
+ * uno. Es la misma garantía que `episodes.txt`: la fuente dice qué capítulos tiene, y a los demás no
+ * se les cuelga nada. Son dos o tres páginas más una petición por novela: ~30 por corrida.
+ */
+async function pedirJson(ruta: string): Promise<any | null> {
+  for (const origen of ORIGENES) {
+    try {
+      const r = await httpClient.get(`${origen}${ruta}`, {
+        timeout: 30000,
+        headers: { 'User-Agent': UA_NAVEGADOR, Accept: 'application/json' },
+        validateStatus: () => true,
+      });
+      if (r.status === 200 && r.data && typeof r.data === 'object') return r.data;
+      // Un 404 es una respuesta, no una caída: el título no tiene capítulos. No se pregunta al otro.
+      if (r.status === 404) return null;
+    } catch {}
+  }
+  return null;
+}
+
+async function listarNovelas(): Promise<{ ids: number[]; capitulos: CapituloDeVideoapi[] }> {
+  const ids: number[] = [];
+  for (let pagina = 1; pagina <= 50; pagina++) {
+    const j = await pedirJson(`/api/v1/public/catalog?type=novel&page=${pagina}&order=created_at`);
+    if (!j || !Array.isArray(j.items)) {
+      // Sin la primera página no hay nada que hacer, pero tampoco motivo para tumbar la corrida
+      // entera: las películas, las series y el anime siguen saliendo de sus listas.
+      if (pagina === 1) console.log('   ! videoapi: no se pudo leer el catálogo de novelas');
+      break;
+    }
+    for (const it of j.items) {
+      const n = Number(it?.tmdb);
+      if (it?.type === 'novel' && n > 0 && !ids.includes(n)) ids.push(n);
+    }
+    if (!j.pagination?.has_next) break;
+  }
+
+  const capitulos: CapituloDeVideoapi[] = [];
+  for (const tmdbId of ids) {
+    const j = await pedirJson(`/api/v1/public/catalog/episodes?type=novel&tmdb=${tmdbId}`);
+    for (const t of (j?.seasons || []) as any[]) {
+      for (const e of (t?.episodes || []) as any[]) {
+        const temporada = Number(e?.season ?? t?.season);
+        const capitulo = Number(e?.episode);
+        if (temporada > 0 && capitulo > 0) capitulos.push({ tmdbId, temporada, capitulo });
+      }
+    }
+  }
+  return { ids, capitulos };
+}
+
+/**
+ * El catálogo entero de la fuente, en cinco peticiones (más las de las novelas).
  *
  * QUE LOS CAPÍTULOS VENGAN NOMBRADOS UNO A UNO ES LO MÁS VALIOSO DE TODO ESTO, y no se nota a
  * primera vista. FUENTES.md llama «el fallo peor sin dar error» a rellenar un capítulo con los
@@ -182,16 +245,17 @@ export interface CatalogoDeVideoapi {
  * que no están en su lista no se les cuelga nada.
  */
 export async function listarCatalogo(): Promise<CatalogoDeVideoapi> {
-  const [peliculas, series, capitulos, anime, capitulosAnime] = await Promise.all([
+  const [peliculas, series, capitulos, anime, capitulosAnime, novelas] = await Promise.all([
     bajarLista(LISTAS.peliculas),
     bajarLista(LISTAS.series),
     bajarLista(LISTAS.capitulos),
     bajarLista(LISTAS.anime),
     bajarLista(LISTAS.capitulosAnime),
+    listarNovelas(),
   ]);
 
   const capitulosPorSerie = new Map<number, CapituloDeVideoapi[]>();
-  for (const c of [...parsearCapitulos(capitulos), ...parsearCapitulos(capitulosAnime)]) {
+  for (const c of [...parsearCapitulos(capitulos), ...parsearCapitulos(capitulosAnime), ...novelas.capitulos]) {
     const ya = capitulosPorSerie.get(c.tmdbId);
     if (ya) ya.push(c);
     else capitulosPorSerie.set(c.tmdbId, [c]);
@@ -201,6 +265,7 @@ export async function listarCatalogo(): Promise<CatalogoDeVideoapi> {
     peliculas: parsearIds(peliculas),
     series: parsearIds(series),
     anime: parsearIds(anime),
+    novelas: novelas.ids,
     capitulosPorSerie,
   };
 }
@@ -216,6 +281,21 @@ export async function listarCatalogo(): Promise<CatalogoDeVideoapi> {
  * por serie sobre una lista de 795: con `Array.includes` serían 1.800 × 795 comparaciones por
  * corrida para contestar algo que es una consulta de tabla.
  */
-export function claseDeSerie(tmdbId: number, animes: Set<number>): ClaseVideoapi {
+export function claseDeSerie(tmdbId: number, animes: Set<number>, novelas: Set<number>): ClaseVideoapi {
+  if (novelas.has(tmdbId)) return 'novel';
   return animes.has(tmdbId) ? 'anime' : 'tv';
+}
+
+/**
+ * LA SUBCATEGORÍA QUE HACE QUE LA APP LA ENCUENTRE.
+ *
+ * El carrusel «Anime en español latino» (`feedService`) filtra por `subcategories` y no por género,
+ * y TMDB no da esa etiqueta: la fila entraba con `subcategories: []`. Medido el 2026-09-21: 800
+ * animes importados de esta fuente, 798 sin la etiqueta — estaban, con capítulos y vídeo, pero la
+ * app no los enseñaba como anime. La clase la pone la fuente, así que la etiqueta sale de ella.
+ */
+export function subcategoriaDeClase(clase: ClaseVideoapi): string | null {
+  if (clase === 'anime') return 'Anime';
+  if (clase === 'novel') return 'Novela';
+  return null;
 }
