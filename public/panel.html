@@ -328,12 +328,7 @@
             </div>
             <select id="contenidoFuente" class="form-select form-select-sm bg-dark text-white border-secondary" style="max-width:190px">
               <option value="">Todas las fuentes</option>
-              <option value="manual">Fuente propia</option>
-              <option value="archive">Internet Archive</option>
-              <option value="moviedays">MovieDays</option>
-              <option value="fuegocine">FuegoCine</option>
-              <option value="cinecalidad">Cinecalidad</option>
-              <option value="tioplus">TioPlus</option>
+              <!-- El resto lo añade `sumarFuentesAlFiltro` con lo que diga la API. -->
             </select>
             <select id="contenidoVisible" class="form-select form-select-sm bg-dark text-white border-secondary" style="max-width:190px">
               <option value="">Aparezca o no en la app</option>
@@ -840,6 +835,32 @@
     }[f] || 'text-secondary');
 
     /**
+     * LAS OPCIONES DEL FILTRO DE FUENTE SALEN DE LA API, no de una lista escrita aquí.
+     *
+     * Estaban a mano en el html, y cada fuente nueva (videoapi, netmirror, unlimplay…) se quedaba
+     * fuera del desplegable aunque ya tuviera fichas. Ahora se suman de tres sitios, sin repetir:
+     * las fuentes configuradas (`/api/v1/panel`), las que cuenta el estado y las que aparecen en
+     * las filas de la tabla — así también sale una que ya no está configurada pero dejó enlaces.
+     */
+    const filtroFuente = document.getElementById('contenidoFuente');
+    function sumarFuentesAlFiltro(pares) {
+      for (const [id, nombre] of pares) {
+        const valor = String(id || '').toLowerCase();
+        if (!valor || valor === 'sin anotar') continue;
+        const ya = Array.from(filtroFuente.options).find(o => o.value === valor);
+        if (ya) {
+          // Un nombre bonito (de la configuración) gana al id desnudo que llegó antes.
+          if (nombre && ya.textContent === valor) ya.textContent = nombre;
+          continue;
+        }
+        const op = document.createElement('option');
+        op.value = valor;
+        op.textContent = nombre || valor;
+        filtroFuente.appendChild(op);
+      }
+    }
+
+    /**
      * SI ESTE TÍTULO SE VE EN LA APP O NO, dicho donde se mira.
      *
      * El panel enseñaba el catálogo entero sin distinguir lo que llega al espectador de lo que no,
@@ -967,6 +988,7 @@
           (contQ ? '&q=' + encodeURIComponent(contQ) : '');
         const j = await (await fetch(url)).json();
         const filas = j.filas || [];
+        sumarFuentesAlFiltro(filas.flatMap(f => (f.fuentes || []).map(x => [x])));
         // Los dos filtros dan ya un total DE VERDAD, del catálogo entero y no de la página: el de
         // visibilidad se pregunta en SQL y el de fuente recorre la tabla antes de paginar. Antes
         // aquí ponía «en esta página», que obligaba a ir página por página buscando dónde había
@@ -1209,6 +1231,7 @@
         const json = await res.json();
         if (json.status !== 'success') throw new Error('respuesta inesperada');
         renderEstado(json);
+        sumarFuentesAlFiltro(Object.keys((json.enlaces || {}).por_fuente || {}).map(k => [k]));
       } catch (err) {
         estadoBox.innerHTML = '<div class="alert alert-danger mb-0">❌ No se pudo leer /api/v1/panel/estado</div>';
       }
@@ -1221,6 +1244,7 @@
         const res = await fetch('/api/v1/panel');
         const json = await res.json();
         renderSources(json.sources || []);
+        sumarFuentesAlFiltro((json.sources || []).map(s => [s.id, s.name]));
       } catch (err) {
         list.innerHTML = '<div class="alert alert-danger">❌ Error cargando las fuentes desde /api/v1/panel</div>';
       }
