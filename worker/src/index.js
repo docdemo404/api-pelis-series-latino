@@ -1,4 +1,4 @@
-import { servirConCache, calentarIndice, llenarSecuencial } from './cacheDeTrozos.js';
+import { servirConCache, calentarIndice, llenarSecuencial, escribirTrozo } from './cacheDeTrozos.js';
 /**
  * ───────────────────────────────────────────────────────────────────────────────────────────
  * PROXY DE VÍDEO EN CLOUDFLARE — el que quita el techo de ancho de banda.
@@ -482,6 +482,21 @@ export default {
      * mitad de un trabajo que dura minutos. Lo que no quepa se pide en otra llamada, que para eso
      * la respuesta dice por dónde se quedó.
      */
+    /**
+     * Un trozo empujado desde fuera. Es la salida para las colas que `/llena` no alcanza: hay
+     * orígenes que tardan casi un minuto en soltar sus últimos megas y una invocación no vive
+     * tanto. Ver `escribirTrozo` — valida el tamaño exacto y anota el total.
+     */
+    if (url.pathname === '/trozo' && (request.method === 'PUT' || request.method === 'POST')) {
+      return escribirTrozo(
+        env,
+        request,
+        embedUrl,
+        Math.trunc(Number(url.searchParams.get('d'))),
+        Math.trunc(Number(url.searchParams.get('t')))
+      );
+    }
+
     if (url.pathname === '/llena') {
       const desde = Math.max(0, Math.trunc(Number(url.searchParams.get('d')) || 0));
       const pedidos = Math.trunc(Number(url.searchParams.get('n')) || 512);

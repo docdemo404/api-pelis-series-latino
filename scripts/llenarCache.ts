@@ -59,6 +59,66 @@ async function urlFirmada(urlFichero: string): Promise<string | null> {
   return destino.includes('/v?') ? destino : null;
 }
 
+/** El tamaño de trozo del Worker. Tiene que ser el mismo o las llaves no cuadran. */
+const TROZO = 4 * 1024 * 1024;
+
+/**
+ * SUBE LOS TROZOS QUE EL WORKER NO PUEDE ALCANZAR, leyendo de corrido desde aquí.
+ *
+ * Hay colas que la caché no puede llenar sola, y no es un fallo que se pueda arreglar dentro del
+ * Worker: medido sobre `permanent-video-share.lovable.app`, un trozo a 1,4 GB de profundidad
+ * tarda 57 s en empezar a llegar, y una invocación no vive tanto (`Worker exceeded CPU time
+ * limit`, y el tope no se puede subir en el plan gratuito). Justo ahí está el índice de un mkv,
+ * que es lo primero que busca el reproductor.
+ *
+ * Aquí no hay ninguno de esos límites: se lee de corrido —el peaje se paga UNA vez— y cada trozo
+ * se empuja al Worker por `/trozo`, que valida el tamaño exacto y anota el total. Es el último
+ * recurso y por eso solo se usa cuando el Worker ya ha demostrado que no puede avanzar.
+ */
+async function subirDesdeAqui(base: string, fichero: string, desde: number, total: number) {
+  const r = await fetch(fichero, {
+    headers: { Range: `bytes=${desde * TROZO}-` },
+    signal: AbortSignal.timeout(1_800_000),
+  });
+  if (!r.ok || !r.body) throw new Error(`el origen contestó ${r.status}`);
+
+  const poner = async (bytes: Buffer, n: number) => {
+    const u = base.replace('/v?', '/trozo?') + `&d=${n}&t=${total}`;
+    let ultimo = '';
+    for (let intento = 1; intento <= 3; intento++) {
+      const res = await fetch(u, {
+        method: 'PUT',
+        body: bytes as any,
+        headers: { 'Content-Length': String(bytes.length) },
+        duplex: 'half',
+      } as any).catch((e: any) => ({ ok: false, status: 0, text: async () => String(e?.message || e) } as any));
+      if (res.ok) return;
+      ultimo = `${res.status} ${(await res.text()).slice(0, 80)}`;
+    }
+    throw new Error(`el Worker rechazó el trozo ${n}: ${ultimo}`);
+  };
+
+  const lector = (r.body as any).getReader();
+  let resto = Buffer.alloc(0);
+  let indice = desde;
+  let subidos = 0;
+  for (;;) {
+    const { done, value } = await lector.read();
+    if (done) break;
+    resto = Buffer.concat([resto, Buffer.from(value)]);
+    while (resto.length >= TROZO) {
+      await poner(resto.subarray(0, TROZO), indice);
+      resto = resto.subarray(TROZO);
+      indice++; subidos++;
+      if (subidos % 8 === 0) process.stdout.write(`\r   subido hasta el trozo ${indice}   `);
+    }
+  }
+  // La cola no mide un trozo entero, y es justo la que hacía falta.
+  if (resto.length) { await poner(resto, indice); indice++; subidos++; }
+  process.stdout.write('\n');
+  return { indice, subidos };
+}
+
 /** Una llamada al Worker. Devuelve la última línea, que es el resumen. */
 async function llenarDesde(base: string, desde: number): Promise<any> {
   const url = base.replace('/v?', '/llena?') + `&d=${desde}&n=${POR_LLAMADA}`;
@@ -125,6 +185,8 @@ async function main() {
   console.log(`Llenando la caché de ${fichero}`);
   let desde = 0;
   let enVacio = 0;
+  /** Lo dice el Worker en cuanto habla con el origen; hace falta para subir a mano. */
+  let total = 0;
   for (let vuelta = 1; vuelta <= 60; vuelta++) {
     const r = await llenarDesde(base, desde);
     if (!r.ok) {
@@ -132,6 +194,7 @@ async function main() {
       if (typeof r.siguiente === 'number') console.error(`   se quedó en el trozo ${r.siguiente}; vuelve a lanzarlo y sigue desde ahí`);
       process.exit(1);
     }
+    if (typeof r.total === 'number' && r.total > 0) total = r.total;
     console.log(`   guardados ${r.guardados}, ya estaban ${r.yaEstaban}, va por el trozo ${r.siguiente}` +
       (r.trozosDelFichero ? ` de ${r.trozosDelFichero}` : ''));
     if (r.completo) {
@@ -149,8 +212,15 @@ async function main() {
     if (typeof r.siguiente !== 'number' || r.siguiente <= desde) {
       enVacio++;
       if (enVacio >= 3) {
-        console.error(`❌ Tres vueltas seguidas sin avanzar del trozo ${desde}. Se para aquí.`);
-        process.exit(1);
+        /*
+         * Tres vueltas sin avanzar no es mala suerte: es que a esa profundidad el origen tarda
+         * más de lo que vive una invocación. Se termina desde aquí, que no tiene ese tope.
+         */
+        if (!total) { console.error(`❌ Sin saber cuánto mide el fichero no se puede subir a mano.`); process.exit(1); }
+        console.log(`   El Worker no puede con el trozo ${desde}: se termina subiéndolo desde aquí.`);
+        const hecho = await subirDesdeAqui(base, fichero, desde, total);
+        console.log(`✅ Subidos ${hecho.subidos} trozos desde aquí. El fichero entero está en R2.`);
+        return;
       }
       console.log(`   (vuelta en vacío ${enVacio}/3, se reintenta desde el trozo ${desde})`);
       continue;

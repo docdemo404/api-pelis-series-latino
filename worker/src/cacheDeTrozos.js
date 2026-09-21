@@ -520,6 +520,24 @@ export async function servirConCache(request, env, ctx, url) {
   const anotado = Number(cabeza && cabeza.customMetadata && cabeza.customMetadata.total);
 
   let total = Number.isFinite(anotado) && anotado > 0 ? anotado : 0;
+
+  /*
+   * Y SI ESTE TROZO NO LLEVA EL TAMAÑO ANOTADO, SE LE PREGUNTA AL TROZO CERO.
+   *
+   * El apunte lo pone quien escribe el trozo, así que un trozo que entró por otra puerta —subido
+   * a mano con `wrangler`, que no sabe poner metadatos, o por una versión anterior de este
+   * código— está en la caché pero no dice cuánto mide el fichero. Sin tamaño no se puede
+   * contestar (el `Content-Range` lo lleva), así que se iba al origen a preguntarlo: una petición
+   * profunda a un host que cobra el salto, o sea justo el viaje que la caché existe para evitar.
+   *
+   * Un `head` al trozo cero cuesta milisegundos y no toca la red. Si tampoco lo sabe, entonces sí
+   * se pregunta fuera, como antes.
+   */
+  if (!total && indiceActual !== 0) {
+    const cero = await env.CACHE.head(llaveDe(url, 0)).catch(() => null);
+    const deCero = Number(cero && cero.customMetadata && cero.customMetadata.total);
+    if (Number.isFinite(deCero) && deCero > 0) total = deCero;
+  }
   let respuestaYaAbierta = null;
   let saltarDeEsa = 0;
 
@@ -978,5 +996,63 @@ export function llenarSecuencial(env, ctx, url, desdeTrozo, cuantos) {
   ctx.waitUntil(trabajo());
   return new Response(readable, {
     headers: { ...CORS, 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store' },
+  });
+}
+
+/**
+ * ESCRIBE UN TROZO QUE LLEGA DE FUERA, para las colas que el Worker no puede alcanzar.
+ *
+ * `llenarSecuencial` resuelve casi todo, pero tiene un límite duro: una invocación no vive lo que
+ * tarda un origen en empezar a soltar bytes de su parte final. Medido sobre
+ * `permanent-video-share.lovable.app`, un trozo a 1,4 GB de profundidad tarda 57 s en llegar y la
+ * invocación muere antes (`Worker exceeded CPU time limit`). No es un tope que se pueda subir en
+ * el plan gratuito. O sea que hay ficheros cuya COLA —donde vive el índice de un mkv, que es lo
+ * primero que busca el reproductor— la caché no puede llenar por sí misma.
+ *
+ * Desde fuera sí se puede: una máquina cualquiera lee de corrido, sin tope de invocación, y
+ * empuja los trozos aquí. Este endpoint es esa puerta.
+ *
+ * Tres cosas que no son opcionales:
+ *
+ *   · LA FIRMA. Es la misma que todo lo demás, y aquí importa más que en ningún otro sitio:
+ *     `/llena` guarda lo que le manda el origen, pero esto guarda lo que le mande QUIEN LLAMA. Sin
+ *     firma sería una forma de que un tercero decidiera qué vídeo sirve este catálogo.
+ *   · EL TAMAÑO EXACTO. Un trozo corto bajo una llave que promete 4 MB es un agujero que luego
+ *     nadie rellena, y el que lo lea recibirá menos de lo prometido. Se declara con
+ *     `FixedLengthStream`: si llega de más o de menos, la escritura falla y en R2 no queda nada.
+ *   · EL TOTAL ANOTADO. Es lo que permite contestar un `Content-Range` sin preguntarle al origen,
+ *     que en estos hosts es justo el viaje que hay que evitar.
+ */
+export async function escribirTrozo(env, request, url, indice, total) {
+  if (!env.CACHE) return new Response('R2 no está configurado en este Worker', { status: 501, headers: CORS });
+  if (!Number.isFinite(indice) || indice < 0) return new Response('trozo no válido', { status: 400, headers: CORS });
+  if (!Number.isFinite(total) || total <= 0) return new Response('falta el tamaño del fichero', { status: 400, headers: CORS });
+
+  const inicio = indice * TROZO;
+  if (inicio >= total) return new Response('ese trozo cae fuera del fichero', { status: 400, headers: CORS });
+  const esperado = Math.min(TROZO, total - inicio);
+
+  const anunciado = Number(request.headers.get('content-length'));
+  if (!Number.isFinite(anunciado) || anunciado !== esperado) {
+    return new Response('el trozo ' + indice + ' mide ' + esperado + ' bytes, no ' + anunciado, {
+      status: 400,
+      headers: CORS,
+    });
+  }
+  if (!request.body) return new Response('sin cuerpo', { status: 400, headers: CORS });
+
+  const flujo = new FixedLengthStream(esperado);
+  const escritura = env.CACHE.put(llaveDe(url, indice), flujo.readable, {
+    customMetadata: { total: String(total), visto: String(Date.now()) },
+  });
+  try {
+    await request.body.pipeTo(flujo.writable);
+    await escritura;
+  } catch (e) {
+    return new Response('no se pudo guardar: ' + (e && e.message ? e.message : e), { status: 502, headers: CORS });
+  }
+
+  return new Response(JSON.stringify({ ok: true, trozo: indice, bytes: esperado }), {
+    headers: { ...CORS, 'Content-Type': 'application/json' },
   });
 }
