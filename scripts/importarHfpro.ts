@@ -78,7 +78,7 @@ const VOLCADO = path.join(process.cwd(), 'data', 'hfpro_indice.json');
 
 const cuenta = {
   fichasNuevas: 0, fichasEnriquecidas: 0, capitulos: 0,
-  sinVideo: 0, sinIdentidad: 0, errores: 0,
+  sinVideo: 0, sinIdentidad: 0, errores: 0, yaEstaban: 0,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -125,6 +125,55 @@ async function nuestrasFilas(type: ContentType): Promise<Map<number, string>> {
   }
   return out;
 }
+
+/**
+ * LA RUTA DEL FICHERO, sin el `<sha>` del commit.
+ *
+ * `…/datasets/xplhack1/bylatamsrc2/resolve/b48d54e8…/SERIES/…/33_Dias_S01E01.mp4` → `SERIES/…/33_Dias_S01E01.mp4`
+ *
+ * El sha cambia cada vez que el dueño sube algo al repositorio, así que comparar urls enteras
+ * diría que un fichero ya importado es nuevo en cuanto él suba otra cosa. La ruta es lo estable.
+ */
+function rutaDe(url: string): string {
+  const m = String(url || '').match(/\/resolve\/[^/]+\/(.+)$/);
+  return m ? decodeURIComponent(m[1]) : '';
+}
+
+/**
+ * LO QUE YA ESTÁ IMPORTADO, por ruta de fichero.
+ *
+ * Esto es lo que hace que la importación AVANCE entre corridas, y sin ello el cron no servía para
+ * nada. La primera versión metía todas las series en la cola cada vez y empezaba por la primera:
+ * en local no se notaba, pero en un runner de 170 minutos cada corrida rehacía las mismas ~300
+ * series y NUNCA llegaba al resto. Se quedaba girando en el sitio para siempre, con cara de estar
+ * trabajando.
+ *
+ * Se mira por EPISODIO, no por serie: una serie larga («El Señor de los Cielos» tiene cientos de
+ * capítulos) se completa a lo largo de varias corridas en vez de quedarse con los primeros 24.
+ */
+async function rutasYaImportadas(): Promise<Set<string>> {
+  const out = new Set<string>();
+  for (let desde = 0; ; desde += 500) {
+    const { data, error } = await db
+      .from('media_items').select('servers,seasons').order('id').range(desde, desde + 499);
+    if (error) throw new Error(error.message);
+    const lote: any[] = data || [];
+    const mirar = (sv: any) => {
+      if (sv?.source_id !== 'hfpro') return;
+      const r = rutaDe(sv.direct_stream || sv.embed_url);
+      if (r) out.add(r);
+    };
+    for (const f of lote) {
+      for (const sv of (Array.isArray(f.servers) ? f.servers : [])) mirar(sv);
+      for (const t of (Array.isArray(f.seasons) ? f.seasons : []))
+        for (const e of (t?.episodes || [])) for (const sv of (e?.servers || [])) mirar(sv);
+    }
+    if (lote.length < 500) break;
+  }
+  return out;
+}
+
+let YA_IMPORTADAS = new Set<string>();
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // IDENTIDAD Y VÍDEO
@@ -281,6 +330,7 @@ async function actualizarFicha(id: string, servers: ServerOption[], seasonsNueva
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 async function haremosPelicula(p: PeliculaHfpro, yaTenemos: Map<number, string>): Promise<void> {
+  if (!REHACER && YA_IMPORTADAS.has(p.ruta)) { cuenta.yaEstaban++; return; }
   const tmdbId = await identidad(p.titulo, p.anio, 'movie');
   if (!tmdbId) {
     cuenta.sinIdentidad++;
@@ -309,6 +359,9 @@ async function haremosPelicula(p: PeliculaHfpro, yaTenemos: Map<number, string>)
 }
 
 async function haremosSerie(s: SerieHfpro, yaTenemos: Map<number, string>): Promise<void> {
+  // Lo pendiente se decide ANTES de preguntar a TMDB: una serie ya terminada no cuesta nada.
+  const pendientesSerie = REHACER ? s.episodios : s.episodios.filter((e) => !YA_IMPORTADAS.has(e.ruta));
+  if (!pendientesSerie.length) { cuenta.yaEstaban++; return; }
   const tmdbId = await identidad(s.titulo, s.anio, 'tvseries');
   if (!tmdbId) {
     cuenta.sinIdentidad++;
@@ -328,7 +381,7 @@ async function haremosSerie(s: SerieHfpro, yaTenemos: Map<number, string>): Prom
    * fichero por episodio y ya se comprobó al parsear que la carpeta `TEMPORADA<n>` y el `SxxEyy`
    * del nombre coinciden. Al que no tenga fichero no se le cuelga nada.
    */
-  const aTrabajar = s.episodios.slice(0, CAPITULOS_POR_SERIE === SIN_TOPE ? s.episodios.length : CAPITULOS_POR_SERIE);
+  const aTrabajar = pendientesSerie.slice(0, CAPITULOS_POR_SERIE === SIN_TOPE ? pendientesSerie.length : CAPITULOS_POR_SERIE);
   const buenos: EpisodioHfpro[] = [];
   for (const e of aTrabajar) {
     if (!quedaTiempo()) break;
@@ -372,6 +425,8 @@ async function haremosSerie(s: SerieHfpro, yaTenemos: Map<number, string>): Prom
 async function main() {
   console.log(`IMPORTANDO HFPRO${DRY ? ' (--dry, no escribe)' : ''}\n`);
   const indice = await obtenerIndice();
+  YA_IMPORTADAS = await rutasYaImportadas();
+  console.log(`  ficheros de hfpro ya guardados: ${YA_IMPORTADAS.size}`);
 
   const trabajos: Array<() => Promise<void>> = [];
 
@@ -417,6 +472,8 @@ async function main() {
       `  capítulos:            ${cuenta.capitulos}\n` +
       `  sin vídeo que valga:  ${cuenta.sinVideo}\n` +
       `  SIN IDENTIDAD:        ${cuenta.sinIdentidad}   ← solo se parecía; no se adopta\n` +
+      `  ya importadas:        ${cuenta.yaEstaban}   ← se saltan sin gastar peticiones
+` +
       `  errores:              ${cuenta.errores}`
   );
 }

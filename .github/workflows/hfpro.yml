@@ -1,0 +1,87 @@
+name: Traer y mantener al día el catálogo de HFPro
+
+# HFPRO — FICHEROS DIRECTOS DE HUGGINGFACE, IDENTIDAD POR NOMBRE DE FICHERO.
+#
+# Ver la cabecera de `scripts/importarHfpro.ts` para el porqué de todo. Aquí solo lo que es de
+# correr en la nube.
+#
+# CUÁNTO HAY: ~13.340 episodios en 789 series. Cada capítulo se verifica bajando un rango real del
+# fichero, así que el catálogo entero no cabe en una corrida de 170 minutos — se completa en
+# varias. Por eso el importador AVANZA entre corridas: salta los episodios cuyo fichero ya está
+# guardado, y lo mira antes de preguntar a TMDB, así que una serie terminada no cuesta nada.
+# (La primera versión no lo hacía y habría rehecho las mismas ~300 series en cada vuelta.)
+
+on:
+  schedule:
+    # Cada 3 horas. Con 170 minutos de tope y la guarda de concurrencia, una corrida que se alargue
+    # hace esperar a la siguiente en vez de duplicar peticiones al worker ajeno.
+    - cron: '30 1,4,7,10,13,16,19,22 * * *'
+  workflow_dispatch:
+    inputs:
+      limite:
+        description: 'Cuántas series/películas como mucho. 0 = sin tope.'
+        required: false
+        default: '0'
+      minutos:
+        description: 'Presupuesto de reloj'
+        required: false
+        default: '170'
+      solo:
+        description: 'peliculas o series. Vacío = todo.'
+        required: false
+        default: ''
+
+concurrency:
+  group: hfpro
+  cancel-in-progress: false
+
+jobs:
+  importar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+      - run: npm ci
+
+      # ¿LLEGA ESTE RUNNER A HUGGINGFACE? Y que falle EN ROJO si no.
+      #
+      # No es paranoia: los runners de GitHub NO llegan a NetMirror ni a su CDN (medido, ver
+      # `--via=api` en importarNetmirror), y un importador que no alcanza sus ficheros no rompe —
+      # verifica cada capítulo, ninguno entrega, no escribe nada y termina en VERDE diciendo «0
+      # fichas». Una corrida inútil con cara de haber funcionado. Esto lo convierte en un fallo que
+      # se ve.
+      #
+      # Se pide un rango real: que la lista baje no prueba que los FICHEROS bajen, y son dos saltos
+      # distintos (el worker, y luego el CDN de HuggingFace en AWS).
+      - name: Comprobar que el runner alcanza los ficheros
+        run: |
+          set -e
+          LISTA=$(curl -sfL --max-time 90 "https://hfprolatam.cursolatamsrc.workers.dev/?gatesccn" || true)
+          URL=$(printf '%s\n' "$LISTA" | grep -m1 '^https://.*/resolve/' || true)
+          if [ -z "$URL" ]; then
+            echo "::error::El runner no consigue la lista de hfpro. No se corre el importador."
+            exit 1
+          fi
+          BYTES=$(curl -sL --max-time 90 -r 0-262143 -o /tmp/prueba.bin -w '%{size_download}' "$URL" || echo 0)
+          echo "rango de prueba: ${BYTES} bytes"
+          if [ "${BYTES%.*}" -lt 100000 ]; then
+            echo "::error::La lista baja pero los FICHEROS no (${BYTES} bytes). El runner no alcanza el CDN de HuggingFace."
+            exit 1
+          fi
+
+      - name: Importar catálogo de HFPro
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+        run: |
+          npx ts-node --transpile-only scripts/importarHfpro.ts \
+            --limite=${{ inputs.limite || 0 }} \
+            --minutos=${{ inputs.minutos || 170 }} \
+            ${{ inputs.solo && format('--solo={0}', inputs.solo) || '' }}
