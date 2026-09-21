@@ -63,8 +63,7 @@ jobs:
         run: |
           set -e
           LISTA=$(curl -sfL --max-time 150 "https://hfprolatam.cursolatamsrc.workers.dev/?gatesccn2" || true)
-          mapfile -t URLS < <(printf '%s
-' "$LISTA" | grep '^https://.*/resolve/' | awk 'NR%1500==1' | head -6)
+          mapfile -t URLS < <(printf '%s\n' "$LISTA" | grep '^https://.*/resolve/' | awk 'NR%1500==1' | head -6)
           if [ "${#URLS[@]}" -eq 0 ]; then
             echo "::error::El runner no consigue la lista de hfpro. No se corre el importador."
             exit 1
