@@ -228,6 +228,27 @@ CREATE TABLE IF NOT EXISTS netmirror_cache (
 CREATE INDEX IF NOT EXISTS idx_netmirror_cache_comprobado ON netmirror_cache (comprobado_at);
 CREATE INDEX IF NOT EXISTS idx_netmirror_cache_netflix    ON netmirror_cache (netflix_id) WHERE netflix_id IS NOT NULL;
 
+-- ── Pool de sesiones NetMirror compartidas (2026-09-22) ──────────────────────────────────
+--
+-- CADA TELÉFONO QUE CONSIGUE `usertoken` LO SUBE Y TODOS SE APROVECHAN. NetMirror ata la sesión
+-- a la IP del que la creó, así que un token del pool puede fallar cuando lo usa otro cliente;
+-- por eso `ip_hash` guarda un hash corto para no reusar el token en la misma red donde ya se
+-- rechazó. Un teléfono con OTP roto pide `GET /netmirror/session` en vez de rendirse; uno con
+-- OTP sano lo sube por `POST /netmirror/session`, fire-and-forget.
+CREATE TABLE IF NOT EXISTS netmirror_sesiones (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_token     TEXT NOT NULL UNIQUE,
+    api_url        TEXT NOT NULL,
+    ott            TEXT NOT NULL DEFAULT 'nf' CHECK (ott IN ('nf', 'pv', 'hs')),
+    obtenido_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    ultimo_uso_at  TEXT,
+    ip_hash        TEXT,
+    aciertos       INTEGER NOT NULL DEFAULT 0,
+    fallos         INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_netmirror_sesiones_recientes
+    ON netmirror_sesiones (obtenido_at DESC, aciertos DESC);
+
 -- ── Verificacion distribuida de NetMirror (migracion 021) ────────────────────────────────
 -- GitHub/TMDB prepara candidatos sin tocar NewTV. Los aparatos voluntarios comprueban lotes
 -- pequenos desde su propia red. Nunca se guarda la IP: `red_hash` solo permite exigir acuerdo

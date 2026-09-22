@@ -15,6 +15,8 @@ import {
   estadoNetmirrorDistribuido,
   recibirInformeNetmirror,
 } from '../services/netmirrorDistribuido';
+import { getDb } from '../db/libsql';
+import { createHash } from 'crypto';
 
 /**
  * NetMirror — endpoints por tmdb id.
@@ -84,19 +86,103 @@ router.get('/api/v1/netmirror/tasks/status', async (_req: Request, res: Response
  * del propio televisor, el master completo y firmado de cada titulo. Mantenerlo en una variable
  * de produccion permite renovarlo sin publicar otro APK. Nunca se cachea en navegador ni CDN.
  */
-router.get('/api/v1/netmirror/session', (_req: Request, res: Response) => {
-  res.setHeader('Cache-Control', 'no-store, max-age=0');
-  res.setHeader('CDN-Cache-Control', 'no-store');
-  res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
-  const userToken = String(process.env.NETMIRROR_USER_TOKEN || '').trim();
-  if (!userToken) {
-    return sendErrorResponse(res, 503, 'NETMIRROR_SESSION_UNAVAILABLE', 'La sesion de NetMirror no esta configurada.');
-  }
-  return res.json({
-    status: 'success',
-    data: { api_url: NEWTV_API, ott: 'nf', user_token: userToken },
-  });
+/**
+ * SESIÓN DE NETMIRROR: LA PIDE UN TELÉFONO QUE NO PUDO RENOVAR EN LOCAL.
+ *
+ * Prioridad:
+ *   1. Un token del POOL (los que subieron otros teléfonos) que no lleve muchos fallos y que no
+ *      sea el que YA rechazó esta red. `ip_hash` es un hash corto de la IP del cliente que
+ *      obtuvo el token; si coincide con la de quien lo pide se prefiere, porque NetMirror ata
+ *      la sesión a la IP creadora. Si no hay coincidencia, se ofrece el más reciente y ya lo
+ *      probará: si funciona, `POST /session/uso {ok:true}`; si no, `POST /session/uso {ok:false}`.
+ *   2. El fallback histórico: `NETMIRROR_USER_TOKEN` del entorno.
+ *
+ * Este endpoint jamás se cachea: cada teléfono debe recibir la respuesta del momento.
+ */
+router.get('/api/v1/netmirror/session', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    res.setHeader('Cache-Control', 'no-store, max-age=0');
+    res.setHeader('CDN-Cache-Control', 'no-store');
+    res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+
+    const ip = hashIp(req);
+    const r = await getDb().execute({
+      sql: `SELECT user_token, api_url, ott, ip_hash, aciertos, fallos FROM netmirror_sesiones
+              WHERE fallos < 5
+              ORDER BY (ip_hash = ?) DESC, aciertos DESC, obtenido_at DESC
+              LIMIT 1`,
+      args: [ip],
+    });
+    const fila: any = r.rows[0];
+    if (fila) {
+      return res.json({
+        status: 'success',
+        data: {
+          user_token: String(fila.user_token),
+          api_url: String(fila.api_url || NEWTV_API),
+          ott: String(fila.ott || 'nf'),
+          fuente: 'pool',
+          creada_en_su_red: String(fila.ip_hash || '') === ip,
+        },
+      });
+    }
+    const userToken = String(process.env.NETMIRROR_USER_TOKEN || '').trim();
+    if (!userToken) return sendErrorResponse(res, 503, 'NETMIRROR_SESSION_UNAVAILABLE', 'La sesion de NetMirror no esta configurada.');
+    return res.json({ status: 'success', data: { api_url: NEWTV_API, ott: 'nf', user_token: userToken, fuente: 'env' } });
+  } catch (err) { next(err); }
 });
+
+/**
+ * La app SUBE su `usertoken` cuando lo consigue con éxito.
+ *
+ * Cuerpo: `{user_token, api_url, ott}`. Se guarda el hash corto de la IP del cliente para poder
+ * preferir el mismo token en la misma red la próxima vez. Es fire-and-forget: el 200 solo dice
+ * «recibido», nada de la reproducción depende de esto.
+ */
+router.post('/api/v1/netmirror/session', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = (req.body || {}) as { user_token?: string; api_url?: string; ott?: string };
+    const token = String(body.user_token || '').trim();
+    if (token.length < 20 || token.length > 512) return sendErrorResponse(res, 400, 'INVALID_PARAMETER', 'user_token con longitud entre 20 y 512.');
+    const api = String(body.api_url || NEWTV_API).trim();
+    if (!/^https:\/\/[a-z0-9.-]+/i.test(api)) return sendErrorResponse(res, 400, 'INVALID_PARAMETER', 'api_url no es https.');
+    const ott = normalizarNetmirrorOtt(body.ott);
+    await getDb().execute({
+      sql: `INSERT INTO netmirror_sesiones (user_token, api_url, ott, ip_hash) VALUES (?, ?, ?, ?)
+              ON CONFLICT(user_token) DO UPDATE SET obtenido_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), api_url = excluded.api_url, ott = excluded.ott, ip_hash = excluded.ip_hash`,
+      args: [token, api, ott, hashIp(req)],
+    });
+    res.json({ status: 'success' });
+  } catch (err) { next(err); }
+});
+
+/**
+ * La app AVISA si el token que le dieron funcionó o no. Sirve para retirar tokens muertos y
+ * para saber si la atadura por IP es tan estricta como decía la documentación.
+ * Cuerpo: `{user_token, ok:boolean}`.
+ */
+router.post('/api/v1/netmirror/session/uso', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = (req.body || {}) as { user_token?: string; ok?: boolean };
+    const token = String(body.user_token || '').trim();
+    if (!token) return sendErrorResponse(res, 400, 'INVALID_PARAMETER', 'user_token requerido.');
+    const columna = body.ok === false ? 'fallos' : 'aciertos';
+    await getDb().execute({
+      sql: `UPDATE netmirror_sesiones SET ${columna} = ${columna} + 1,
+              ultimo_uso_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE user_token = ?`,
+      args: [token],
+    });
+    res.json({ status: 'success' });
+  } catch (err) { next(err); }
+});
+
+/** Hash corto de la IP del cliente, para preferir el mismo token en la misma red sin guardar la IP. */
+function hashIp(req: Request): string {
+  const salt = String(process.env.IP_SALT || 'nm-pool');
+  const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+  if (!ip) return '';
+  return createHash('sha256').update(salt + ':' + ip).digest('hex').slice(0, 16);
+}
 
 /**
  * Puente de inventario para los barridos. NetMirror bloquea las IP de GitHub Actions, pero sí
