@@ -1,0 +1,38 @@
+name: Retirar servidores de NetMirror que ya no existen
+
+# NetMirror retira títulos (medido el 2026-09-21: 1 de cada 7 películas con su servidor daba 404
+# «NetMirror no tiene este título»). GitHub no llega a NetMirror, así que se pregunta a través de
+# nuestra API en Vercel. El script solo retira tras dos «no» seguidos y se para si NetMirror no
+# reconoce «El Origen»; ver scripts/revisarNetmirror.ts.
+
+on:
+  schedule:
+    - cron: '10 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      dry:
+        description: 'Solo medir, sin escribir'
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: revisar-netmirror
+  cancel-in-progress: false
+
+jobs:
+  revisar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Revisar servidores de NetMirror
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+        run: npx ts-node scripts/revisarNetmirror.ts --via=api ${{ inputs.dry && '--dry' || '' }}
