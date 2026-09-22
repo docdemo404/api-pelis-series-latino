@@ -19,6 +19,7 @@
  */
 import 'dotenv/config';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
+import { getDb } from '../src/db/libsql';
 import { httpClient } from '../src/utils/httpClient';
 import { extractDirect, esVideoDeMuestra } from '../src/scrapers/directStream';
 import { bajarManifiesto, segmentoDescargable } from '../src/services/manifestHealth';
@@ -96,6 +97,21 @@ async function popularesTmdb(tipo: 'movie' | 'tv'): Promise<number[]> {
     }
   }
   return [...new Set(ids)];
+}
+
+/**
+ * Las fichas cuyo ÚNICO origen es VideoAPI: si su CDN se atasca, la app no tiene a dónde saltar.
+ * Van primero porque un respaldo ahí vale más que un tercer servidor en otra. En series se mira
+ * el texto de `seasons` (aproximado: basta con que no aparezca ninguna otra fuente).
+ */
+async function soloVideoapi(type: ContentType): Promise<Set<number>> {
+  const sql = type === 'movie'
+    ? `SELECT tmdb_id FROM media_items WHERE type='movie' AND tmdb_id>0 AND json_array_length(servers)>0
+         AND NOT EXISTS (SELECT 1 FROM json_each(servers) WHERE coalesce(json_extract(value,'$.source_id'),'') <> 'videoapi')`
+    : `SELECT tmdb_id FROM media_items WHERE type<>'movie' AND tmdb_id>0 AND seasons LIKE '%videoapi%'
+         AND seasons NOT LIKE '%unlimplay%' AND seasons NOT LIKE '%"source_id":"hfpro"%' AND seasons NOT LIKE '%lamoviebot%'`;
+  const r = await getDb().execute(sql);
+  return new Set(r.rows.map((f) => Number(f[0])));
 }
 
 const claveCursor = (type: ContentType) => `unlimplay_cursor_${type === 'movie' ? 'movie' : 'tv'}`;
@@ -432,7 +448,10 @@ async function main() {
     for (const tmdb of faltan) nuevas.push({ type, tmdb });
     const cursor = await leerCursor(type);
     cursores.set(type, cursor);
-    for (const [tmdb, id] of enVuelta(nuestras, cursor)) existentes.push({ type, tmdb, filaExistente: id });
+    const sinRespaldo = await soloVideoapi(type);
+    const candidatas = new Map([...nuestras].filter(([tmdb]) => sinRespaldo.has(tmdb)));
+    console.log(`${type}: ${candidatas.size} fichas solo con VideoAPI, en vuelta desde tmdb ${cursor}`);
+    for (const [tmdb, id] of enVuelta(candidatas, cursor)) existentes.push({ type, tmdb, filaExistente: id });
   }
 
   // Existentes intercaladas por tipo, para que una tanda corta no se la coman solo las películas.
@@ -443,7 +462,12 @@ async function main() {
     if (pelis[i]) intercaladas.push(pelis[i]);
     if (series[i]) intercaladas.push(series[i]);
   }
-  const cola = [...nuevas, ...intercaladas];
+  // Una nueva de cada tres: la primera corrida gastó los 40 minutos solo en novedades.
+  const cola: Trabajo[] = [];
+  for (let i = 0, j = 0; i < nuevas.length || j < intercaladas.length; ) {
+    if (i < nuevas.length) cola.push(nuevas[i++]);
+    for (let k = 0; k < 2 && j < intercaladas.length; k++) cola.push(intercaladas[j++]);
+  }
   const tanda = cola.slice(0, LIMITE === SIN_TOPE ? cola.length : LIMITE);
   console.log(`\nCola: ${nuevas.length} nuevas + ${existentes.length} existentes · esta tanda: ${tanda.length}\n`);
 
