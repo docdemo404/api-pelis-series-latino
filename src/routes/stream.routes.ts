@@ -427,6 +427,9 @@ async function pipeUpstream(
     res.setHeader('Content-Type', target.includes('.m3u8') ? 'application/x-mpegURL' : 'video/mp4');
   }
   applyCachePolicy(res, cacheControl);
+  // Sin esto el borde de Vercel sirve una petición con Range desde el trozo entero que tiene
+  // guardado, y lo hace con 200 + Content-Range: el mismo fallo de arriba, pero sin pasar por aquí.
+  res.setHeader('Vary', 'Range');
 
   // El contador de tránsito no debe estorbar: se suma al terminar, sin bloquear el pipe.
   let sent = 0;
