@@ -6,8 +6,9 @@ name: Traer fichas y servidores de UnlimPlay
 
 on:
   schedule:
-    # 05:45 y 17:45: huecos sin videoapi, netmirror, scraper ni episodios.
-    - cron: '45 5,17 * * *'
+    # Cuatro al día en huecos sin videoapi, netmirror, scraper ni episodios: dar respaldo a las
+    # ~7.600 fichas que solo tienen VideoAPI a 300 por corrida lleva cerca de una semana.
+    - cron: '45 5,11,17,23 * * *'
   workflow_dispatch:
     inputs:
       limite:
