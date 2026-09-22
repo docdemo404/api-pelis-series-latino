@@ -405,7 +405,11 @@ async function pipeUpstream(
    */
   const disfrazado = /^image\//i.test(String(upstream.headers['content-type'] || ''));
 
-  res.status(disfrazado ? 200 : upstream.status);
+  // vimeos respeta el Range pero contesta 200. Un 200 a una petición con Range hace que Media3
+  // (OkHttpDataSource) crea que llegó el fichero entero y se salte `position` bytes que ya venían
+  // descontados: el trozo reanudado a mitad de película sale mutilado.
+  const rangoRespetado = !!range && upstream.status === 200 && !!upstream.headers['content-range'];
+  res.status(disfrazado ? 200 : rangoRespetado ? 206 : upstream.status);
   const passthrough = disfrazado
     ? []
     : ['content-range', 'content-length', 'content-type', 'accept-ranges'];
