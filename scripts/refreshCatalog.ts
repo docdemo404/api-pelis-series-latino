@@ -1183,9 +1183,12 @@ async function urlsQueReproducenAhora(servidores: any[], fuente: string): Promis
          */
         const esHls = /\.m3u8(\?|$)/i.test(directo.url) || directo.kind === 'hls';
         if (esHls) {
-          const manifiesto = await bajarManifiesto(directo.url, REFERER_MOVIEDAYS);
+          // Moviedays publica el embed, pero el CDN acepta como Referer al reproductor
+          // (vimeos.net), no a moviedays.lat. El segundo devuelve 403 incluso para vídeo sano.
+          const refererVideo = new URL(sv.embed_url).origin + '/';
+          const manifiesto = await bajarManifiesto(directo.url, refererVideo);
           if (!manifiesto) return null;
-          if (!(await segmentoDescargable(manifiesto, directo.url, REFERER_MOVIEDAYS))) return null;
+          if (!(await segmentoDescargable(manifiesto, directo.url, refererVideo))) return null;
           return { ...sv, status: 'online', verified_at: new Date().toISOString(), source_id: fuente };
         }
 
