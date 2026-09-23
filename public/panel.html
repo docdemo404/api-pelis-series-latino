@@ -276,8 +276,8 @@
                 <input id="poolLabel" class="form-control form-control-sm bg-dark text-white border-secondary" placeholder="Casillero 1">
               </div>
               <div class="col-12 col-md-3">
-                <label class="text-secondary small mb-1 d-block">Bucket</label>
-                <input id="poolBucket" class="form-control form-control-sm bg-dark text-white border-secondary" placeholder="mi-bucket">
+                <label class="text-secondary small mb-1 d-block">Bucket (el <b>nombre</b>, no el ID)</label>
+                <input id="poolBucket" class="form-control form-control-sm bg-dark text-white border-secondary" placeholder="mis-pelis">
               </div>
               <div class="col-12 col-md-3" id="poolR2Field">
                 <label class="text-secondary small mb-1 d-block">Account ID (R2)</label>
@@ -285,7 +285,17 @@
               </div>
               <div class="col-12 col-md-3" id="poolB2Field" style="display:none">
                 <label class="text-secondary small mb-1 d-block">Región (B2)</label>
-                <input id="poolRegion" class="form-control form-control-sm bg-dark text-white border-secondary" placeholder="us-west-004">
+                <select id="poolRegionSel" class="form-select form-select-sm bg-dark text-white border-secondary">
+                  <option value="us-west-000">us-west-000</option>
+                  <option value="us-west-001">us-west-001</option>
+                  <option value="us-west-002">us-west-002</option>
+                  <option value="us-west-004" selected>us-west-004</option>
+                  <option value="us-east-005">us-east-005</option>
+                  <option value="eu-central-003">eu-central-003</option>
+                  <option value="__otra__">Otra… (escribir)</option>
+                </select>
+                <input id="poolRegion" class="form-control form-control-sm bg-dark text-white border-secondary mt-1" placeholder="ej. us-west-004" style="display:none">
+                <div class="text-secondary small mt-1">La ves en el <b>Endpoint</b> de tu bucket: <code>s3.&lt;región&gt;.backblazeb2.com</code></div>
               </div>
               <div class="col-12 col-md-6">
                 <label class="text-secondary small mb-1 d-block">Access Key ID</label>
@@ -296,6 +306,7 @@
                 <input id="poolSecretKey" type="password" class="form-control form-control-sm bg-dark text-white border-secondary" autocomplete="off">
               </div>
             </div>
+            <div id="poolKeysHelp" class="text-secondary small mt-2"></div>
             <div class="alert alert-warning py-2 my-2 small mb-0">
               ⚠️ Para poder subir desde el navegador, el bucket necesita una regla <b>CORS</b> que
               permita <code>PUT</code> desde el origen de este panel. Si la subida falla con un error
@@ -1514,10 +1525,27 @@
       document.getElementById('poolAddForm').style.display = 'none';
       document.getElementById('poolAddAviso').innerHTML = '';
     });
-    document.getElementById('poolProvider').addEventListener('change', function () {
-      const r2 = this.value === 'r2';
+    function poolActualizarAyuda() {
+      const prov = document.getElementById('poolProvider').value;
+      const r2 = prov === 'r2';
       document.getElementById('poolR2Field').style.display = r2 ? '' : 'none';
       document.getElementById('poolB2Field').style.display = r2 ? 'none' : '';
+      const help = document.getElementById('poolKeysHelp');
+      if (r2) {
+        help.innerHTML = '📍 <b>Dónde sacar esto en Cloudflare R2:</b> el <b>Account ID</b> está en la página de R2 (arriba a la derecha). ' +
+          'El <b>Access Key ID</b> y <b>Secret</b> se crean en <b>R2 → Manage R2 API Tokens → Create API Token</b> (permiso <i>Object Read &amp; Write</i>); ' +
+          'el bucket es su <b>nombre</b>.';
+      } else {
+        help.innerHTML = '📍 <b>Dónde sacar esto en Backblaze B2:</b> crea una <b>Application Key</b> en <b>B2 Cloud Storage → Application Keys → Add a New Application Key</b> ' +
+          '(con acceso a tu bucket, Read &amp; Write). Te dará un <b>keyID</b> (= Access Key ID) y un <b>applicationKey</b> (= Secret, <b>se muestra una sola vez</b>). ' +
+          'El <b>Bucket</b> es su <b>nombre</b>, y la <b>Región</b> sale del Endpoint del bucket.';
+      }
+    }
+    document.getElementById('poolProvider').addEventListener('change', poolActualizarAyuda);
+
+    // Región B2: el desplegable manda; "Otra…" muestra un campo para escribirla.
+    document.getElementById('poolRegionSel').addEventListener('change', function () {
+      document.getElementById('poolRegion').style.display = this.value === '__otra__' ? '' : 'none';
     });
 
     document.getElementById('poolAddBtn').addEventListener('click', async function () {
@@ -1530,8 +1558,12 @@
         access_key_id: document.getElementById('poolAccessKey').value.trim(),
         secret_access_key: document.getElementById('poolSecretKey').value.trim(),
       };
-      if (provider === 'r2') cuerpo.account_id = document.getElementById('poolAccountId').value.trim();
-      else cuerpo.region = document.getElementById('poolRegion').value.trim();
+      if (provider === 'r2') {
+        cuerpo.account_id = document.getElementById('poolAccountId').value.trim();
+      } else {
+        const sel = document.getElementById('poolRegionSel').value;
+        cuerpo.region = sel === '__otra__' ? document.getElementById('poolRegion').value.trim() : sel;
+      }
 
       aviso.className = 'small text-secondary';
       aviso.textContent = '⏳ Validando credenciales…';
@@ -1756,6 +1788,7 @@
     });
 
     // Arranque
+    poolActualizarAyuda();
     poolCargarCuentas();
     poolGdriveConfigEstado();
   </script>
