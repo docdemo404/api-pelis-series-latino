@@ -28,6 +28,14 @@ CREATE TABLE IF NOT EXISTS esquema (
     valor INTEGER NOT NULL
 );
 
+-- Ajustes sueltos que persisten en la base (clave→valor JSON). Nace con el cliente OAuth de Google
+-- Drive (clave 'gdrive_oauth'), que hace falta ANTES de que exista ninguna cuenta para poder armar
+-- la URL de consentimiento. Se prefiere env var si está; esto es el respaldo editable desde el panel.
+CREATE TABLE IF NOT EXISTS app_settings (
+    clave TEXT PRIMARY KEY,
+    valor TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS media_items (
     id                TEXT PRIMARY KEY,
     tmdb_id           INTEGER NOT NULL,
@@ -331,7 +339,7 @@ CREATE INDEX IF NOT EXISTS idx_pluto_titulos_veredicto ON pluto_titulos (veredic
 -- con una consulta de listado antes de guardar, y se usan solo para firmar URLs de subida/bajada.
 CREATE TABLE IF NOT EXISTS pool_accounts (
     id                TEXT PRIMARY KEY,
-    provider          TEXT NOT NULL CHECK (provider IN ('r2', 'b2')),
+    provider          TEXT NOT NULL CHECK (provider IN ('r2', 'b2', 'gdrive')),
     label             TEXT NOT NULL DEFAULT '',
     endpoint          TEXT NOT NULL,
     region            TEXT NOT NULL,

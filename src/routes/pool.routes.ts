@@ -3,10 +3,11 @@ import { sendErrorResponse } from '../utils/apiHelpers';
 import { publicOrigin } from '../utils/publicUrl';
 import { CatalogService } from '../services/catalogService';
 import {
-  listarCuentas, anadirCuenta, borrarCuenta, marcarCuenta,
-  presignSubida, registrarObjeto, objeto, objetosDeFicha, borrarObjeto,
+  listarCuentas, anadirCuenta, anadirCuentaGDrive, borrarCuenta, marcarCuenta,
+  presignSubida, registrarObjeto, resolverSubidaGDrive, objeto, objetosDeFicha, borrarObjeto,
   urlDeReproduccion, Proveedor, CAP_POR_DEFECTO,
 } from '../services/poolStore';
+import * as gdrive from '../services/gdrive';
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -116,6 +117,62 @@ router.delete('/api/v1/panel/pool/accounts/:id', async (req: Request, res: Respo
   } catch (err) { next(err); }
 });
 
+/* ─────────────────────────────── Google Drive (OAuth) ─────────────────────────────── */
+
+const gdriveRedirectUri = (req: Request) => `${publicOrigin(req)}/api/v1/panel/pool/gdrive/callback`;
+
+/** ¿Está configurado el cliente OAuth? Devuelve también el redirect_uri exacto a registrar en Google. */
+router.get('/api/v1/panel/pool/gdrive/config', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const cfg = await gdrive.leerConfig();
+    res.json({ status: 'success', configured: !!cfg, redirect_uri: gdriveRedirectUri(req) });
+  } catch (err) { next(err); }
+});
+
+/** Guarda el client_id/client_secret del cliente OAuth de la app (uno para todas las cuentas). */
+router.post('/api/v1/panel/pool/gdrive/config', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const b = (req.body ?? {}) as Record<string, any>;
+    const client_id = String(b.client_id || '').trim();
+    const client_secret = String(b.client_secret || '').trim();
+    if (!client_id || !client_secret) return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'Faltan client_id y client_secret');
+    await gdrive.guardarConfig({ client_id, client_secret });
+    res.json({ status: 'success', redirect_uri: gdriveRedirectUri(req) });
+  } catch (err) { next(err); }
+});
+
+/** La URL de consentimiento de Google para conectar una cuenta nueva. El panel la abre en otra pestaña. */
+router.get('/api/v1/panel/pool/gdrive/auth-url', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const cfg = await gdrive.leerConfig();
+    if (!cfg) return sendErrorResponse(res, 422, 'NOT_CONFIGURED', 'Configura primero el cliente OAuth de Google.');
+    res.json({ status: 'success', url: gdrive.urlDeConsentimiento(cfg, gdriveRedirectUri(req)) });
+  } catch (err) { next(err); }
+});
+
+/** Callback de OAuth: cambia el code por tokens y da de alta el casillero de Drive. Devuelve HTML. */
+router.get('/api/v1/panel/pool/gdrive/callback', async (req: Request, res: Response) => {
+  const pagina = (titulo: string, cuerpo: string) =>
+    `<!doctype html><meta charset="utf-8"><body style="font-family:system-ui;background:#0b0f14;color:#e6e6e6;padding:40px;text-align:center">` +
+    `<h2>${titulo}</h2><p>${cuerpo}</p><p style="color:#9aa">Puedes cerrar esta pestaña y volver al panel.</p>` +
+    `<script>try{if(window.opener)window.opener.postMessage('gdrive-ok','*')}catch(e){}</script></body>`;
+  try {
+    const code = String(req.query.code || '').trim();
+    const err = String(req.query.error || '').trim();
+    if (err) return res.status(400).send(pagina('❌ Google devolvió un error', err));
+    if (!code) return res.status(400).send(pagina('❌ Falta el código', 'No llegó el parámetro <code>code</code>.'));
+    const cfg = await gdrive.leerConfig();
+    if (!cfg) return res.status(422).send(pagina('❌ Sin configurar', 'Configura el cliente OAuth de Google en el panel primero.'));
+
+    const tok = await gdrive.intercambiarCodigo(cfg, code, gdriveRedirectUri(req));
+    const r = await anadirCuentaGDrive({ refreshToken: tok.refresh_token, email: tok.email });
+    if (!r.ok) return res.status(500).send(pagina('❌ No se pudo guardar', r.error || ''));
+    res.send(pagina('✅ Google Drive conectado', `Cuenta <b>${tok.email || ''}</b> añadida como casillero.`));
+  } catch (e: any) {
+    res.status(500).send(pagina('❌ Error al conectar', String(e?.message || e).slice(0, 300)));
+  }
+});
+
 /* ─────────────────────────────── subida ─────────────────────────────── */
 
 /**
@@ -145,7 +202,7 @@ router.post('/api/v1/panel/pool/presign', async (req: Request, res: Response, ne
     res.json({
       status: 'success',
       object_id: r.objectId, account_id: r.accountId, key: r.key,
-      upload_url: r.url, content_type: r.contentType,
+      upload_url: r.url, content_type: r.contentType, provider: r.provider,
     });
   } catch (err) { next(err); }
 });
@@ -164,13 +221,22 @@ router.post('/api/v1/panel/pool/confirm', async (req: Request, res: Response, ne
     const tmdbId = Number(b.tmdb_id);
     const tipo = String(b.type) === 'tvseries' ? 'tvseries' : 'movie';
     const accountId = String(b.account_id || '').trim();
-    const key = String(b.key || '').trim();
+    let key = String(b.key || '').trim();
     const filename = String(b.filename || '').trim();
-    const size = Number(b.size) || 0;
+    let size = Number(b.size) || 0;
     const season = Number(b.season) || 0;
     const episode = Number(b.episode) || 0;
-    if (!objectId || !accountId || !key || !Number.isFinite(tmdbId) || tmdbId <= 0) {
-      return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'Faltan object_id, account_id, key o tmdb_id');
+    if (!objectId || !accountId || !Number.isFinite(tmdbId) || tmdbId <= 0) {
+      return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'Faltan object_id, account_id o tmdb_id');
+    }
+
+    // Google Drive no conoce la `key` (id del archivo) hasta después de subir: se resuelve aquí,
+    // buscándolo por el nombre (= object_id). En R2/B2 la `key` la manda el cliente.
+    if (!key) {
+      const rg = await resolverSubidaGDrive(accountId, objectId);
+      if (!rg.ok || !rg.key) return sendErrorResponse(res, 502, 'GDRIVE_RESOLVE', rg.error || 'No se pudo resolver el archivo en Drive');
+      key = rg.key;
+      if (!size && rg.size) size = rg.size;
     }
 
     const reg = await registrarObjeto({ objectId, tmdbId, tipo, season, episode, accountId, key, size, filename });

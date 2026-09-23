@@ -307,6 +307,37 @@
               <span id="poolAddAviso" class="small"></span>
             </div>
           </div>
+
+          <!-- GOOGLE DRIVE (OAuth) -->
+          <hr class="border-secondary my-3">
+          <div class="d-flex align-items-center gap-2 flex-wrap mb-2">
+            <span class="badge bg-warning text-dark">Google Drive</span>
+            <span id="poolGdriveEstado" class="text-secondary small">Comprobando…</span>
+            <button type="button" id="poolGdriveConfigToggle" class="btn btn-sm btn-dark text-white border-secondary">⚙️ Configurar OAuth</button>
+            <button type="button" id="poolGdriveConnect" class="btn btn-sm btn-warning fw-bold" style="display:none">🔗 Conectar cuenta de Drive</button>
+          </div>
+
+          <div id="poolGdriveConfig" class="stat-box" style="display:none">
+            <div class="text-secondary small mb-2">
+              Crea un <b>cliente OAuth</b> en Google Cloud Console (tipo "Aplicación web"), con el
+              <b>scope</b> <code>drive.file</code>, y registra este <b>URI de redirección</b> exacto:
+            </div>
+            <div class="mb-2"><code id="poolGdriveRedirect" class="text-info small"></code></div>
+            <div class="row g-2">
+              <div class="col-12 col-md-6">
+                <label class="text-secondary small mb-1 d-block">Client ID</label>
+                <input id="poolGdriveClientId" class="form-control form-control-sm bg-dark text-white border-secondary" autocomplete="off">
+              </div>
+              <div class="col-12 col-md-6">
+                <label class="text-secondary small mb-1 d-block">Client Secret</label>
+                <input id="poolGdriveClientSecret" type="password" class="form-control form-control-sm bg-dark text-white border-secondary" autocomplete="off">
+              </div>
+            </div>
+            <div class="d-flex gap-2 mt-2 align-items-center">
+              <button type="button" id="poolGdriveConfigSave" class="btn btn-sm btn-warning fw-bold">Guardar cliente OAuth</button>
+              <span id="poolGdriveConfigAviso" class="small"></span>
+            </div>
+          </div>
         </div>
 
         <div class="card main-card p-4 p-md-5 mb-4">
@@ -1445,9 +1476,11 @@
           cuentas.map(function (c) {
             const col = c.used_pct >= 90 ? 'bg-danger' : (c.used_pct >= 70 ? 'bg-warning' : 'bg-info');
             const muerta = c.status === 'dead';
+            const badge = c.provider === 'r2' ? 'bg-primary' : (c.provider === 'gdrive' ? 'bg-warning text-dark' : 'bg-success');
+            const etiqProv = c.provider === 'gdrive' ? 'DRIVE' : c.provider.toUpperCase();
             return '<div class="source-card d-flex align-items-center justify-content-between flex-wrap gap-2" data-id="' + c.id + '">' +
               '<div style="min-width:220px">' +
-                '<span class="badge ' + (c.provider === 'r2' ? 'bg-primary' : 'bg-success') + ' me-2">' + c.provider.toUpperCase() + '</span>' +
+                '<span class="badge ' + badge + ' me-2">' + etiqProv + '</span>' +
                 '<b class="text-white">' + poolEsc(c.label) + '</b>' +
                 (muerta ? ' <span class="badge bg-danger">caída</span>' : '') +
                 '<div class="text-secondary small">' + poolEsc(c.bucket) + '</div>' +
@@ -1665,8 +1698,66 @@
       }
     });
 
+    // ── Google Drive (OAuth) ─────────────────────────────────────────────────
+    async function poolGdriveConfigEstado() {
+      try {
+        const j = await (await fetch('/api/v1/panel/pool/gdrive/config')).json();
+        document.getElementById('poolGdriveRedirect').textContent = j.redirect_uri || '';
+        const est = document.getElementById('poolGdriveEstado');
+        const connBtn = document.getElementById('poolGdriveConnect');
+        if (j.configured) {
+          est.innerHTML = '<span class="text-success">OAuth configurado</span> — ya puedes conectar cuentas.';
+          connBtn.style.display = '';
+        } else {
+          est.innerHTML = '<span class="text-warning">Falta configurar el cliente OAuth</span> (una sola vez).';
+          connBtn.style.display = 'none';
+        }
+      } catch (e) {
+        document.getElementById('poolGdriveEstado').textContent = 'No se pudo leer la configuración.';
+      }
+    }
+
+    document.getElementById('poolGdriveConfigToggle').addEventListener('click', function () {
+      const f = document.getElementById('poolGdriveConfig');
+      f.style.display = f.style.display === 'none' ? '' : 'none';
+    });
+
+    document.getElementById('poolGdriveConfigSave').addEventListener('click', async function () {
+      const aviso = document.getElementById('poolGdriveConfigAviso');
+      const body = {
+        client_id: document.getElementById('poolGdriveClientId').value.trim(),
+        client_secret: document.getElementById('poolGdriveClientSecret').value.trim(),
+      };
+      if (!body.client_id || !body.client_secret) { aviso.className = 'small text-warning'; aviso.textContent = 'Faltan datos'; return; }
+      aviso.className = 'small text-secondary'; aviso.textContent = '⏳ Guardando…';
+      try {
+        const j = await (await fetch('/api/v1/panel/pool/gdrive/config', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        })).json();
+        if (j.status === 'success') {
+          aviso.className = 'small text-success'; aviso.textContent = '✅ Guardado';
+          document.getElementById('poolGdriveClientSecret').value = '';
+          poolGdriveConfigEstado();
+        } else { aviso.className = 'small text-danger'; aviso.textContent = '❌ ' + (j.message || 'Error'); }
+      } catch (e) { aviso.className = 'small text-danger'; aviso.textContent = '❌ Error de conexión'; }
+    });
+
+    document.getElementById('poolGdriveConnect').addEventListener('click', async function () {
+      try {
+        const j = await (await fetch('/api/v1/panel/pool/gdrive/auth-url')).json();
+        if (j.status === 'success' && j.url) window.open(j.url, '_blank', 'width=520,height=680');
+        else alert((j.error && j.error.message) || j.message || 'No se pudo iniciar el login de Google');
+      } catch (e) { alert('Error de conexión'); }
+    });
+
+    // Cuando el callback de OAuth termina, avisa por postMessage: recargamos los casilleros.
+    window.addEventListener('message', function (ev) {
+      if (ev.data === 'gdrive-ok') { poolCargarCuentas(); poolGdriveConfigEstado(); }
+    });
+
     // Arranque
     poolCargarCuentas();
+    poolGdriveConfigEstado();
   </script>
 </body>
 </html>

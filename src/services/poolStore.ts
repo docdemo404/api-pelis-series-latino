@@ -26,8 +26,9 @@ import { getSupabaseAdmin } from './supabaseService';
 import { getDb } from '../db/libsql';
 import { httpClient } from '../utils/httpClient';
 import { CredencialesS3, getPrefirmado, putPrefirmado, deletePrefirmado, listarPrefirmado } from '../utils/s3sign';
+import * as gdrive from './gdrive';
 
-export type Proveedor = 'r2' | 'b2';
+export type Proveedor = 'r2' | 'b2' | 'gdrive';
 
 export interface CuentaCasillero {
   id: string;
@@ -60,8 +61,9 @@ export interface ObjetoCasillero {
 
 /** Tope gratis por proveedor, para no pasarse del free tier (lo que dispara la atención). */
 export const CAP_POR_DEFECTO: Record<Proveedor, number> = {
-  r2: 10 * 1024 ** 3, // 10 GB
-  b2: 10 * 1024 ** 3, // 10 GB
+  r2: 10 * 1024 ** 3,     // 10 GB
+  b2: 10 * 1024 ** 3,     // 10 GB
+  gdrive: 15 * 1024 ** 3, // 15 GB
 };
 
 const db = () => getSupabaseAdmin();
@@ -158,6 +160,31 @@ export async function anadirCuenta(input: {
   return { ok: true, cuenta: fila };
 }
 
+/**
+ * Da de alta un casillero de GOOGLE DRIVE. No pasa por el formulario S3: la llama el callback de
+ * OAuth con el refresh token ya obtenido. El `secret_access_key` guarda el refresh token; el resto
+ * de columnas S3 quedan vacías porque en Drive no aplican.
+ */
+export async function anadirCuentaGDrive(input: { refreshToken: string; email?: string; label?: string; capBytes?: number }): Promise<{ ok: boolean; cuenta?: CuentaCasillero; error?: string }> {
+  const fila: CuentaCasillero = {
+    id: crypto.randomBytes(8).toString('hex'),
+    provider: 'gdrive',
+    label: (input.label || (input.email ? 'Drive ' + input.email : 'Google Drive')).slice(0, 80),
+    endpoint: '',
+    region: '',
+    bucket: input.email || '',
+    access_key_id: input.email || '',
+    secret_access_key: input.refreshToken,
+    used_bytes: 0,
+    cap_bytes: input.capBytes || CAP_POR_DEFECTO.gdrive,
+    status: 'live',
+    created_at: new Date().toISOString(),
+  };
+  const { error } = await db().from('pool_accounts').insert(fila as unknown as Record<string, unknown>);
+  if (error) return { ok: false, error: error.message };
+  return { ok: true, cuenta: fila };
+}
+
 export async function marcarCuenta(id: string, status: 'live' | 'dead'): Promise<boolean> {
   const { error } = await db().from('pool_accounts').update({ status }).eq('id', id);
   return !error;
@@ -200,7 +227,7 @@ export async function elegirCuenta(size: number, provider?: Proveedor): Promise<
 export async function presignSubida(input: {
   tmdbId: number; tipo: 'movie' | 'tvseries'; season?: number; episode?: number;
   filename: string; size: number; accountId?: string; provider?: Proveedor;
-}): Promise<{ ok: boolean; error?: string; objectId?: string; accountId?: string; key?: string; url?: string; contentType?: string }> {
+}): Promise<{ ok: boolean; error?: string; objectId?: string; accountId?: string; key?: string; url?: string; contentType?: string; provider?: Proveedor }> {
   const size = Math.max(0, Math.round(input.size || 0));
   let c: CuentaCasillero | null = null;
   if (input.accountId) {
@@ -216,9 +243,45 @@ export async function presignSubida(input: {
   const objectId = crypto.randomBytes(12).toString('hex');
   const s = Math.max(0, Number(input.season) || 0);
   const e = Math.max(0, Number(input.episode) || 0);
+  const contentType = tipoContenido(input.filename);
+
+  // GOOGLE DRIVE: no hay PUT prefirmado; se abre una sesión reanudable y el navegador sube ahí. El
+  // `key` (id de Drive) todavía no se sabe —lo asigna Google—, se resuelve en la confirmación por el
+  // nombre (= objectId). Ver `resolverSubidaGDrive`.
+  if (c.provider === 'gdrive') {
+    const cfg = await gdrive.leerConfig();
+    if (!cfg) return { ok: false, error: 'Falta configurar el cliente OAuth de Google Drive en el panel.' };
+    try {
+      const token = await gdrive.accessToken(cfg, c.secret_access_key);
+      const url = await gdrive.crearSesionSubida(token, objectId, contentType);
+      return { ok: true, objectId, accountId: c.id, key: '', url, contentType, provider: 'gdrive' };
+    } catch (err: any) {
+      return { ok: false, error: String(err?.message || err) };
+    }
+  }
+
   const key = `${input.tmdbId}/${s}x${e}/${objectId}${extDe(input.filename)}`;
   const url = putPrefirmado(credDe(c), key, 3600);
-  return { ok: true, objectId, accountId: c.id, key, url, contentType: tipoContenido(input.filename) };
+  return { ok: true, objectId, accountId: c.id, key, url, contentType, provider: c.provider };
+}
+
+/**
+ * Tras subir a Drive, resuelve el id real del archivo (buscándolo por el nombre = objectId) para
+ * usarlo como `key`. Lo llama la confirmación cuando la cuenta es de Drive.
+ */
+export async function resolverSubidaGDrive(accountId: string, objectId: string): Promise<{ ok: boolean; key?: string; size?: number; error?: string }> {
+  const c = await cuenta(accountId);
+  if (!c || c.provider !== 'gdrive') return { ok: false, error: 'Cuenta de Drive no encontrada' };
+  const cfg = await gdrive.leerConfig();
+  if (!cfg) return { ok: false, error: 'Falta el cliente OAuth de Google Drive' };
+  try {
+    const token = await gdrive.accessToken(cfg, c.secret_access_key);
+    const f = await gdrive.buscarPorNombre(token, objectId);
+    if (!f) return { ok: false, error: 'El archivo no apareció en Drive (¿se completó la subida?)' };
+    return { ok: true, key: f.id, size: f.size };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err) };
+  }
 }
 
 /** Registra el objeto ya subido y descuenta su tamaño del casillero. */
@@ -266,6 +329,14 @@ export async function objetosDeFicha(tmdbId: number, tipo: 'movie' | 'tvseries')
 export async function urlDeReproduccion(o: ObjetoCasillero, expiraEn = 6 * 3600): Promise<string | null> {
   const c = await cuenta(o.account_id);
   if (!c || c.status !== 'live') return null;
+  if (c.provider === 'gdrive') {
+    const cfg = await gdrive.leerConfig();
+    if (!cfg) return null;
+    try {
+      const token = await gdrive.accessToken(cfg, c.secret_access_key);
+      return gdrive.urlMedia(o.key, token);
+    } catch { return null; }
+  }
   return getPrefirmado(credDe(c), o.key, expiraEn, o.content_type || tipoContenido(o.key));
 }
 
@@ -276,7 +347,12 @@ export async function borrarObjeto(id: string): Promise<{ ok: boolean; error?: s
   const c = await cuenta(o.account_id);
   if (c) {
     try {
-      await httpClient.delete(deletePrefirmado(credDe(c), o.key), { validateStatus: () => true, timeout: 15000 } as any);
+      if (c.provider === 'gdrive') {
+        const cfg = await gdrive.leerConfig();
+        if (cfg) await gdrive.borrarArchivo(await gdrive.accessToken(cfg, c.secret_access_key), o.key);
+      } else {
+        await httpClient.delete(deletePrefirmado(credDe(c), o.key), { validateStatus: () => true, timeout: 15000 } as any);
+      }
     } catch { /* el objeto puede haberse borrado ya; se sigue limpiando la fila */ }
   }
   const { error } = await db().from('pool_objects').delete().eq('id', id);
