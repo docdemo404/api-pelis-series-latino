@@ -12,6 +12,7 @@ import { CacheStore } from '../cache/store';
 import { unwrapRedirector, canonicalArchiveOrg } from '../scrapers/directStream';
 import { servidorVirtualDePelicula, decodificarIdNetmirror } from '../scrapers/netmirror';
 import { idsCatalogoNetmirror, muestrasNetmirrorSeries } from './netmirrorSeries';
+import { SourceManager } from './sourceManager';
 import { tieneEspanolLatino } from '../utils/idiomas';
 import { revisarServidores, aplicarVeredictosRecordados } from './playbackHealth';
 import {
@@ -2370,6 +2371,8 @@ export class CatalogService {
     const muestrasNetmirror = idsSerie.length
       ? await muestrasNetmirrorSeries(idsSerie).catch(() => new Map())
       : new Map();
+    const prioridades = new Map((await SourceManager.getSourcesAsync())
+      .map(s => [s.id.toLowerCase(), s.priority] as const));
     const filas = (data || []).map((r: any) => {
       const esSerie = r.type === 'tvseries';
 
@@ -2407,6 +2410,17 @@ export class CatalogService {
         ...enOrden.filter(x => esServidorManual(x.sv)),
         ...enOrden.filter(x => !esServidorManual(x.sv)),
       ];
+      if (esSerie) {
+        // El panel mostraba la muestra NetMirror DESPUÉS de los 61 enlaces VideoAPI y la
+        // rotulaba como respaldo. En Play se ordenan por prioridad de fuente: ese mismo
+        // orden debe ser visible aquí, sin anteponer la portada que no se reproduce.
+        publicables.sort((a, b) => {
+          const manualA = esServidorManual(a.sv), manualB = esServidorManual(b.sv);
+          if (manualA !== manualB) return manualA ? -1 : 1;
+          if (a.deCapitulo !== b.deCapitulo) return a.deCapitulo ? -1 : 1;
+          return (prioridades.get(fuenteDe(a.sv)) ?? 99) - (prioridades.get(fuenteDe(b.sv)) ?? 99);
+        });
+      }
 
       return {
         id: r.id,
