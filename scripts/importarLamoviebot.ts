@@ -121,6 +121,7 @@ const CLASES: Array<{ clase: ClaseLamoviebot; type: ContentType }> = [
 interface Indice {
   creado: string;
   porClase: Record<string, FichaLamoviebot[]>;
+  completo?: boolean;
 }
 
 /**
@@ -141,7 +142,7 @@ async function obtenerIndice(): Promise<Indice> {
       const guardado: Indice = JSON.parse(fs.readFileSync(VOLCADO, 'utf8'));
       const horas = (Date.now() - new Date(guardado.creado).getTime()) / 3_600_000;
       previo = guardado.porClase || {};
-      previoFresco = horas < 24;
+      previoFresco = horas < 24 && guardado.completo === true;
       /**
        * Fresco NO BASTA: tiene que traer TODAS las clases que esta corrida va a trabajar.
        *
@@ -153,12 +154,12 @@ async function obtenerIndice(): Promise<Indice> {
       const faltan = CLASES.filter(({ clase }) => !SOLO || SOLO === clase)
         .map(({ clase }) => clase)
         .filter((clase) => !(guardado.porClase || {})[clase]?.length);
-      if (horas < 24 && guardado.porClase && !faltan.length) {
+      if (previoFresco && guardado.porClase && !faltan.length) {
         const total = Object.values(guardado.porClase).reduce((a, b) => a + b.length, 0);
         console.log(`Índice del volcado (${Math.round(horas)} h, ${total} fichas). --refrescar-indice para rehacerlo.`);
         return guardado;
       }
-      if (faltan.length && horas < 24) {
+      if (faltan.length && previoFresco) {
         console.log(`Volcado incompleto (falta: ${faltan.join(', ')}). Se pide lo que falta.`);
       }
     } catch {
@@ -166,6 +167,7 @@ async function obtenerIndice(): Promise<Indice> {
     }
   }
 
+  if (!previoFresco) previo = {};
   const porClase: Record<string, FichaLamoviebot[]> = {};
   for (const { clase } of CLASES) {
     if (SOLO && SOLO !== clase) continue;
@@ -180,14 +182,22 @@ async function obtenerIndice(): Promise<Indice> {
     const fichas: FichaLamoviebot[] = [...primera.fichas];
     process.stdout.write(`  ${clase}: ${primera.totalFichas} fichas en ${primera.totalPaginas} páginas `);
     for (let p = 2; p <= primera.totalPaginas; p++) {
-      try {
-        fichas.push(...(await listarPagina(clase, p)).fichas);
-      } catch {
-        // Una página que falla no tumba el índice: se sigue y se trabaja con lo que haya. La
-        // corrida siguiente recoge lo que falte, porque la comparación es contra NUESTRO catálogo.
+      let pagina: Awaited<ReturnType<typeof listarPagina>> | null = null;
+      for (let intento = 0; intento < 3; intento++) {
+        try {
+          pagina = await listarPagina(clase, p);
+          if (pagina.pagina !== p || !pagina.fichas.length) throw new Error(`página ${p} vacía o repetida`);
+          break;
+        } catch (e) {
+          if (intento === 2) throw new Error(`Índice ${clase} incompleto en página ${p}: ${String(e)}`);
+          await new Promise(ok => setTimeout(ok, 1000 * (intento + 1)));
+        }
       }
+      fichas.push(...pagina!.fichas);
       if (p % 25 === 0) process.stdout.write('.');
     }
+    if (primera.totalFichas && new Set(fichas.map(f => f.slug)).size < primera.totalFichas)
+      throw new Error(`Índice ${clase} incompleto: ${fichas.length}/${primera.totalFichas} fichas`);
     console.log(` → ${fichas.length} leídas`);
     porClase[clase] = fichas;
   }
@@ -203,7 +213,7 @@ async function obtenerIndice(): Promise<Indice> {
    * Es el mismo patrón que `seasons` —fusionar, no reemplazar—, que en este repositorio ya ha
    * costado tres fallos distintos.
    */
-  const indice: Indice = { creado: new Date().toISOString(), porClase: { ...previo, ...porClase } };
+  const indice: Indice = { creado: new Date().toISOString(), porClase: { ...previo, ...porClase }, completo: true };
   try {
     fs.mkdirSync(path.dirname(VOLCADO), { recursive: true });
     fs.writeFileSync(VOLCADO, JSON.stringify(indice), 'utf8');
@@ -619,6 +629,20 @@ async function haremosSerie(t: Trabajo): Promise<void> {
       if (Number.isFinite(nEp)) pendientes.push({ temporada: nTemp, capitulo: nEp });
     }
   }
+  if (t.filaExistente && !REHACER) {
+    const { data, error } = await db.from('media_items').select('seasons').eq('id', t.filaExistente).maybeSingle();
+    if (error) throw new Error(error.message);
+    const importados = new Set<string>();
+    for (const temp of ((data as any)?.seasons || [])) {
+      for (const ep of (temp?.episodes || [])) {
+        if ((ep?.servers || []).some((s: any) => s?.source_id === 'lamoviebot'))
+          importados.add(`${temp.season_number}x${ep.episode_number}`);
+      }
+    }
+    for (let i = pendientes.length - 1; i >= 0; i--)
+      if (importados.has(`${pendientes[i].temporada}x${pendientes[i].capitulo}`)) pendientes.splice(i, 1);
+  }
+  if (!pendientes.length) return;
   const aTrabajar = pendientes
     .sort((a, b) => a.temporada - b.temporada || a.capitulo - b.capitulo)
     .slice(0, CAPITULOS_POR_SERIE === SIN_TOPE ? pendientes.length : CAPITULOS_POR_SERIE);
@@ -736,8 +760,9 @@ async function main() {
       if (SLUGS.length && !SLUGS.includes(f.slug)) continue;
       const id = Number(f.tmdb_id) || 0;
       const filaExistente = id > 0 ? yaTenemos.get(id) : undefined;
-      // Sin `--rehacer`, a lo que ya está no se vuelve: la corrida se gasta en lo que falta.
-      if (filaExistente && !REHACER) continue;
+      // Una serie existente puede tener solo los primeros 12 capítulos de la pasada inicial.
+      // La función de serie resta los capítulos que ya tienen servidor de esta fuente.
+      if (filaExistente && type === 'movie' && !REHACER) continue;
       cola.push({ clase, type, ficha: f, filaExistente });
     }
   }
@@ -751,9 +776,16 @@ async function main() {
    * final de una tanda cortada por tiempo es gastarlo en nada.
    */
   cola.sort((a, b) => (a.ficha.tmdb_id ? 0 : 1) - (b.ficha.tmdb_id ? 0 : 1));
-  const tanda = cola.slice(0, LIMITE === SIN_TOPE ? cola.length : LIMITE);
+  // La cola incluye series existentes. Un cursor de vuelta evita que 200 series ya completas
+  // ocupen siempre toda la tanda y dejen el resto sin visitar.
+  const claveCursor = `lamoviebot_cursor_${SOLO || 'todos'}`;
+  const { data: cursorGuardado } = await db.from('esquema').select('valor').eq('clave', claveCursor).maybeSingle();
+  const desde = SLUGS.length ? 0 : (Number((cursorGuardado as any)?.valor) || 0) % Math.max(1, cola.length);
+  const ordenada = [...cola.slice(desde), ...cola.slice(0, desde)];
+  const tanda = ordenada.slice(0, LIMITE === SIN_TOPE ? ordenada.length : LIMITE);
   console.log(`\nCola: ${cola.length} fichas pendientes · esta tanda: ${tanda.length}\n`);
 
+  let visitadas = 0;
   for (const t of tanda) {
     if (!quedaTiempo()) {
       console.log('\n(se acabó el tiempo de la tanda)');
@@ -766,6 +798,11 @@ async function main() {
       cuenta.errores++;
       console.log(`   ! ${t.ficha.slug}: ${e?.message}`);
     }
+    visitadas++;
+  }
+  if (!DRY && !SLUGS.length && cola.length && visitadas) {
+    const { error } = await db.from('esquema').upsert({ clave: claveCursor, valor: String((desde + visitadas) % cola.length) }, { onConflict: 'clave' });
+    if (error) throw new Error(`No se pudo guardar cursor Lamoviebot: ${error.message}`);
   }
 
   console.log(

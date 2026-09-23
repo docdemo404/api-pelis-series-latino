@@ -5103,20 +5103,8 @@ async function serverDeNetmirror(
   tmdbId: number,
   contexto: { tipo: 'movie' } | { tipo: 'tv'; s: number; e: number },
 ): Promise<ServerOption | null> {
-  // NETMIRROR PARA SERIES ESTA ROTO EN ORIGEN, y no se puede arreglar desde aqui.
-  //
-  // `/api/embed-tmdb/{tmdbSerie}?type=tv&s=X&e=Y` devuelve el MISMO fichero mp4 para todos
-  // los capitulos de la serie, ignorando `s` y `e`. Comprobado en 2026-09-03:
-  //
-  //   Breaking Bad tmdb 1396   S1E1, S1E2, S2E1, S3E5, S5E16
-  //                         → todos: 500b601be87cc510e4eacb91e369d4a2.mp4
-  //   House of the Dragon 94997 S5E1, S5E2 → 8912630729ee6cfc054a0231673958af.mp4
-  //
-  // O sea que anunciar NetMirror como server de una serie engaña al espectador: elige S5E16
-  // y se le reproduce el piloto. Peor que no ofrecerlo. Cuando NetMirror arregle la API para
-  // `type=tv` o encontremos otra ruta (p.ej. netflix_id por capitulo → HLS master), se
-  // quita este corte.
-  if (contexto.tipo === 'tv') return null;
+  // La API embed-tmdb ignora s/e. Las series sólo se publican con un ID NewTV propio del
+  // capítulo, descubierto en post.php → episodes.php y guardado por temporada/episodio.
 
   // El caché es también el veredicto de disponibilidad. No se convierte un fallo/timeout del
   // upstream en un falso «no»: si la fila no existe o no afirma `disponible=true`, se omite.
@@ -5126,8 +5114,8 @@ async function serverDeNetmirror(
   let dominioHls: string | null = null;
   try {
     const cli = getSupabaseAdmin();
-    const filtroS = contexto.tipo === 'movie' ? 0 : 1;
-    const filtroE = contexto.tipo === 'movie' ? 0 : 1;
+    const filtroS = contexto.tipo === 'movie' ? 0 : contexto.s;
+    const filtroE = contexto.tipo === 'movie' ? 0 : contexto.e;
     const { data: cache } = await cli.from('netmirror_cache')
       .select('disponible,netflix_id,idiomas_audio,dominio_hls')
       .eq('tmdb_id', tmdbId).eq('temporada', filtroS).eq('episodio', filtroE)
@@ -5151,6 +5139,26 @@ async function serverDeNetmirror(
   const dominioMaster = dominioHls && !/(?:freecdn|hakunaymatata|subscdn|^net\d+\.)/i.test(dominioHls)
     ? dominioHls
     : 'tv.imgcdn.kim';
+  if (contexto.tipo === 'tv') {
+    // La URL y el id son DEL EPISODIO. El cliente Android renueva el master completo con su
+    // sesión NewTV; la URL pública permite identificar la pista mientras llega esa sesión.
+    const masterUrl = `https://${dominioMaster}/newtv/hls/${netmirror.ott}/${encodeURIComponent(netmirror.id)}.m3u8`;
+    return {
+      ...servidorVirtualDePelicula(tmdbId),
+      id: `nm-tv-${tmdbId}-${contexto.s}x${contexto.e}`,
+      language: 'latino',
+      embed_url: masterUrl,
+      direct_stream: masterUrl,
+      direct_kind: 'hls',
+      direct_mode: 'redirect',
+      direct_host: dominioMaster,
+      headers: { Referer: 'https://net52.cc/', Origin: 'https://net52.cc' },
+      netmirror_hls: {
+        netflix_id: netmirror.id, ott: netmirror.ott, dominio_hls: dominioMaster,
+        master_url: masterUrl, idiomas: idiomasCache,
+      },
+    };
+  }
   const server: ServerOption = {
     ...servidorVirtualDePelicula(tmdbId),
     // Con el master identificado sí hay selector de idiomas; sin él el MP4 sigue siendo original.

@@ -1,0 +1,53 @@
+name: Importar el catálogo de Lamoviebot
+
+on:
+  schedule:
+    - cron: '15 4,12,20 * * *'
+  workflow_dispatch:
+    inputs:
+      solo:
+        description: 'peliculas, series o animes; vacío = todas'
+        required: false
+        default: ''
+
+concurrency:
+  group: lamoviebot
+  cancel-in-progress: false
+
+jobs:
+  importar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - uses: actions/cache/restore@v4
+        with:
+          path: data/lamoviebot_indice.json
+          key: lamoviebot-index-${{ github.run_id }}
+          restore-keys: |
+            lamoviebot-index-
+      - name: Importar fichas y capítulos pendientes
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          SOLO: ${{ inputs.solo }}
+        run: |
+          case "$SOLO" in
+            peliculas|series|animes) EXTRA="--solo=$SOLO" ;;
+            '') EXTRA="" ;;
+            *) echo "::error::Fuente desconocida: $SOLO"; exit 1 ;;
+          esac
+          npx ts-node scripts/importarLamoviebot.ts --limite=200 --minutos=40 $EXTRA
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: data/lamoviebot_indice.json
+          key: lamoviebot-index-${{ github.run_id }}

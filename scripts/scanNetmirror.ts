@@ -1,32 +1,35 @@
 import 'dotenv/config';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
-import { pelicula, episodio, buscarNetflixId, masterHls } from '../src/scrapers/netmirror';
+import { pelicula, buscarNetflixId, masterHls, inventarioSerieNewTv, codificarIdNetmirror, NetmirrorOtt } from '../src/scrapers/netmirror';
 import { tieneEspanolLatino, traducirYNormalizar } from '../src/utils/idiomas';
 import { TMDB_API_KEY, OTRO_ALFABETO } from '../src/services/tmdbService';
 import { leerAjuste } from '../src/utils/ajustesRemotos';
+import { urlApiProduccion } from '../src/config/produccion';
 
 /**
  * Escaneo del catálogo contra NetMirror.
  *
- * Recorre las fichas con tmdb_id y para cada una:
- *   1. Comprueba si NetMirror la tiene (via `/api/embed-tmdb/{tmdb}` mp4 mono-audio) → `disponible`.
- *   2. Resuelve su `netflix_id` (via `/search.php?s=<titulo>` sin token).
- *   3. Llama al HLS master NewTV (sin token) y guarda las pistas de audio disponibles
- *      normalizadas al español. Sólo publica metadata si es multipista e incluye Español Latino.
+ * Recorre las fichas con tmdb_id. En películas usa embed-tmdb y el master NewTV.
+ * En series lee el índice NewTV por temporada, obtiene un ID distinto para cada capítulo
+ * y guarda sus pistas de audio. Sólo publica metadata si incluye Español Latino.
  *
- * Para pelis: (tmdb, 0, 0). Para series: (tmdbSerie, 0, 0) — a nivel serie con sonda S1E1.
+ * Para películas: (tmdb, 0, 0). Para series: una fila por capítulo con su ID NewTV propio.
  *
  *   npx tsx scripts/scanNetmirror.ts
  *   npx tsx scripts/scanNetmirror.ts --tipo=movie
  *   npx tsx scripts/scanNetmirror.ts --refrescar         # revisa lo ya cacheado
  *   npx tsx scripts/scanNetmirror.ts --solo-idiomas      # solo pobla netflix_id + audios
  *                                                       # (no revisa disponible: ya está)
- *   npx tsx scripts/scanNetmirror.ts --limite=500
+ *   npx tsx scripts/scanNetmirror.ts --tipo=tvseries --limite=20 --via=api
+ *   npx tsx scripts/scanNetmirror.ts --tipo=tvseries --tmdb=1396
  *   NM_TOKEN_ESCANEO="…" npx tsx scripts/scanNetmirror.ts   # respaldo legacy opcional
  */
 
 const args = process.argv.slice(2);
 const soloTipo = args.find(a => a.startsWith('--tipo='))?.split('=')[1] as 'movie' | 'tvseries' | undefined;
+const TMDB_EXPLICITO = Number(args.find(a => a.startsWith('--tmdb='))?.split('=')[1]) || 0;
+const VIA_API = args.includes('--via=api');
+const API_PELIS = urlApiProduccion('API_PELIS_URL');
 const refrescar = args.includes('--refrescar');
 const soloIdiomas = args.includes('--solo-idiomas');
 // Rematch: solo fichas con disponible=true y netflix_id NULL. Usa el matcher agresivo con
@@ -158,9 +161,7 @@ async function comprobarFicha(f: Ficha, s: number, e: number): Promise<{
 
   // Paso 1 — disponibilidad via embed-tmdb (mp4 mono-audio). Solo si estamos escaneando.
   if (!soloMetadata) {
-    const r = f.type === 'movie'
-      ? await pelicula(f.tmdb_id).catch(() => null)
-      : await episodio(f.tmdb_id, 1, 1).catch(() => null);
+    const r = await pelicula(f.tmdb_id).catch(() => null);
     salida.disponible = Boolean(r);
     salida.resolucion = r ? Number(r.meta.resolution) || null : null;
   }
@@ -207,6 +208,88 @@ async function comprobarFicha(f: Ficha, s: number, e: number): Promise<{
   return salida;
 }
 
+/** Nunca usa embed-tmdb para TV: esa ruta devuelve el mismo MP4 para capítulos distintos. */
+async function comprobarSerie(f: Ficha): Promise<number> {
+  const year = String(f.release_date || '').slice(0, 4);
+  const tituloEn = await tituloIngles('tvseries', f.tmdb_id, f.original_title).catch(() => null);
+  const inventarios: Array<NonNullable<Awaited<ReturnType<typeof inventarioSerieNewTv>>>> = [];
+  for (const ott of ['nf', 'pv', 'hs'] as NetmirrorOtt[]) {
+    try {
+      let inventario: Awaited<ReturnType<typeof inventarioSerieNewTv>> = null;
+      if (VIA_API) {
+        const q = new URLSearchParams({ title: f.title, year, original: tituloEn || f.original_title || '', ott });
+        const r = await fetch(`${API_PELIS}/api/v1/netmirror/newtv/series?${q}`, { signal: AbortSignal.timeout(30_000) });
+        if (r.status === 404) continue;
+        if (!r.ok) throw new Error(`Puente NewTV series: HTTP ${r.status}`);
+        inventario = (await r.json() as any).data || null;
+      } else {
+        inventario = await inventarioSerieNewTv(f.title, year, tituloEn || f.original_title || '', ott);
+      }
+      if (inventario) inventarios.push(inventario);
+    } catch (e: any) {
+      if (VIA_API) throw e;
+      console.warn(`  ${f.title}/${ott}: ${e?.message || e}`);
+    }
+  }
+  if (!inventarios.length) return 0;
+
+  let comprobados = 0;
+  const porCapitulo = new Map<string, Array<{ id: string; ott: NetmirrorOtt; temporada: number; episodio: number }>>();
+  for (const inventario of inventarios) for (const ep of inventario.episodios) {
+    const key = `${ep.temporada}x${ep.episodio}`;
+    const candidatos = porCapitulo.get(key) || [];
+    candidatos.push({ ...ep, ott: inventario.ott });
+    porCapitulo.set(key, candidatos);
+  }
+  const episodios = [...porCapitulo.values()];
+  for (let i = 0; i < episodios.length; i += CONCURRENCIA) {
+    await Promise.all(episodios.slice(i, i + CONCURRENCIA).map(async candidatos => {
+      const primero = candidatos[0];
+      const { data: previo } = await sb.from('netmirror_cache')
+        .select('netflix_id,idiomas_audio,comprobado_at')
+        .eq('tmdb_id', f.tmdb_id).eq('temporada', primero.temporada).eq('episodio', primero.episodio)
+        .maybeSingle();
+      const vigente = candidatos.some(ep => previo?.netflix_id === codificarIdNetmirror(ep.ott, ep.id))
+        && Array.isArray(previo?.idiomas_audio)
+        && tieneEspanolLatino(previo?.idiomas_audio)
+        && (Date.now() - Date.parse(String(previo?.comprobado_at || ''))) < REFRESCAR_TRAS_DIAS * 86_400_000;
+      if (vigente && !refrescar) { comprobados++; return; }
+
+      for (const ep of candidatos) {
+        const master = VIA_API
+          ? await (async () => {
+              const q = new URLSearchParams({ id: ep.id, ott: ep.ott });
+              const r = await fetch(`${API_PELIS}/api/v1/netmirror/newtv/master?${q}`, { signal: AbortSignal.timeout(25_000) });
+              if (r.status === 404) return null;
+              if (!r.ok) throw new Error(`Puente NewTV master: HTTP ${r.status}`);
+              return (await r.json() as any).data as Awaited<ReturnType<typeof masterHls>>;
+            })()
+          : await masterHls(ep.id, '', ep.ott).catch(() => null);
+        if (!master || master.audios.length < 2) continue;
+        const idiomas = traducirYNormalizar(
+          master.audios.map(a => ({ language: a.language, name: a.name, uri: a.uri })), ep.id,
+        );
+        if (!tieneEspanolLatino(idiomas)) continue;
+        const { error } = await sb.from('netmirror_cache').upsert({
+          tmdb_id: f.tmdb_id,
+          temporada: ep.temporada,
+          episodio: ep.episodio,
+          disponible: true,
+          netflix_id: codificarIdNetmirror(ep.ott, ep.id),
+          idiomas_audio: idiomas,
+          dominio_hls: new URL(master.masterUrl).hostname,
+          comprobado_at: new Date().toISOString(),
+        }, { onConflict: 'tmdb_id,temporada,episodio' });
+        if (error) throw new Error(error.message);
+        comprobados++;
+        break;
+      }
+    }));
+  }
+  console.log(`  ${f.title}: ${comprobados}/${episodios.length} capítulos NewTV con latino`);
+  return comprobados;
+}
+
 async function pool<T>(items: T[], concurr: number, fn: (x: T) => Promise<void>) {
   const iter = items[Symbol.iterator]();
   const runners = Array.from({ length: concurr }, async () => {
@@ -225,6 +308,11 @@ async function main() {
   const tipos: Array<'movie' | 'tvseries'> = soloTipo ? [soloTipo] : ['movie', 'tvseries'];
   const stats = { procesadas: 0, pelisOk: 0, pelisNo: 0, seriesOk: 0, seriesNo: 0, saltadas: 0, netflix: 0, conIdiomas: 0 };
   const t0 = Date.now();
+  const claveCursorTv = 'netmirror_newtv_cursor_tv';
+  const { data: cursorGuardado } = soloTipo === 'tvseries' && !TMDB_EXPLICITO
+    ? await sb.from('esquema').select('valor').eq('clave', claveCursorTv).maybeSingle()
+    : { data: null };
+  let cursorTv = Number((cursorGuardado as any)?.valor) || 0;
 
   // Cuando `--solo-sin-id`, precargamos los tmdb_id que estan en netmirror_cache con
   // disponible=true y netflix_id NULL. Sin este filtro recorreriamos las 10k+ filas del
@@ -293,17 +381,39 @@ async function main() {
   for (const tipo of tipos) {
     let offset = 0;
     for (;;) {
-      const { data, error } = await sb.from('media_items')
+      let consulta = sb.from('media_items')
         .select('id,tmdb_id,type,title,original_title,release_date')
         .eq('type', tipo).gt('tmdb_id', 0)
-        .order('tmdb_id')
-        .range(offset, offset + 999);
+        .order('tmdb_id');
+      if (tipo === 'tvseries' && soloTipo === 'tvseries' && !TMDB_EXPLICITO)
+        consulta = consulta.gt('tmdb_id', cursorTv);
+      if (TMDB_EXPLICITO) consulta = consulta.eq('tmdb_id', TMDB_EXPLICITO);
+      const { data, error } = await consulta.range(tipo === 'tvseries' && soloTipo === 'tvseries' ? 0 : offset,
+        tipo === 'tvseries' && soloTipo === 'tvseries' ? 999 : offset + 999);
       if (error) { console.error(error); break; }
       const filas = (data as Ficha[]) || [];
-      if (filas.length === 0) break;
+      if (filas.length === 0) {
+        if (tipo === 'tvseries' && soloTipo === 'tvseries' && !TMDB_EXPLICITO && cursorTv) {
+          await sb.from('esquema').upsert({ clave: claveCursorTv, valor: '0' }, { onConflict: 'clave' });
+        }
+        break;
+      }
 
       await pool(filas, CONCURRENCIA, async f => {
         if (stats.procesadas >= LIMITE) return;
+        if (tipo === 'tvseries') {
+          try {
+            const capitulos = await comprobarSerie(f);
+            if (capitulos) stats.seriesOk++; else stats.seriesNo++;
+          } catch (e: any) {
+            if (VIA_API) throw e;
+            console.warn(`  ${f.title}: ${e?.message || e}`);
+            stats.seriesNo++;
+          }
+          stats.procesadas++;
+          if (soloTipo === 'tvseries') cursorTv = Math.max(cursorTv, f.tmdb_id);
+          return;
+        }
         // En modos de rescate filtramos las que no estan en la lista precalculada. Esto reduce
         // el trabajo real de 10k a los ~5k que faltan.
         if ((soloSinId || sinAudios) && !tmdbIdsRematch.has(f.tmdb_id)) { stats.saltadas++; return; }
@@ -337,6 +447,13 @@ async function main() {
           console.log(`  ${stats.procesadas}  ${dt}s  disp=${stats.pelisOk + stats.seriesOk}/${stats.pelisOk + stats.pelisNo + stats.seriesOk + stats.seriesNo}  netflix_id=${stats.netflix}  idiomas=${stats.conIdiomas}`);
         }
       });
+
+      if (tipo === 'tvseries' && soloTipo === 'tvseries' && !TMDB_EXPLICITO && cursorTv) {
+        const { error: errorCursor } = await sb.from('esquema').upsert(
+          { clave: claveCursorTv, valor: String(cursorTv) }, { onConflict: 'clave' },
+        );
+        if (errorCursor) throw new Error(`Cursor NetMirror TV: ${errorCursor.message}`);
+      }
 
       if (stats.procesadas >= LIMITE) break;
       offset += 1000;

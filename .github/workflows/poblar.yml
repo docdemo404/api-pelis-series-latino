@@ -115,6 +115,8 @@ jobs:
         # entre tandas y no exige guardar estado en ningún sitio.
         run: |
           EXTRA=""
-          if [ "$FUENTE" = "moviedays" ]; then EXTRA="--desde=$(( ${{ github.run_number }} % 40 + 1 ))"; fi
+          # 140 ids por tipo = 7 páginas y como mucho 280 fichas entre ambos tipos:
+          # caben bajo el límite de 300. Setenta y dos tandas cubren las 500 páginas de TMDB.
+          if [ "$FUENTE" = "moviedays" ]; then EXTRA="--desde=$(( ( (${{ github.run_number }} - 1) % 72 ) * 7 + 1 )) --titulos=140"; fi
           echo "refreshCatalog --solo=$FUENTE $EXTRA"
           npx ts-node scripts/refreshCatalog.ts --solo=$FUENTE --saltar-guardados --minutos=18 --completar-minutos=20 $EXTRA 300

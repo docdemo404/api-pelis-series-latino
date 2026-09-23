@@ -50,6 +50,7 @@ const DRY = argv.includes('--dry');
 const LIMITE = bandera('limite', 300) || SIN_TOPE;
 const MINUTOS = bandera('minutos', 40) || SIN_TOPE;
 const PAGINAS_TMDB = bandera('paginas', 15);
+const DESDE_TMDB = Math.min(500, Math.max(1, bandera('desde', 1)));
 const CAPITULOS_POR_SERIE = bandera('capitulos', 8) || SIN_TOPE;
 const TITULOS_A_LA_VEZ = 3;
 const SOLO = (argv.find((a) => a.startsWith('--solo=')) || '').split('=')[1] || '';
@@ -85,10 +86,10 @@ async function nuestrasFilas(type: ContentType): Promise<Map<number, string>> {
 
 async function popularesTmdb(tipo: 'movie' | 'tv'): Promise<number[]> {
   const ids: number[] = [];
-  for (let p = 1; p <= PAGINAS_TMDB; p++) {
+  for (let p = DESDE_TMDB; p < DESDE_TMDB + PAGINAS_TMDB && p <= 500; p++) {
     try {
       const { data } = await httpClient.get(`https://api.themoviedb.org/3/discover/${tipo}`, {
-        params: { api_key: TMDB_API_KEY, language: 'es-MX', sort_by: 'popularity.desc', page: p, 'vote_count.gte': 50 },
+        params: { api_key: TMDB_API_KEY, language: 'es-MX', sort_by: 'vote_count.desc', page: p },
         timeout: 15000,
       });
       ids.push(...(data.results || []).map((r: any) => Number(r.id)).filter((n: number) => n > 0));

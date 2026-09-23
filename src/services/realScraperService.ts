@@ -1956,21 +1956,32 @@ export class RealScraperService {
    * hasta agotar entradas o alcanzar el tope de seguridad. Junta todas las entradas antes de
    * parsear para agrupar correctamente las series que abarcan varias páginas del feed.
    */
-  static async scrapeAllFuegocine(maxItems = 5000): Promise<MediaItem[]> {
+  static async scrapeAllFuegocine(maxItems = 40000): Promise<MediaItem[]> {
     const PAGE = 150;
     const allEntries: any[] = [];
+    let totalPublicado = 0;
     for (let start = 1; allEntries.length < maxItems; start += PAGE) {
       const feedUrl = `https://www.fuegocine.com/feeds/posts/summary?alt=json&max-results=${PAGE}&start-index=${start}`;
-      try {
-        const res = await axios.get(feedUrl, { headers: { 'User-Agent': UA }, timeout: 8000 });
-        const entries = res.data?.feed?.entry || [];
-        if (entries.length === 0) break;
-        allEntries.push(...entries);
-        if (entries.length < PAGE) break;
-      } catch {
-        break;
+      let entries: any[] | null = null;
+      for (let intento = 0; intento < 3; intento++) {
+        try {
+          const res = await axios.get(feedUrl, { headers: { 'User-Agent': UA }, timeout: 15000 });
+          entries = res.data?.feed?.entry || [];
+          totalPublicado = Number(res.data?.feed?.['openSearch$totalResults']?.$t) || totalPublicado;
+          break;
+        } catch (err) {
+          if (intento === 2) throw err;
+          await new Promise(ok => setTimeout(ok, 1000 * (intento + 1)));
+        }
       }
+      if (!entries?.length) break;
+      allEntries.push(...entries);
+      if (entries.length < PAGE || (totalPublicado && allEntries.length >= totalPublicado)) break;
     }
+    if (totalPublicado && allEntries.length < totalPublicado)
+      throw new Error(`FuegoCine: feed incompleto (${allEntries.length}/${totalPublicado} entradas)`);
+    if (allEntries.length >= maxItems && (!totalPublicado || allEntries.length < totalPublicado))
+      throw new Error(`FuegoCine: el feed alcanzó el tope de ${maxItems} entradas`);
     return this.parseFuegocineEntries(allEntries);
   }
 
@@ -2695,7 +2706,7 @@ export class RealScraperService {
       // El tope alto es a propósito: el de por defecto son 5.000 ENTRADAS del feed, y FuegoCine
       // publica cada capítulo de serie como su propia entrada, así que 3.215 títulos son muchas
       // más entradas que títulos. Con 5.000 se cortaba a mitad del archivo sin decirlo.
-      return dedup([await this.scrapeAllFuegocine(40000).catch(() => [] as MediaItem[])]);
+      return dedup([await this.scrapeAllFuegocine(40000)]);
     }
     if (solo === 'archive') {
       /**
@@ -2757,14 +2768,14 @@ export class RealScraperService {
     }
 
     if (solo === 'peliculas' || solo === 'series' || solo === 'animes') {
-      return dedup([await this.scrapeAllOfType(solo).catch(() => [] as MediaItem[])]);
+      return dedup([await this.scrapeAllOfType(solo)]);
     }
 
     const [peliculas, series, animes, fuego] = await Promise.all([
       this.scrapeAllOfType('peliculas').catch(() => [] as MediaItem[]),
       this.scrapeAllOfType('series').catch(() => [] as MediaItem[]),
       this.scrapeAllOfType('animes').catch(() => [] as MediaItem[]),
-      this.scrapeAllFuegocine().catch(() => [] as MediaItem[])
+      this.scrapeAllFuegocine().catch((e) => { console.error('[FuegoCine]', e); return [] as MediaItem[]; })
     ]);
     return dedup([peliculas, series, animes, fuego]);
   }
@@ -2895,9 +2906,8 @@ export class RealScraperService {
 
         items.push(...pageItems);
       } catch (err: any) {
-        if (page === 1) {
-          console.error(`[TioPlus] Error scrapeando ${type}:`, err.message);
-        }
+        if (limit >= 1000) throw new Error(`[TioPlus] ${type}, página ${page}: ${err.message}`);
+        console.error(`[TioPlus] Error scrapeando ${type}:`, err.message);
         break;
       }
     }
@@ -2922,7 +2932,11 @@ export class RealScraperService {
     // lo que trae ya ha demostrado tener un servidor publicable —`scrapeMoviedaysDetail` descarta
     // la ficha que no lo tenga—, así que su cupo no se gasta nunca en títulos que no reproducen.
     const reservadoMoviedays = Math.min(nuevosMoviedays.length, Math.max(1, Math.ceil(limit / 4)));
-    const cupoTioplus = Math.max(0, limit - reservadoArchive - reservadoMoviedays);
+    // En el barrido profundo `limit` es el techo de TioPlus, no un presupuesto compartido.
+    // Restarle los extras podía cortar sus últimas páginas aunque el paginador las hubiera leído.
+    const cupoTioplus = limit >= 1000
+      ? limit
+      : Math.max(0, limit - reservadoArchive - reservadoMoviedays);
     return items.slice(0, cupoTioplus)
       .concat(nuevosArchive.slice(0, reservadoArchive))
       .concat(nuevosMoviedays.slice(0, reservadoMoviedays));

@@ -447,12 +447,21 @@ async function main() {
   if (!SOLO || SOLO === 'series') {
     for (const s of indice.series) {
       if (CARPETAS.length && !CARPETAS.includes(s.carpeta)) continue;
+      // El límite de la tanda debe contar trabajo pendiente, no las primeras series del índice.
+      if (!REHACER && s.episodios.every((e) => YA_IMPORTADAS.has(e.ruta))) {
+        cuenta.yaEstaban++;
+        continue;
+      }
       trabajos.push(() => haremosSerie(s, filasPorTmdb.tvseries));
     }
   }
   if (!SOLO || SOLO === 'peliculas') {
     for (const p of indice.peliculas) {
       if (CARPETAS.length) continue;
+      if (!REHACER && YA_IMPORTADAS.has(p.ruta)) {
+        cuenta.yaEstaban++;
+        continue;
+      }
       trabajos.push(() => haremosPelicula(p, filasPorTmdb.movie));
     }
   }

@@ -1,0 +1,40 @@
+name: Descubrir capítulos NewTV de NetMirror
+
+on:
+  schedule:
+    - cron: '35 */2 * * *'
+  workflow_dispatch:
+    inputs:
+      tmdb:
+        description: 'ID TMDB de una serie para comprobarla sola; vacío = continuar el barrido'
+        required: false
+        default: ''
+
+concurrency:
+  group: netmirror-series
+  cancel-in-progress: false
+
+jobs:
+  comprobar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Guardar IDs y pistas por capítulo
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          TMDB: ${{ inputs.tmdb }}
+        run: |
+          case "$TMDB" in
+            '') EXTRA="" ;;
+            *[!0-9]*) echo "::error::tmdb debe ser numérico"; exit 1 ;;
+            *) EXTRA="--tmdb=$TMDB" ;;
+          esac
+          npx ts-node scripts/scanNetmirror.ts --tipo=tvseries --via=api --limite=20 --concurrencia=2 $EXTRA

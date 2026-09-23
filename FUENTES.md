@@ -835,3 +835,27 @@ npx ts-node -T scripts/dev/test_manual_ledger.ts   # el banco de pruebas del lib
     mira POR DÓNDE EMPIEZA su recorrido y QUÉ RECUERDA entre corridas: casi siempre está dando
     vueltas a la misma cabecera. Y mide las etiquetas enteras antes de concluir que una fuente «no
     tiene» algo (§6 quinquies).
+
+## Barrido de las siete fuentes (2026-09-23)
+
+- **NetMirror series:** `embed-tmdb?type=tv` repite el mismo MP4 para capítulos distintos. El
+  escáner usa ahora `post.php` y `episodes.php` de NewTV para obtener un ID por episodio, comprueba
+  el master y guarda `(tmdb_id, temporada, episodio)` en `netmirror_cache`. El cursor
+  `netmirror_newtv_cursor_tv` permite continuar entre tandas. `netmirror-series.yml` recorre las
+  series ya presentes en el catálogo; una serie sin pista Español Latino no se anuncia.
+- **UnlimPlay y MovieDays:** ninguno publica un índice propio. Sus barridos rotan por las 500
+  páginas accesibles de `discover` de TMDB para películas y series. Eso evita repetir siempre las
+  primeras páginas, pero no demuestra exhaustividad absoluta: el catálogo de TMDB puede superar
+  ese límite y una fuente puede contener títulos no presentes allí.
+- **TioPlus:** el barrido profundo conserva todas sus páginas leídas aunque Archive/MovieDays
+  aporten títulos extra; un error a mitad del índice hace fallar la tanda.
+- **FuegoCine:** el feed declara 5.189 entradas y se recorren todas antes de agrupar películas y
+  capítulos. La tanda falla si el feed se corta antes de su total declarado.
+- **Lamoviebot:** se comprueba el total de cada clase y no se cachea un índice parcial. Las series
+  existentes vuelven a la cola por cursor y solo se intentan sus capítulos pendientes.
+- **HFPro:** las series y películas ya importadas salen de la cola antes de aplicar el límite de
+  la tanda; así las 13.340 rutas de episodios pueden avanzar entre corridas.
+
+El total de *títulos publicados* por cada tercero y el total de *enlaces que reproducen* son
+medidas distintas. La API solo publica enlaces cuya identidad, idioma y master pasaron las pruebas
+de cada importador.

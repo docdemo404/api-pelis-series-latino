@@ -372,6 +372,81 @@ export function decodificarIdNetmirror(valor: string | null | undefined): { ott:
   return m ? { ott: normalizarNetmirrorOtt(m[1]), id: m[2].trim() } : { ott: 'nf', id: crudo };
 }
 
+export interface EpisodioNewTv {
+  temporada: number;
+  episodio: number;
+  id: string;
+  titulo: string;
+}
+
+/**
+ * NewTV sí publica IDs distintos por capítulo. `embed-tmdb?type=tv` ignora s/e y repite el
+ * piloto, por lo que nunca debe usarse para construir una temporada.
+ */
+export async function inventarioSerieNewTv(
+  titulo: string,
+  anio: string | number,
+  tituloOriginal = '',
+  ott: NetmirrorOtt = 'nf',
+): Promise<{ id: string; ott: NetmirrorOtt; episodios: EpisodioNewTv[] } | null> {
+  const id = await buscarNetmirrorId(titulo, anio, tituloOriginal, undefined, ott);
+  const base = await resolverNewTvBase();
+  if (!id || !base) return null;
+  const headers = { ...NEWTV_HEADERS, Ott: ott };
+  const post = await fetch(`${base}/newtv/post.php?id=${encodeURIComponent(id)}`, {
+    headers, signal: AbortSignal.timeout(12_000),
+  });
+  if (!post.ok) return null;
+  const ficha = await post.json() as {
+    type?: string; title?: string; year?: string;
+    season?: Array<{ s?: string; id?: string }>;
+  };
+  const clave = (s: string) => String(s || '').toLowerCase().normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
+  const esperado = [titulo, tituloOriginal].filter(Boolean).map(clave);
+  if (ficha.type !== 't' || !esperado.includes(clave(ficha.title || ''))) return null;
+  const year = Number(String(anio).slice(0, 4)), yearFicha = Number(String(ficha.year || '').slice(0, 4));
+  if (year && yearFicha && Math.abs(year - yearFicha) > 1) return null;
+  if (!Array.isArray(ficha.season) || !ficha.season.length) return null;
+
+  const leerTemporada = async (temporada: { s?: string; id?: string }): Promise<EpisodioNewTv[]> => {
+    const n = Number(/(?:season|temporada)\s*(\d+)/i.exec(temporada.s || '')?.[1]);
+    if (!n || !/^[A-Za-z0-9_-]+$/.test(temporada.id || '')) return [];
+    const vistos = new Set<string>();
+    const episodios: EpisodioNewTv[] = [];
+    for (let pagina = 1; pagina <= 100; pagina++) {
+      const r = await fetch(`${base}/newtv/episodes.php?id=${encodeURIComponent(temporada.id!)}&page=${pagina}`, {
+        headers, signal: AbortSignal.timeout(12_000),
+      });
+      if (!r.ok) throw new Error(`NewTV temporada ${n}, página ${pagina}: HTTP ${r.status}`);
+      const data = await r.json() as {
+        episodes?: Array<{ id?: string; ep?: string; t?: string }>;
+        nextPageShow?: number; nextPage?: number;
+      };
+      if (!Array.isArray(data.episodes) || !data.episodes.length) break;
+      for (const ep of data.episodes) {
+        const numero = Number(ep.ep);
+        if (!numero || !/^[A-Za-z0-9_-]+$/.test(ep.id || '')) continue;
+        const llave = `${n}x${numero}`;
+        if (vistos.has(llave)) continue;
+        vistos.add(llave);
+        episodios.push({ temporada: n, episodio: numero, id: ep.id!, titulo: ep.t || '' });
+      }
+      if (!data.nextPageShow || !data.nextPage || data.nextPage <= pagina) break;
+    }
+    const declarados = Number(/\((\d+)\s*EP\)/i.exec(temporada.s || '')?.[1]);
+    if (declarados && vistos.size < declarados)
+      throw new Error(`NewTV temporada ${n} incompleta: ${vistos.size}/${declarados} episodios`);
+    return episodios;
+  };
+  const episodios: EpisodioNewTv[] = [];
+  for (let i = 0; i < ficha.season.length; i += 4) {
+    const lote = await Promise.all(ficha.season.slice(i, i + 4).map(leerTemporada));
+    episodios.push(...lote.flat());
+  }
+  return episodios.length ? { id, ott, episodios } : null;
+}
+
 /** Lee un atributo HLS incluso cuando la lista usa valores sin comillas. */
 function atributoHls(linea: string, clave: string): string {
   const escapada = clave.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

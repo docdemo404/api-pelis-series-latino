@@ -54,8 +54,12 @@ jobs:
           UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
         run: |
+          # Dos páginas por tanda; 250 tandas recorren las 500 páginas de TMDB
+          # para películas y series. Antes cada ejecución repetía las primeras 15.
+          DESDE=$(( ( (${{ github.run_number }} - 1) % 250 ) * 2 + 1 ))
           npx ts-node scripts/importarUnlimplay.ts \
             --limite=${{ inputs.limite || 300 }} \
             --minutos=${{ inputs.minutos || 40 }} \
+            --paginas=2 --desde="$DESDE" \
             ${{ inputs.solo && format('--solo={0}', inputs.solo) || '' }} \
             ${{ inputs.dry && '--dry' || '' }}

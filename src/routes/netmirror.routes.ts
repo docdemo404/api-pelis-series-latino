@@ -6,6 +6,7 @@ import {
   FuenteNetmirror,
   buscarNetmirrorId,
   masterHls,
+  inventarioSerieNewTv,
   normalizarNetmirrorOtt,
 } from '../scrapers/netmirror';
 import { sendErrorResponse } from '../utils/apiHelpers';
@@ -214,6 +215,22 @@ router.get('/api/v1/netmirror/newtv/master', async (req: Request, res: Response,
     if (!master) return sendErrorResponse(res, 404, 'NOT_FOUND', 'Master multipista no disponible.');
     res.setHeader('Cache-Control', 'private, max-age=300');
     return res.json({ status: 'success', data: master });
+  } catch (err) { next(err); }
+});
+
+/** Inventario por capítulo para los runners que NewTV no atiende directamente. */
+router.get('/api/v1/netmirror/newtv/series', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const title = String(req.query.title || '').trim();
+    const year = String(req.query.year || '').trim();
+    if (!title || title.length > 200 || !/^\d{4}$/.test(year))
+      return sendErrorResponse(res, 400, 'INVALID_PARAMETER', 'Se requieren title y year.');
+    const inventory = await inventarioSerieNewTv(
+      title, year, String(req.query.original || '').slice(0, 200), normalizarNetmirrorOtt(req.query.ott),
+    );
+    if (!inventory) return sendErrorResponse(res, 404, 'NOT_FOUND', 'La serie no está en NewTV.');
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    return res.json({ status: 'success', data: inventory });
   } catch (err) { next(err); }
 });
 
