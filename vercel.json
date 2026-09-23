@@ -24,7 +24,8 @@
     },
     {
       "src": "/panel",
-      "dest": "/public/panel.html"
+      "dest": "/public/panel.html",
+      "headers": { "cache-control": "no-store, must-revalidate" }
     },
     {
       "src": "/(.*)",

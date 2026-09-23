@@ -249,7 +249,7 @@
         <!-- Fuente propia: añadir a mano -->
         <!-- CASILLEROS: cuentas de almacenamiento propio (R2/B2) -->
         <div class="card main-card p-4 p-md-5 mb-4">
-          <h3 class="brand-title fw-bold mb-2">🗄️ Casilleros (almacenamiento propio)</h3>
+          <h3 class="brand-title fw-bold mb-2">🗄️ Casilleros (almacenamiento propio) <span class="badge bg-secondary align-middle" style="font-size:.6em">panel v7</span></h3>
           <p class="text-secondary mb-3">
             Cuentas de Cloudflare R2 o Backblaze B2 donde subes tus propias películas y series. Añade
             cuantas quieras: el sistema reparte cada archivo en la que tenga hueco. Registras cuentas
@@ -419,7 +419,7 @@
                 servidor) y queda como fuente propia de este título. Acepta cualquier formato
                 (.mp4, .mkv, .avi…). La subida va a la velocidad de tu internet.
               </div>
-              <div id="poolSubirSerie" class="d-flex gap-2 align-items-center mb-2" style="display:none">
+              <div id="poolSubirSerie" class="d-none gap-2 align-items-center mb-2">
                 <label class="text-secondary small m-0">Temporada</label>
                 <input id="poolSeason" type="number" min="1" value="1" class="form-control form-control-sm bg-dark text-white border-secondary" style="max-width:90px">
                 <label class="text-secondary small m-0">Capítulo</label>
@@ -1656,7 +1656,11 @@
       if (typeof manualSel === 'undefined' || !manualSel) { document.getElementById('poolSubir').style.display = 'none'; return; }
       const esSerie = manualSel.type === 'tvseries';
       document.getElementById('poolSubir').style.display = '';
-      document.getElementById('poolSubirSerie').style.display = esSerie ? '' : 'none';
+      // OJO: se togglea con clases de Bootstrap, no con style.display: la clase `d-flex` lleva
+      // `!important` y ganaría a un display inline, dejando los campos de serie siempre visibles.
+      const serie = document.getElementById('poolSubirSerie');
+      serie.classList.toggle('d-flex', esSerie);
+      serie.classList.toggle('d-none', !esSerie);
       document.getElementById('poolAviso').innerHTML = '';
       document.getElementById('poolProgreso').style.display = 'none';
       poolCargarObjetos();
@@ -1695,13 +1699,18 @@
       return new Promise(function (resolve, reject) {
         const xhr = new XMLHttpRequest();
         xhr.open('PUT', url, true);
-        if (contentType) xhr.setRequestHeader('Content-Type', contentType);
+        // NO mandamos Content-Type: no va firmado en la URL prefirmada y algunos buckets S3 lo
+        // rechazan con 400. El tipo con que se sirve se fuerza al reproducir (response-content-type).
         xhr.upload.onprogress = function (ev) { if (ev.lengthComputable) onProgreso(ev.loaded, ev.total); };
         xhr.onload = function () {
           if (xhr.status >= 200 && xhr.status < 300) resolve();
-          else reject(new Error('El bucket rechazó la subida (HTTP ' + xhr.status + '). ¿Falta la regla CORS?'));
+          else {
+            // El cuerpo del bucket (XML) dice el motivo real; lo mostramos limpio.
+            const detalle = (xhr.responseText || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 220);
+            reject(new Error('El bucket devolvió HTTP ' + xhr.status + (detalle ? '. ' + detalle : '')));
+          }
         };
-        xhr.onerror = function () { reject(new Error('Fallo de red o CORS al subir al bucket.')); };
+        xhr.onerror = function () { reject(new Error('Fallo de red o CORS al subir al bucket (no se pudo ni leer la respuesta).')); };
         xhr.send(file);
       });
     }
