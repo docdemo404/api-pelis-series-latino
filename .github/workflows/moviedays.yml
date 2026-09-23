@@ -1,0 +1,35 @@
+name: Ampliar el catálogo de Moviedays
+
+on:
+  schedule:
+    - cron: '15 */3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: moviedays
+  cancel-in-progress: false
+
+jobs:
+  importar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Recorrer el siguiente tramo de películas y series
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+        run: |
+          # 10 páginas por clase y tanda; 50 tandas cubren las 500 páginas de TMDB.
+          DESDE=$(( ( (${{ github.run_number }} - 1) % 50 ) * 10 + 1 ))
+          npx ts-node scripts/refreshCatalog.ts \
+            --solo=moviedays --desde="$DESDE" --titulos=200 \
+            --saltar-guardados --minutos=25 --completar-minutos=5 400
