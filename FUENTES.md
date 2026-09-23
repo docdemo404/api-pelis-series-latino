@@ -853,8 +853,9 @@ npx ts-node -T scripts/dev/test_manual_ledger.ts   # el banco de pruebas del lib
   aporten títulos extra; un error a mitad del índice hace fallar la tanda.
 - **FuegoCine:** el feed declara 5.189 entradas y se recorren todas antes de agrupar películas y
   capítulos. La tanda falla si el feed se corta antes de su total declarado.
-- **Lamoviebot:** se comprueba el total de cada clase y no se cachea un índice parcial. Las series
-  existentes vuelven a la cola por cursor y solo se intentan sus capítulos pendientes.
+- **Lamoviebot:** se comprueba el total de cada clase y un índice parcial queda marcado como tal.
+  El volcado conserva la última página completa para reanudar tras un 503 sin releer las anteriores.
+  Las series existentes vuelven a la cola por cursor y solo se intentan sus capítulos pendientes.
 - **HFPro:** las series y películas ya importadas salen de la cola antes de aplicar el límite de
   la tanda; así las 13.340 rutas de episodios pueden avanzar entre corridas.
 

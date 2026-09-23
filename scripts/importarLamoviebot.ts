@@ -122,6 +122,7 @@ interface Indice {
   creado: string;
   porClase: Record<string, FichaLamoviebot[]>;
   completo?: boolean;
+  enCurso?: { clase: ClaseLamoviebot; pagina: number; totalPaginas: number; totalFichas: number; fichas: FichaLamoviebot[] };
 }
 
 /**
@@ -136,13 +137,15 @@ async function obtenerIndice(): Promise<Indice> {
   /** Lo que ya hay guardado y sigue sirviendo, para no volver a pedir una clase entera por gusto. */
   let previo: Record<string, FichaLamoviebot[]> = {};
   let previoFresco = false;
+  let checkpoint: Indice['enCurso'];
 
   if (!REFRESCAR && fs.existsSync(VOLCADO)) {
     try {
       const guardado: Indice = JSON.parse(fs.readFileSync(VOLCADO, 'utf8'));
       const horas = (Date.now() - new Date(guardado.creado).getTime()) / 3_600_000;
-      previo = guardado.porClase || {};
-      previoFresco = horas < 24 && guardado.completo === true;
+      previoFresco = horas < 24 && (guardado.completo === true || !!guardado.enCurso);
+      previo = previoFresco ? (guardado.porClase || {}) : {};
+      checkpoint = previoFresco ? guardado.enCurso : undefined;
       /**
        * Fresco NO BASTA: tiene que traer TODAS las clases que esta corrida va a trabajar.
        *
@@ -154,7 +157,7 @@ async function obtenerIndice(): Promise<Indice> {
       const faltan = CLASES.filter(({ clase }) => !SOLO || SOLO === clase)
         .map(({ clase }) => clase)
         .filter((clase) => !(guardado.porClase || {})[clase]?.length);
-      if (previoFresco && guardado.porClase && !faltan.length) {
+      if (previoFresco && guardado.completo && guardado.porClase && !faltan.length) {
         const total = Object.values(guardado.porClase).reduce((a, b) => a + b.length, 0);
         console.log(`Índice del volcado (${Math.round(horas)} h, ${total} fichas). --refrescar-indice para rehacerlo.`);
         return guardado;
@@ -169,6 +172,14 @@ async function obtenerIndice(): Promise<Indice> {
 
   if (!previoFresco) previo = {};
   const porClase: Record<string, FichaLamoviebot[]> = {};
+  const guardarVolcado = (enCurso?: Indice['enCurso']): void => {
+    const indice: Indice = {
+      creado: new Date().toISOString(), porClase: { ...previo, ...porClase },
+      completo: !enCurso, ...(enCurso ? { enCurso } : {}),
+    };
+    fs.mkdirSync(path.dirname(VOLCADO), { recursive: true });
+    fs.writeFileSync(VOLCADO, JSON.stringify(indice), 'utf8');
+  };
   for (const { clase } of CLASES) {
     if (SOLO && SOLO !== clase) continue;
     // La clase que ya está guardada y fresca no se vuelve a pedir: son 308 páginas en el caso de
@@ -179,9 +190,14 @@ async function obtenerIndice(): Promise<Indice> {
       continue;
     }
     const primera = await listarPagina(clase, 1);
-    const fichas: FichaLamoviebot[] = [...primera.fichas];
+    const reanudar = checkpoint?.clase === clase
+      && checkpoint.totalPaginas === primera.totalPaginas
+      && Math.abs(checkpoint.totalFichas - primera.totalFichas) <= 10;
+    const fichas: FichaLamoviebot[] = reanudar ? [...checkpoint!.fichas] : [...primera.fichas];
+    const desde = reanudar ? checkpoint!.pagina + 1 : 2;
     process.stdout.write(`  ${clase}: ${primera.totalFichas} fichas en ${primera.totalPaginas} páginas `);
-    for (let p = 2; p <= primera.totalPaginas; p++) {
+    if (reanudar) process.stdout.write(`(reanuda en ${desde}) `);
+    for (let p = desde; p <= primera.totalPaginas; p++) {
       let pagina: Awaited<ReturnType<typeof listarPagina>> | null = null;
       for (let intento = 0; intento < 3; intento++) {
         try {
@@ -189,17 +205,28 @@ async function obtenerIndice(): Promise<Indice> {
           if (pagina.pagina !== p || !pagina.fichas.length) throw new Error(`página ${p} vacía o repetida`);
           break;
         } catch (e) {
-          if (intento === 2) throw new Error(`Índice ${clase} incompleto en página ${p}: ${String(e)}`);
+          if (intento === 2) {
+            guardarVolcado({ clase, pagina: p - 1, totalPaginas: primera.totalPaginas, totalFichas: primera.totalFichas, fichas });
+            throw new Error(`Índice ${clase} incompleto en página ${p}: ${String(e)}`);
+          }
           await new Promise(ok => setTimeout(ok, 1000 * (intento + 1)));
         }
       }
       fichas.push(...pagina!.fichas);
-      if (p % 25 === 0) process.stdout.write('.');
+      if (p % 25 === 0) {
+        guardarVolcado({ clase, pagina: p, totalPaginas: primera.totalPaginas, totalFichas: primera.totalFichas, fichas });
+        process.stdout.write('.');
+      }
     }
-    if (primera.totalFichas && new Set(fichas.map(f => f.slug)).size < primera.totalFichas)
+    if (primera.totalFichas && new Set(fichas.map(f => f.slug)).size < primera.totalFichas) {
+      // Si el índice cambió durante el barrido, no se vuelve a reutilizar este tramo.
+      guardarVolcado();
       throw new Error(`Índice ${clase} incompleto: ${fichas.length}/${primera.totalFichas} fichas`);
+    }
     console.log(` → ${fichas.length} leídas`);
     porClase[clase] = fichas;
+    checkpoint = undefined;
+    guardarVolcado();
   }
 
   /**
