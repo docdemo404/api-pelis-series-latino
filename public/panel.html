@@ -247,6 +247,68 @@
         </div>
 
         <!-- Fuente propia: añadir a mano -->
+        <!-- CASILLEROS: cuentas de almacenamiento propio (R2/B2) -->
+        <div class="card main-card p-4 p-md-5 mb-4">
+          <h3 class="brand-title fw-bold mb-2">🗄️ Casilleros (almacenamiento propio)</h3>
+          <p class="text-secondary mb-3">
+            Cuentas de Cloudflare R2 o Backblaze B2 donde subes tus propias películas y series. Añade
+            cuantas quieras: el sistema reparte cada archivo en la que tenga hueco. Registras cuentas
+            que <b>tú creaste a mano</b> (pegas sus credenciales); esto no crea cuentas.
+          </p>
+
+          <div id="poolCuentas" class="mb-3">
+            <div class="text-secondary small py-2">⏳ Cargando casilleros…</div>
+          </div>
+
+          <button type="button" id="poolAddToggle" class="btn btn-sm btn-gradient shadow mb-2">➕ Añadir cuenta</button>
+
+          <div id="poolAddForm" class="stat-box" style="display:none">
+            <div class="row g-2">
+              <div class="col-12 col-md-3">
+                <label class="text-secondary small mb-1 d-block">Proveedor</label>
+                <select id="poolProvider" class="form-select form-select-sm bg-dark text-white border-secondary">
+                  <option value="r2">Cloudflare R2 (10 GB gratis)</option>
+                  <option value="b2">Backblaze B2 (10 GB gratis)</option>
+                </select>
+              </div>
+              <div class="col-12 col-md-3">
+                <label class="text-secondary small mb-1 d-block">Etiqueta (opcional)</label>
+                <input id="poolLabel" class="form-control form-control-sm bg-dark text-white border-secondary" placeholder="Casillero 1">
+              </div>
+              <div class="col-12 col-md-3">
+                <label class="text-secondary small mb-1 d-block">Bucket</label>
+                <input id="poolBucket" class="form-control form-control-sm bg-dark text-white border-secondary" placeholder="mi-bucket">
+              </div>
+              <div class="col-12 col-md-3" id="poolR2Field">
+                <label class="text-secondary small mb-1 d-block">Account ID (R2)</label>
+                <input id="poolAccountId" class="form-control form-control-sm bg-dark text-white border-secondary" placeholder="abc123…">
+              </div>
+              <div class="col-12 col-md-3" id="poolB2Field" style="display:none">
+                <label class="text-secondary small mb-1 d-block">Región (B2)</label>
+                <input id="poolRegion" class="form-control form-control-sm bg-dark text-white border-secondary" placeholder="us-west-004">
+              </div>
+              <div class="col-12 col-md-6">
+                <label class="text-secondary small mb-1 d-block">Access Key ID</label>
+                <input id="poolAccessKey" class="form-control form-control-sm bg-dark text-white border-secondary" autocomplete="off">
+              </div>
+              <div class="col-12 col-md-6">
+                <label class="text-secondary small mb-1 d-block">Secret Access Key</label>
+                <input id="poolSecretKey" type="password" class="form-control form-control-sm bg-dark text-white border-secondary" autocomplete="off">
+              </div>
+            </div>
+            <div class="alert alert-warning py-2 my-2 small mb-0">
+              ⚠️ Para poder subir desde el navegador, el bucket necesita una regla <b>CORS</b> que
+              permita <code>PUT</code> desde el origen de este panel. Si la subida falla con un error
+              de CORS, añade esa regla en R2/B2. La reproducción en la app no la necesita.
+            </div>
+            <div class="d-flex gap-2 mt-2 align-items-center">
+              <button type="button" id="poolAddBtn" class="btn btn-sm btn-info fw-bold">Validar y guardar</button>
+              <button type="button" id="poolAddCancel" class="btn btn-sm btn-dark text-white border-secondary">Cancelar</button>
+              <span id="poolAddAviso" class="small"></span>
+            </div>
+          </div>
+        </div>
+
         <div class="card main-card p-4 p-md-5 mb-4">
           <h3 class="brand-title fw-bold mb-2">➕ Añadir contenido (fuente propia)</h3>
           <p class="text-secondary mb-3">
@@ -274,6 +336,34 @@
               </div>
             </div>
             <div id="manualEstado" class="mb-3"></div>
+
+            <!-- SUBIR ARCHIVO AL CASILLERO (fuente propia con almacenamiento propio R2/B2) -->
+            <div id="poolSubir" class="stat-box mb-3" style="display:none">
+              <div class="fw-bold text-white mb-1">⬆️ Subir archivo a un casillero</div>
+              <div class="text-secondary small mb-2">
+                Se sube <b>directo del navegador</b> a tu cuenta R2/B2 (los bytes no pasan por el
+                servidor) y queda como fuente propia de este título. Acepta cualquier formato
+                (.mp4, .mkv, .avi…). La subida va a la velocidad de tu internet.
+              </div>
+              <div id="poolSubirSerie" class="d-flex gap-2 align-items-center mb-2" style="display:none">
+                <label class="text-secondary small m-0">Temporada</label>
+                <input id="poolSeason" type="number" min="1" value="1" class="form-control form-control-sm bg-dark text-white border-secondary" style="max-width:90px">
+                <label class="text-secondary small m-0">Capítulo</label>
+                <input id="poolEpisode" type="number" min="1" value="1" class="form-control form-control-sm bg-dark text-white border-secondary" style="max-width:90px">
+              </div>
+              <div class="d-flex gap-2 align-items-center flex-wrap mb-2">
+                <input id="poolFile" type="file" accept="video/*,.mkv,.avi,.mp4,.webm,.mov,.ts,.m4v" class="form-control form-control-sm bg-dark text-white border-secondary" style="max-width:360px">
+                <button id="poolSubirBtn" class="btn btn-sm btn-info fw-bold" type="button">Subir al casillero</button>
+              </div>
+              <div id="poolProgreso" class="mb-2" style="display:none">
+                <div class="progress" style="height:18px">
+                  <div id="poolBarra" class="progress-bar bg-info" role="progressbar" style="width:0%">0%</div>
+                </div>
+                <div id="poolProgresoTxt" class="text-secondary small mt-1"></div>
+              </div>
+              <div id="poolAviso"></div>
+              <div id="poolLista" class="mt-2"></div>
+            </div>
 
             <div id="manualPelicula">
               <label class="text-secondary small mb-1 d-block">URLs directas — una por línea. La primera que funcione será la principal; las demás quedan como respaldo. Para quitar una, borra su línea.</label>
@@ -1329,6 +1419,254 @@
     });
 
     // --- Lógica del Editor de Medios ---
+  </script>
+
+  <!-- ═══ CASILLEROS: cuentas de almacenamiento propio (R2/B2) y subida directa ═══ -->
+  <script>
+    // ── Utilidades ──────────────────────────────────────────────────────────
+    function poolGB(n) { return (Number(n) || 0).toFixed(2) + ' GB'; }
+    function poolEsc(x) {
+      return String(x == null ? '' : x)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // ── Cuentas (casilleros) ────────────────────────────────────────────────
+    async function poolCargarCuentas() {
+      const caja = document.getElementById('poolCuentas');
+      try {
+        const j = await (await fetch('/api/v1/panel/pool/accounts')).json();
+        const cuentas = j.accounts || [];
+        if (!cuentas.length) {
+          caja.innerHTML = '<div class="text-secondary small py-2">Sin casilleros todavía. Añade uno para poder subir.</div>';
+          return;
+        }
+        caja.innerHTML =
+          '<div class="text-secondary small mb-2">Espacio libre total: <b class="text-info">' + poolGB(j.total_free_gb) + '</b></div>' +
+          cuentas.map(function (c) {
+            const col = c.used_pct >= 90 ? 'bg-danger' : (c.used_pct >= 70 ? 'bg-warning' : 'bg-info');
+            const muerta = c.status === 'dead';
+            return '<div class="source-card d-flex align-items-center justify-content-between flex-wrap gap-2" data-id="' + c.id + '">' +
+              '<div style="min-width:220px">' +
+                '<span class="badge ' + (c.provider === 'r2' ? 'bg-primary' : 'bg-success') + ' me-2">' + c.provider.toUpperCase() + '</span>' +
+                '<b class="text-white">' + poolEsc(c.label) + '</b>' +
+                (muerta ? ' <span class="badge bg-danger">caída</span>' : '') +
+                '<div class="text-secondary small">' + poolEsc(c.bucket) + '</div>' +
+              '</div>' +
+              '<div class="flex-grow-1" style="min-width:180px;max-width:340px">' +
+                '<div class="progress" style="height:16px">' +
+                  '<div class="progress-bar ' + col + '" style="width:' + c.used_pct + '%">' + c.used_pct + '%</div>' +
+                '</div>' +
+                '<div class="text-secondary small mt-1">' + poolGB(c.used_gb) + ' / ' + poolGB(c.cap_gb) + ' · libre ' + poolGB(c.free_gb) + '</div>' +
+              '</div>' +
+              '<button type="button" class="btn btn-sm btn-outline-danger pool-cuenta-del" data-id="' + c.id + '">🗑️</button>' +
+            '</div>';
+          }).join('');
+        caja.querySelectorAll('.pool-cuenta-del').forEach(function (b) {
+          b.addEventListener('click', async function () {
+            if (!confirm('¿Borrar este casillero del panel? (Los archivos que apunten a él dejarán de servirse. Bórralos antes.)')) return;
+            await fetch('/api/v1/panel/pool/accounts/' + b.dataset.id, { method: 'DELETE' });
+            poolCargarCuentas();
+          });
+        });
+      } catch (e) {
+        caja.innerHTML = '<div class="alert alert-danger mb-0">No se pudieron cargar los casilleros.</div>';
+      }
+    }
+
+    document.getElementById('poolAddToggle').addEventListener('click', function () {
+      const f = document.getElementById('poolAddForm');
+      f.style.display = f.style.display === 'none' ? '' : 'none';
+    });
+    document.getElementById('poolAddCancel').addEventListener('click', function () {
+      document.getElementById('poolAddForm').style.display = 'none';
+      document.getElementById('poolAddAviso').innerHTML = '';
+    });
+    document.getElementById('poolProvider').addEventListener('change', function () {
+      const r2 = this.value === 'r2';
+      document.getElementById('poolR2Field').style.display = r2 ? '' : 'none';
+      document.getElementById('poolB2Field').style.display = r2 ? 'none' : '';
+    });
+
+    document.getElementById('poolAddBtn').addEventListener('click', async function () {
+      const aviso = document.getElementById('poolAddAviso');
+      const provider = document.getElementById('poolProvider').value;
+      const cuerpo = {
+        provider: provider,
+        label: document.getElementById('poolLabel').value.trim(),
+        bucket: document.getElementById('poolBucket').value.trim(),
+        access_key_id: document.getElementById('poolAccessKey').value.trim(),
+        secret_access_key: document.getElementById('poolSecretKey').value.trim(),
+      };
+      if (provider === 'r2') cuerpo.account_id = document.getElementById('poolAccountId').value.trim();
+      else cuerpo.region = document.getElementById('poolRegion').value.trim();
+
+      aviso.className = 'small text-secondary';
+      aviso.textContent = '⏳ Validando credenciales…';
+      this.disabled = true;
+      try {
+        const r = await fetch('/api/v1/panel/pool/accounts', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cuerpo),
+        });
+        const j = await r.json();
+        if (j.status === 'success') {
+          aviso.className = 'small text-success';
+          aviso.textContent = '✅ Casillero añadido';
+          ['poolLabel', 'poolBucket', 'poolAccessKey', 'poolSecretKey', 'poolAccountId', 'poolRegion'].forEach(function (id) {
+            const el = document.getElementById(id); if (el) el.value = '';
+          });
+          poolCargarCuentas();
+        } else {
+          aviso.className = 'small text-danger';
+          aviso.textContent = '❌ ' + ((j.error && j.error.message) || j.message || 'No se pudo añadir');
+        }
+      } catch (e) {
+        aviso.className = 'small text-danger';
+        aviso.textContent = '❌ Error de conexión';
+      }
+      this.disabled = false;
+    });
+
+    // ── Subida de un archivo para el título elegido en la fuente propia ───────
+    let poolSubiendo = false;
+
+    // Se engancha a la selección de título del formulario manual: cuando se elige uno, se muestra
+    // el widget de subida y se carga lo que ya haya subido para esa ficha.
+    if (typeof manualPrepararTipo === 'function') {
+      const _prepOrig = manualPrepararTipo;
+      manualPrepararTipo = async function () {
+        await _prepOrig.apply(this, arguments);
+        poolAlElegirTitulo();
+      };
+    }
+    document.getElementById('manualCancelar').addEventListener('click', function () {
+      document.getElementById('poolSubir').style.display = 'none';
+    });
+
+    function poolAlElegirTitulo() {
+      if (typeof manualSel === 'undefined' || !manualSel) { document.getElementById('poolSubir').style.display = 'none'; return; }
+      const esSerie = manualSel.type === 'tvseries';
+      document.getElementById('poolSubir').style.display = '';
+      document.getElementById('poolSubirSerie').style.display = esSerie ? '' : 'none';
+      document.getElementById('poolAviso').innerHTML = '';
+      document.getElementById('poolProgreso').style.display = 'none';
+      poolCargarObjetos();
+    }
+
+    async function poolCargarObjetos() {
+      const caja = document.getElementById('poolLista');
+      if (!manualSel) { caja.innerHTML = ''; return; }
+      try {
+        const j = await (await fetch('/api/v1/panel/pool/objects?tmdb_id=' + manualSel.tmdb_id + '&type=' + manualSel.type)).json();
+        const objs = j.objects || [];
+        if (!objs.length) { caja.innerHTML = '<div class="text-secondary small">Nada subido a casilleros para este título.</div>'; return; }
+        caja.innerHTML = '<div class="text-secondary small mb-1">Ya subido:</div>' + objs.map(function (o) {
+          const et = (o.season || o.episode) ? ('T' + o.season + 'E' + o.episode + ' · ') : '';
+          return '<div class="d-flex gap-2 align-items-center justify-content-between mb-1">' +
+            '<span class="small text-white text-truncate" style="max-width:340px" title="' + poolEsc(o.filename) + '">' +
+              et + poolEsc(o.filename || o.id) + ' <span class="text-secondary">(' + poolGB(o.size_gb) + ')</span></span>' +
+            '<button type="button" class="btn btn-sm btn-outline-danger pool-obj-del" data-id="' + o.id + '">🗑️</button>' +
+          '</div>';
+        }).join('');
+        caja.querySelectorAll('.pool-obj-del').forEach(function (b) {
+          b.addEventListener('click', async function () {
+            if (!confirm('¿Borrar este archivo del casillero? Deja de servirse.')) return;
+            await fetch('/api/v1/panel/pool/objects/' + b.dataset.id, { method: 'DELETE' });
+            poolCargarObjetos();
+            poolCargarCuentas();
+          });
+        });
+      } catch (e) {
+        caja.innerHTML = '<div class="alert alert-danger mb-0 small">No se pudo leer lo subido.</div>';
+      }
+    }
+
+    // Sube el archivo DIRECTO al bucket con la URL prefirmada (XHR para tener barra de progreso).
+    function poolPutConProgreso(url, file, contentType, onProgreso) {
+      return new Promise(function (resolve, reject) {
+        const xhr = new XMLHttpRequest();
+        xhr.open('PUT', url, true);
+        if (contentType) xhr.setRequestHeader('Content-Type', contentType);
+        xhr.upload.onprogress = function (ev) { if (ev.lengthComputable) onProgreso(ev.loaded, ev.total); };
+        xhr.onload = function () {
+          if (xhr.status >= 200 && xhr.status < 300) resolve();
+          else reject(new Error('El bucket rechazó la subida (HTTP ' + xhr.status + '). ¿Falta la regla CORS?'));
+        };
+        xhr.onerror = function () { reject(new Error('Fallo de red o CORS al subir al bucket.')); };
+        xhr.send(file);
+      });
+    }
+
+    document.getElementById('poolSubirBtn').addEventListener('click', async function () {
+      if (poolSubiendo || !manualSel) return;
+      const aviso = document.getElementById('poolAviso');
+      const fileEl = document.getElementById('poolFile');
+      const file = fileEl.files && fileEl.files[0];
+      if (!file) { aviso.innerHTML = '<div class="text-warning small">Elige un archivo primero.</div>'; return; }
+
+      const esSerie = manualSel.type === 'tvseries';
+      const season = esSerie ? Number(document.getElementById('poolSeason').value) || 1 : 0;
+      const episode = esSerie ? Number(document.getElementById('poolEpisode').value) || 1 : 0;
+
+      poolSubiendo = true;
+      this.disabled = true;
+      aviso.innerHTML = '';
+      const prog = document.getElementById('poolProgreso');
+      const barra = document.getElementById('poolBarra');
+      const txt = document.getElementById('poolProgresoTxt');
+      prog.style.display = '';
+      barra.style.width = '0%'; barra.textContent = '0%';
+      txt.textContent = 'Pidiendo hueco en un casillero…';
+
+      try {
+        // 1) presign
+        const pre = await (await fetch('/api/v1/panel/pool/presign', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tmdb_id: manualSel.tmdb_id, type: manualSel.type, season: season, episode: episode,
+            filename: file.name, size: file.size,
+          }),
+        })).json();
+        if (pre.status !== 'success') throw new Error((pre.error && pre.error.message) || pre.message || 'No hay hueco');
+
+        // 2) PUT directo al bucket
+        txt.textContent = 'Subiendo al casillero…';
+        const t0 = Date.now();
+        await poolPutConProgreso(pre.upload_url, file, pre.content_type, function (loaded, total) {
+          const pct = Math.round((loaded / total) * 100);
+          barra.style.width = pct + '%'; barra.textContent = pct + '%';
+          const mbps = (loaded / 1024 / 1024) / Math.max(0.1, (Date.now() - t0) / 1000);
+          txt.textContent = (loaded / 1024 / 1024).toFixed(0) + ' / ' + (total / 1024 / 1024).toFixed(0) + ' MB · ' + mbps.toFixed(1) + ' MB/s';
+        });
+
+        // 3) confirm → se registra y se da de alta como fuente propia
+        txt.textContent = 'Confirmando y enlazando a la ficha…';
+        const conf = await (await fetch('/api/v1/panel/pool/confirm', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            object_id: pre.object_id, tmdb_id: manualSel.tmdb_id, type: manualSel.type,
+            season: season, episode: episode, account_id: pre.account_id, key: pre.key,
+            size: file.size, filename: file.name,
+          }),
+        })).json();
+        if (conf.status !== 'success') throw new Error((conf.error && conf.error.message) || conf.message || 'No se pudo enlazar');
+
+        barra.style.width = '100%'; barra.textContent = '100%';
+        aviso.innerHTML = '<div class="alert alert-success py-2 mb-0 small">✅ Subido y añadido como fuente propia' +
+          (conf.forzada ? ' (guardado sin comprobar; el verificador lo revisará)' : '') + '.</div>';
+        fileEl.value = '';
+        poolCargarObjetos();
+        poolCargarCuentas();
+      } catch (e) {
+        aviso.innerHTML = '<div class="alert alert-danger py-2 mb-0 small">❌ ' + poolEsc(e.message || 'Error al subir') + '</div>';
+      } finally {
+        poolSubiendo = false;
+        this.disabled = false;
+        setTimeout(function () { document.getElementById('poolProgreso').style.display = 'none'; }, 1500);
+      }
+    });
+
+    // Arranque
+    poolCargarCuentas();
   </script>
 </body>
 </html>

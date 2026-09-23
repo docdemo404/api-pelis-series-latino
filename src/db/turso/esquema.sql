@@ -319,6 +319,50 @@ CREATE TABLE IF NOT EXISTS pluto_titulos (
 );
 CREATE INDEX IF NOT EXISTS idx_pluto_titulos_veredicto ON pluto_titulos (veredicto, audios_at);
 
+-- ── Casilleros: almacenamiento propio en R2/B2 (2026-09-23) ──────────────────────────────────
+--
+-- La FUENTE PROPIA con bucket propio. Cada cuenta de R2/B2 es un "casillero"; cada película o
+-- capítulo que subimos es un objeto. El objeto se registra además como servidor manual del catálogo
+-- (source_id=manual), con una url estable `/api/v1/pool/v/:id` que firma un enlace fresco y hace 302
+-- en cada reproducción — así los enlaces del bucket, que caducan, no se guardan nunca. Ver
+-- src/services/poolStore.ts y src/routes/pool.routes.ts.
+--
+-- LAS CREDENCIALES VIVEN AQUÍ. No hay hardcodeo: las pega el panel al añadir la cuenta, se validan
+-- con una consulta de listado antes de guardar, y se usan solo para firmar URLs de subida/bajada.
+CREATE TABLE IF NOT EXISTS pool_accounts (
+    id                TEXT PRIMARY KEY,
+    provider          TEXT NOT NULL CHECK (provider IN ('r2', 'b2')),
+    label             TEXT NOT NULL DEFAULT '',
+    endpoint          TEXT NOT NULL,
+    region            TEXT NOT NULL,
+    bucket            TEXT NOT NULL,
+    access_key_id     TEXT NOT NULL,
+    secret_access_key TEXT NOT NULL,
+    used_bytes        INTEGER NOT NULL DEFAULT 0,
+    cap_bytes         INTEGER NOT NULL DEFAULT 0,
+    status            TEXT NOT NULL DEFAULT 'live' CHECK (status IN ('live', 'dead')),
+    created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_pool_accounts_estado ON pool_accounts (status);
+
+-- Un objeto = un archivo subido. `key` es la clave dentro del bucket; `season`/`episode` son 0 en
+-- una película. `id` es el que viaja en la url pública, así que es un handle opaco (12 bytes hex).
+CREATE TABLE IF NOT EXISTS pool_objects (
+    id            TEXT PRIMARY KEY,
+    tmdb_id       INTEGER NOT NULL,
+    type          TEXT NOT NULL CHECK (type IN ('movie', 'tvseries')),
+    season        INTEGER NOT NULL DEFAULT 0,
+    episode       INTEGER NOT NULL DEFAULT 0,
+    account_id    TEXT NOT NULL REFERENCES pool_accounts(id) ON DELETE CASCADE,
+    key           TEXT NOT NULL,
+    size_bytes    INTEGER NOT NULL DEFAULT 0,
+    content_type  TEXT NOT NULL DEFAULT '',
+    orig_filename TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_pool_objects_ficha  ON pool_objects (tmdb_id, type);
+CREATE INDEX IF NOT EXISTS idx_pool_objects_cuenta ON pool_objects (account_id);
+
 -- ═══════════════════════════════════════════════════════════════════════════════════════════════
 -- VISTAS (migraciones 018, 019 y 020). Un servidor / un capítulo por fila, para que los barridos
 -- pregunten sin bajarse el catálogo. Van con DROP + CREATE porque SQLite no tiene CREATE OR

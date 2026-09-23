@@ -10,6 +10,7 @@ import mediaRoutes from '../src/routes/media.routes';
 import streamRoutes from '../src/routes/stream.routes';
 import netmirrorRoutes from '../src/routes/netmirror.routes';
 import plutoRoutes from '../src/routes/pluto.routes';
+import poolRoutes from '../src/routes/pool.routes';
 import { filasEscritas } from '../src/db/contadorEscrituras';
 import subtitulosRoutes from '../src/routes/subtitulos.routes';
 import { sendErrorResponse } from '../src/utils/apiHelpers';
@@ -82,7 +83,9 @@ app.use((req: Request, res: Response, next: NextFunction) => {
     // `/stream/direct` NO puede cachearse en el borde: acuña una URL nueva en cada reproducción
     // y, según el host, responde con un 302 distinto cada vez.
     // `/pluto/` son informes del móvil y su estado: nada que cachear.
-    } else if (req.path.includes('/panel') || req.path.includes('/pluto/') || req.path.includes('/stream/resolve') || req.path.includes('/stream/direct') || req.path.includes('/revalidate') || req.path.includes('/cache')) {
+    // `/pool/v/` acuña un 302 con url firmada nueva en cada reproducción: cachearlo serviría un
+    // enlace caducado. El resto de `/panel/pool/` es gestión: tampoco se cachea.
+    } else if (req.path.includes('/panel') || req.path.includes('/pool/') || req.path.includes('/pluto/') || req.path.includes('/stream/resolve') || req.path.includes('/stream/direct') || req.path.includes('/revalidate') || req.path.includes('/cache')) {
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
     } else if (req.path.includes('/search')) {
@@ -212,6 +215,7 @@ app.use(subtitulosRoutes);
 app.use(streamRoutes);
 app.use(netmirrorRoutes);
 app.use(plutoRoutes);
+app.use(poolRoutes);
 
 // Manejador global de errores inesperados (Zero 500 HTML Pages)
 app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
