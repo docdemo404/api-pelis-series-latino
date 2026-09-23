@@ -410,6 +410,13 @@ async function main() {
         break;
       }
 
+      if (tipo === 'tvseries' && soloTipo === 'tvseries' && !VIA_API) {
+        const testigo = await inventarioSerieNewTv('Breaking Bad', '2008').catch(() => null);
+        const masterTestigo = testigo ? await masterHls('70196252', '', 'nf').catch(() => null) : null;
+        if (!testigo || testigo.episodios.length < 62 || !masterTestigo || masterTestigo.audios.length < 2)
+          throw new Error('NewTV dejó de atender esta red; se detiene sin mover el cursor TV');
+      }
+
       await pool(filas, CONCURRENCIA, async f => {
         if (stats.procesadas >= LIMITE) return;
         if (tipo === 'tvseries') {
