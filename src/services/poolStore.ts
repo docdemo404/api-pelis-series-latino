@@ -25,7 +25,7 @@ import crypto from 'crypto';
 import { getSupabaseAdmin } from './supabaseService';
 import { getDb } from '../db/libsql';
 import { httpClient } from '../utils/httpClient';
-import { CredencialesS3, getPrefirmado, putPrefirmado, deletePrefirmado, listarPrefirmado } from '../utils/s3sign';
+import { CredencialesS3, getPrefirmado, putPrefirmado, deletePrefirmado, listarPrefirmado, firmarConCabecera, corsXml } from '../utils/s3sign';
 import * as gdrive from './gdrive';
 
 export type Proveedor = 'r2' | 'b2' | 'gdrive';
@@ -215,6 +215,69 @@ export async function elegirCuenta(size: number, provider?: Proveedor): Promise<
     .filter(c => (c.cap_bytes - c.used_bytes) >= size)
     .sort((a, b) => (b.cap_bytes - b.used_bytes) - (a.cap_bytes - a.used_bytes));
   return cuentas[0] || null;
+}
+
+/**
+ * CONFIGURA EL CORS DEL BUCKET automáticamente, para poder subir desde el navegador (incluido el
+ * móvil) sin comandos. R2 lo acepta por la API S3 (`PutBucketCors`); B2 no lo expone por S3, así
+ * que va por su API nativa (`b2_update_bucket`). Drive no necesita CORS.
+ */
+export async function configurarCors(accountId: string, origenes: string[]): Promise<{ ok: boolean; error?: string; nota?: string }> {
+  const c = await cuenta(accountId);
+  if (!c) return { ok: false, error: 'La cuenta no existe' };
+
+  if (c.provider === 'gdrive') return { ok: true, nota: 'Google Drive no necesita CORS.' };
+
+  if (c.provider === 'r2') {
+    try {
+      const xml = corsXml(origenes);
+      const { url, headers } = firmarConCabecera(credDe(c), { metodo: 'PUT', subrecurso: 'cors', body: xml, contentType: 'application/xml' });
+      const r = await httpClient.put(url, xml, { headers, validateStatus: () => true, timeout: 15000 } as any);
+      if (r.status >= 200 && r.status < 300) return { ok: true };
+      return { ok: false, error: `R2 rechazó el CORS (HTTP ${r.status}): ${String(r.data || '').slice(0, 200)}` };
+    } catch (e: any) {
+      return { ok: false, error: String(e?.message || e) };
+    }
+  }
+
+  // B2: API nativa. Requiere que la Application Key tenga permiso writeBuckets.
+  try {
+    const basic = Buffer.from(`${c.access_key_id}:${c.secret_access_key}`).toString('base64');
+    const az = await httpClient.get('https://api.backblazeb2.com/b2api/v3/b2_authorize_account', {
+      headers: { Authorization: `Basic ${basic}` }, validateStatus: () => true, timeout: 15000,
+    } as any);
+    if (az.status !== 200) return { ok: false, error: `B2 no autorizó (HTTP ${az.status}). Revisa keyID/applicationKey.` };
+    const apiUrl = az.data?.apiInfo?.storageApi?.apiUrl || az.data?.apiUrl;
+    const accountIdB2 = az.data?.accountId;
+    const token = az.data?.authorizationToken;
+    if (!apiUrl || !token) return { ok: false, error: 'B2 no devolvió la info de la API.' };
+
+    const lb = await httpClient.post(`${apiUrl}/b2api/v3/b2_list_buckets`,
+      { accountId: accountIdB2, bucketName: c.bucket },
+      { headers: { Authorization: token }, validateStatus: () => true, timeout: 15000 } as any);
+    const bucket = lb.data?.buckets?.[0];
+    if (!bucket?.bucketId) return { ok: false, error: `No se encontró el bucket "${c.bucket}" en B2.` };
+
+    const corsRules = [{
+      corsRuleName: 'panelSubida',
+      allowedOrigins: origenes,
+      allowedOperations: ['s3_put', 's3_get', 's3_head'],
+      allowedHeaders: ['*'],
+      exposeHeaders: ['etag'],
+      maxAgeSeconds: 3600,
+    }];
+    const up = await httpClient.post(`${apiUrl}/b2api/v3/b2_update_bucket`,
+      { accountId: accountIdB2, bucketId: bucket.bucketId, corsRules },
+      { headers: { Authorization: token }, validateStatus: () => true, timeout: 15000 } as any);
+    if (up.status >= 200 && up.status < 300) return { ok: true };
+    const msg = up.data?.message || String(up.data || '').slice(0, 200);
+    if (up.status === 401 || up.status === 403 || /capabilit/i.test(String(msg))) {
+      return { ok: false, error: 'La Application Key de B2 no tiene permiso para cambiar el bucket (writeBuckets). Crea la llave con ese permiso, o usa la Master Application Key solo para este paso.' };
+    }
+    return { ok: false, error: `B2 rechazó el CORS (HTTP ${up.status}): ${msg}` };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message || e) };
+  }
 }
 
 /* ─────────────────────────────── objetos ─────────────────────────────── */

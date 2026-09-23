@@ -131,3 +131,62 @@ export function deletePrefirmado(cred: CredencialesS3, clave: string, expiraEn =
 export function listarPrefirmado(cred: CredencialesS3, expiraEn = 120): string {
   return urlPrefirmada(cred, { metodo: 'GET', clave: '', extra: { 'list-type': '2', 'max-keys': '1' }, expiraEn });
 }
+
+/**
+ * FIRMA SigV4 CON CABECERA (Authorization), para peticiones CON CUERPO como `PutBucketCors`. A
+ * diferencia de las URLs prefirmadas (payload sin firmar), aquí el cuerpo SÍ se firma —su sha256 y
+ * su MD5— porque S3 lo exige para configurar el bucket. Devuelve la URL y las cabeceras a mandar.
+ */
+export function firmarConCabecera(cred: CredencialesS3, opts: {
+  metodo: 'PUT' | 'GET' | 'DELETE';
+  /** Subrecurso a nivel bucket, ej. 'cors'. Va en la query como `?cors=`. */
+  subrecurso?: string;
+  body?: string;
+  contentType?: string;
+}): { url: string; headers: Record<string, string> } {
+  const { amzDate, fecha } = ahoraAmz();
+  const host = new URL(cred.endpoint).host;
+  const uri = `/${cred.bucket}`;
+  const body = opts.body || '';
+  const payloadHash = sha256Hex(body);
+  const scope = `${fecha}/${cred.region}/s3/aws4_request`;
+
+  const query: Record<string, string> = {};
+  if (opts.subrecurso) query[opts.subrecurso] = '';
+  const qc = queryCanonica(query);
+
+  // Cabeceras a firmar, claves en minúscula (como exige el canónico), ordenadas.
+  const headers: Record<string, string> = {
+    host,
+    'x-amz-content-sha256': payloadHash,
+    'x-amz-date': amzDate,
+  };
+  if (body) headers['content-md5'] = crypto.createHash('md5').update(body).digest('base64');
+  if (opts.contentType) headers['content-type'] = opts.contentType;
+
+  const nombres = Object.keys(headers).sort();
+  const canonicalHeaders = nombres.map(n => `${n}:${headers[n].trim()}\n`).join('');
+  const signedHeaders = nombres.join(';');
+
+  const canonica = [opts.metodo, uri, qc, canonicalHeaders, signedHeaders, payloadHash].join('\n');
+  const paraFirmar = ['AWS4-HMAC-SHA256', amzDate, scope, sha256Hex(canonica)].join('\n');
+  const firma = crypto.createHmac('sha256', claveDeFirma(cred.secretAccessKey, fecha, cred.region))
+    .update(paraFirmar).digest('hex');
+
+  const auth = `AWS4-HMAC-SHA256 Credential=${cred.accessKeyId}/${scope}, SignedHeaders=${signedHeaders}, Signature=${firma}`;
+  return {
+    url: `${cred.endpoint}${uri}${qc ? '?' + qc : ''}`,
+    headers: { ...headers, Authorization: auth },
+  };
+}
+
+/** El XML de una regla CORS S3 que permite subir (PUT) y leer (GET/HEAD) desde `origenes`. */
+export function corsXml(origenes: string[]): string {
+  const orig = origenes.map(o => `<AllowedOrigin>${o}</AllowedOrigin>`).join('');
+  return '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<CORSConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">' +
+    '<CORSRule>' + orig +
+    '<AllowedMethod>PUT</AllowedMethod><AllowedMethod>GET</AllowedMethod><AllowedMethod>HEAD</AllowedMethod>' +
+    '<AllowedHeader>*</AllowedHeader><ExposeHeader>ETag</ExposeHeader><MaxAgeSeconds>3600</MaxAgeSeconds>' +
+    '</CORSRule></CORSConfiguration>';
+}

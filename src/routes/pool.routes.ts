@@ -3,7 +3,7 @@ import { sendErrorResponse } from '../utils/apiHelpers';
 import { publicOrigin } from '../utils/publicUrl';
 import { CatalogService } from '../services/catalogService';
 import {
-  listarCuentas, anadirCuenta, anadirCuentaGDrive, borrarCuenta, marcarCuenta,
+  listarCuentas, anadirCuenta, anadirCuentaGDrive, borrarCuenta, marcarCuenta, configurarCors,
   presignSubida, registrarObjeto, resolverSubidaGDrive, objeto, objetosDeFicha, borrarObjeto,
   urlDeReproduccion, Proveedor, CAP_POR_DEFECTO,
 } from '../services/poolStore';
@@ -105,6 +105,18 @@ router.post('/api/v1/panel/pool/accounts/:id/status', async (req: Request, res: 
     const ok = await marcarCuenta(req.params.id, status as 'live' | 'dead');
     if (!ok) return sendErrorResponse(res, 500, 'WRITE_FAILED', 'No se pudo cambiar el estado');
     res.json({ status: 'success', id: req.params.id, cuenta_status: status });
+  } catch (err) { next(err); }
+});
+
+/**
+ * CONFIGURA EL CORS del bucket automáticamente (para subir desde el navegador, incluido el móvil,
+ * sin comandos). Usa el origen desde el que se pide, para que valga sea cual sea el dominio del panel.
+ */
+router.post('/api/v1/panel/pool/accounts/:id/cors', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const r = await configurarCors(req.params.id, [publicOrigin(req)]);
+    if (!r.ok) return sendErrorResponse(res, 422, 'CORS_FAILED', r.error || 'No se pudo configurar el CORS');
+    res.json({ status: 'success', id: req.params.id, origin: publicOrigin(req), nota: r.nota });
   } catch (err) { next(err); }
 });
 
