@@ -11,6 +11,7 @@ import { httpClient } from '../utils/httpClient';
 import { CacheStore } from '../cache/store';
 import { unwrapRedirector, canonicalArchiveOrg } from '../scrapers/directStream';
 import { servidorVirtualDePelicula, decodificarIdNetmirror } from '../scrapers/netmirror';
+import { idsCatalogoNetmirror, muestrasNetmirrorSeries } from './netmirrorSeries';
 import { tieneEspanolLatino } from '../utils/idiomas';
 import { revisarServidores, aplicarVeredictosRecordados } from './playbackHealth';
 import {
@@ -2194,7 +2195,7 @@ export class CatalogService {
     // Resuelto AQUI y no dentro: `construirConsulta` es sincrona porque quien la usa encadena
     // `.range(...)` sobre lo que devuelve, y volverla async le entregaria una promesa.
     const sello = await this.estadoDelSello();
-    const construirConsulta = () => {
+    const construirConsulta = (idsNetmirror?: number[]) => {
       let c = supabase
         .from('media_items')
         /**
@@ -2214,6 +2215,7 @@ export class CatalogService {
         .order('title');
       if (opts.tipo) c = c.eq('type', opts.tipo);
       if (opts.q) c = c.ilike('title', `%${opts.q}%`);
+      if (idsNetmirror) c = c.in('tmdb_id', idsNetmirror);
       if (opts.visible && hayColumnaDisponibilidad) {
         const desdeCuando = new Date(Date.now() - VERIFICADO_VIGENTE_MS).toISOString();
         const desdeLargo = new Date(Date.now() - VERIFICADO_PERMANENTE_MS).toISOString();
@@ -2284,7 +2286,23 @@ export class CatalogService {
     let data: any[] | null = null;
     let count: number | null = null;
 
-    if (filtroFuente) {
+    if (filtroFuente === 'netmirror' && !opts.q) {
+      // El caché ya sabe qué TMDB tiene NetMirror. Leer los JSON de las 20.000 fichas para
+      // descubrir 68 series hacía tardar ~20 s incluso con el filtro tvseries.
+      const ids = await idsCatalogoNetmirror(opts.tipo).catch(() => [] as number[]);
+      const todas: any[] = [];
+      for (let i = 0; i < ids.length; i += 200) {
+        const trozoIds = ids.slice(i, i + 200);
+        for (let from = 0; from < TOPE_ESCANEO; from += TANDA) {
+          const { data: trozo, error } = await construirConsulta(trozoIds).range(from, from + TANDA - 1);
+          if (error) return { total: 0, pagina, filas: [] };
+          if (!trozo?.length) break;
+          todas.push(...trozo);
+          if (trozo.length < TANDA) break;
+        }
+      }
+      data = todas.sort((a, b) => String(a.title || '').localeCompare(String(b.title || '')));
+    } else if (filtroFuente) {
       const todas: any[] = [];
       for (let from = 0; from < TOPE_ESCANEO; from += TANDA) {
         const { data: trozo, error: errTrozo } = await construirConsulta().range(from, from + TANDA - 1);
@@ -2347,6 +2365,11 @@ export class CatalogService {
      * y al final lo que no se entrega. Y cada enlace viaja diciendo DE DÓNDE cuelga, para que el
      * panel pueda rotularlo por su capítulo en vez de por su puesto en una lista.
      */
+    const idsSerie = (data || []).filter((r: any) => r.type === 'tvseries')
+      .map((r: any) => Number(r.tmdb_id)).filter((id: number) => id > 0);
+    const muestrasNetmirror = idsSerie.length
+      ? await muestrasNetmirrorSeries(idsSerie).catch(() => new Map())
+      : new Map();
     const filas = (data || []).map((r: any) => {
       const esSerie = r.type === 'tvseries';
 
@@ -2363,6 +2386,20 @@ export class CatalogService {
             donde: `T${t?.season_number ?? e?.season_number}E${e?.episode_number}`,
             deCapitulo: true,
           })));
+
+      // El escáner guarda los capítulos NetMirror en su tabla auxiliar. Son reproducibles en
+      // /season/N/episode/M aunque no estén copiados dentro del JSON de media_items.seasons.
+      const muestra = esSerie ? muestrasNetmirror.get(Number(r.tmdb_id)) : undefined;
+      if (muestra) {
+        const { ott, id } = decodificarIdNetmirror(muestra.netflix_id);
+        const dominio = muestra.dominio_hls && !/(?:freecdn|hakunaymatata|subscdn|^net\d+\.)/i.test(muestra.dominio_hls)
+          ? muestra.dominio_hls : 'tv.imgcdn.kim';
+        if (id) deCapitulos.push({
+          sv: { source_id: 'netmirror', direct_stream: `https://${dominio}/newtv/hls/${ott}/${encodeURIComponent(id)}.m3u8` },
+          donde: `T${muestra.temporada}E${muestra.episodio}`,
+          deCapitulo: true,
+        });
+      }
 
       // En una serie manda el capítulo; en una película, la ficha. Y lo propio, delante de todo.
       const enOrden = esSerie ? [...deCapitulos, ...deLaFicha] : [...deLaFicha, ...deCapitulos];

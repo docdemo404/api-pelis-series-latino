@@ -2,6 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { asegurarHostsConCache } from '../services/hostsConCache';
 import { asegurarMedidasDeAparatos } from '../services/medidasDeAparatos';
 import { CatalogService } from '../services/catalogService';
+import { adjuntarCapitulosNetmirror } from '../services/netmirrorSeries';
 import { RealScraperService } from '../services/realScraperService';
 import { sendErrorResponse } from '../utils/apiHelpers';
 import { ContentType, MediaItem } from '../types';
@@ -58,7 +59,8 @@ function withStreamsBlock(item: MediaItem, basePath: 'media' | 'series') {
   // servidores que solo son embed, así que una ficha con cinco iframes y ningún vídeo directo
   // entrega la lista vacía. Mirando el crudo se anunciaba `ready` sobre esa lista vacía.
   const publico = CatalogService.toPublicItem(item);
-  const ready = Boolean(publico.servers && publico.servers.length > 0);
+  const ready = Boolean((publico.servers && publico.servers.length > 0)
+    || publico.seasons?.some(s => s.episodes?.some(e => e.servers?.length)));
   const status = ready ? 'ready' : (item.has_streams === false ? 'unavailable' : 'pending');
   return {
     ...publico,
@@ -88,7 +90,10 @@ async function respondWithStreams(req: Request, res: Response, typeHint?: Conten
   }
 
   // Misma regla que en el detalle: sale vídeo directo, sin `embed_url`. Ver `paraElCliente`.
-  const publico = CatalogService.toPublicItem(item);
+  const conNetmirror = item.type === 'tvseries'
+    ? await adjuntarCapitulosNetmirror(item).catch(() => item)
+    : item;
+  const publico = CatalogService.toPublicItem(conNetmirror);
 
   res.json({
     status: 'success',
@@ -162,7 +167,8 @@ router.get('/api/v1/series/:id', async (req: Request, res: Response, next: NextF
     if (!item) {
       return sendErrorResponse(res, 404, 'RESOURCE_NOT_FOUND', 'La serie solicitada no existe o no está disponible.');
     }
-    res.json({ status: 'success', data: withStreamsBlock(item, 'series') });
+    const conNetmirror = await adjuntarCapitulosNetmirror(item).catch(() => item);
+    res.json({ status: 'success', data: withStreamsBlock(conNetmirror, 'series') });
   } catch (err) {
     next(err);
   }
@@ -183,7 +189,10 @@ router.get('/api/v1/media/:id', async (req: Request, res: Response, next: NextFu
       return sendErrorResponse(res, 404, 'RESOURCE_NOT_FOUND', 'El contenido solicitado no existe o no está disponible.');
     }
 
-    const payload: Record<string, unknown> = withStreamsBlock(item, 'media');
+    const conNetmirror = item.type === 'tvseries'
+      ? await adjuntarCapitulosNetmirror(item).catch(() => item)
+      : item;
+    const payload: Record<string, unknown> = withStreamsBlock(conNetmirror, 'media');
 
     if (include === 'season_1' || include === 'first_season') {
       const firstEp = await CatalogService.getEpisode(item.id, 1, 1);
