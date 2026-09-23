@@ -668,6 +668,9 @@ function parseStreamsFlag(argv: string[]): number {
 async function withSourceSignals(item: MediaItem, onHit: () => void): Promise<MediaItem> {
   const url: string = (item as any)._tioplus_url || (item as any)._source_url || '';
   if (!url) return item;
+  // Moviedays ya entrega identidad, año y póster de TMDB en su JSON. La URL canónica de
+  // embed.php exige una firma temporal, así que pedirla a pelo aquí solo añade un 401 por ficha.
+  if (/moviedays\.lat\/api\/embed\.php/i.test(url)) return item;
 
   const signals = await RealScraperService.fetchSourceSignals(url).catch(() => null);
   if (!signals) return item;
