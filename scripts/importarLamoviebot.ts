@@ -218,13 +218,16 @@ async function obtenerIndice(): Promise<Indice> {
         process.stdout.write('.');
       }
     }
-    if (primera.totalFichas && new Set(fichas.map(f => f.slug)).size < primera.totalFichas) {
-      // Si el índice cambió durante el barrido, no se vuelve a reutilizar este tramo.
-      guardarVolcado();
+    if (primera.totalFichas && fichas.length < primera.totalFichas) {
+      // El total publicado cuenta entradas, incluso cuando varias comparten el mismo slug.
+      // Solo falta contenido si se han recibido menos entradas que las anunciadas.
+      guardarVolcado({ clase, pagina: 1, totalPaginas: primera.totalPaginas, totalFichas: primera.totalFichas, fichas: primera.fichas });
       throw new Error(`Índice ${clase} incompleto: ${fichas.length}/${primera.totalFichas} fichas`);
     }
-    console.log(` → ${fichas.length} leídas`);
-    porClase[clase] = fichas;
+    const slugs = new Set<string>();
+    const unicas = fichas.filter(f => !slugs.has(f.slug) && !!slugs.add(f.slug));
+    console.log(` → ${fichas.length} leídas, ${unicas.length} slugs únicos`);
+    porClase[clase] = unicas;
     checkpoint = undefined;
     guardarVolcado();
   }
