@@ -1808,6 +1808,9 @@ export class RealScraperService {
           this.scrapeMoviedaysDetail(moviedaysSourceUrl(id, tipo), { resolverServidores: false })
         )
       );
+      const falloAcceso = tanda.find(r => r.status === 'rejected'
+        && String(r.reason?.message || '').startsWith('MOVIEDAYS_AUTH'));
+      if (falloAcceso?.status === 'rejected') throw falloAcceso.reason;
       for (const r of tanda) {
         if (r.status === 'fulfilled' && r.value) items.push(r.value);
       }
@@ -2761,8 +2764,8 @@ export class RealScraperService {
       // que el runner se lleve por delante el trabajo, que es la lección de `--saltar-guardados`.
       const cuantos = bandera('titulos') || 500;
       const [pelis, series] = await Promise.all([
-        this.scrapeMoviedaysLatest('movie', cuantos, { desdePagina }).catch(() => [] as MediaItem[]),
-        this.scrapeMoviedaysLatest('tvseries', cuantos, { desdePagina }).catch(() => [] as MediaItem[]),
+        this.scrapeMoviedaysLatest('movie', cuantos, { desdePagina }),
+        this.scrapeMoviedaysLatest('tvseries', cuantos, { desdePagina }),
       ]);
       return dedup([pelis, series]);
     }
@@ -2906,6 +2909,9 @@ export class RealScraperService {
 
         items.push(...pageItems);
       } catch (err: any) {
+        // TioPlus responde 404 al pedir la página posterior a la última. Es el fin normal
+        // del índice, no un fallo del crawl: abortar aquí descartaba todas las páginas ya leídas.
+        if (page > 1 && items.length > 0 && Number(err?.response?.status) === 404) break;
         if (limit >= 1000) throw new Error(`[TioPlus] ${type}, página ${page}: ${err.message}`);
         console.error(`[TioPlus] Error scrapeando ${type}:`, err.message);
         break;

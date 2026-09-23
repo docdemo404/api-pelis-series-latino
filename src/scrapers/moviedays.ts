@@ -51,6 +51,26 @@ const CABECERAS = {
 /** Su `embed.php` tarda 2-4 s porque resuelve contra TMDB y contra sus proveedores. */
 const TIMEOUT = 20000;
 
+type FirmaPublica = { ts: string; sig: string; obtenida: number };
+let firmaPublica: FirmaPublica | null = null;
+let firmaPendiente: Promise<FirmaPublica> | null = null;
+
+/** La portada publica la misma firma temporal que usa su buscador. Se comparte entre sondas. */
+async function firmaDeLaPortada(): Promise<FirmaPublica> {
+  if (firmaPublica && Date.now() - firmaPublica.obtenida < 5 * 60_000) return firmaPublica;
+  if (!firmaPendiente) {
+    firmaPendiente = (async () => {
+      const res = await httpClient.get(MOVIEDAYS_BASE, { headers: CABECERAS, timeout: TIMEOUT });
+      const html = String(res.data || '');
+      const ts = html.match(/MD_EMBED_TS\s*=\s*(\d+)/)?.[1];
+      const sig = html.match(/MD_EMBED_SIG\s*=\s*["']([a-f0-9]{64})["']/i)?.[1];
+      if (!ts || !sig) throw new Error('MOVIEDAYS_AUTH: la portada no publicó firma');
+      return (firmaPublica = { ts, sig, obtenida: Date.now() });
+    })().finally(() => { firmaPendiente = null; });
+  }
+  return firmaPendiente;
+}
+
 /** Lo que `embed.php` contesta cuando tiene algo. Solo se declara lo que se usa. */
 export interface MoviedaysPayload {
   success: boolean;
@@ -204,15 +224,22 @@ export async function pedirMoviedays(
   const se = type === 'tvseries' ? season || 1 : undefined;
   const ep = type === 'tvseries' ? episode || 1 : undefined;
   try {
-    const res = await httpClient.get(moviedaysSourceUrl(tmdbId, type, se, ep), {
-      headers: CABECERAS,
-      timeout: TIMEOUT,
-      validateStatus: () => true,
-    } as any);
+    const url = moviedaysSourceUrl(tmdbId, type, se, ep);
+    let res: any;
+    for (let intento = 0; intento < 2; intento++) {
+      const firma = await firmaDeLaPortada();
+      res = await httpClient.get(`${url}&_ts=${firma.ts}&_sig=${firma.sig}`, {
+        headers: CABECERAS, timeout: TIMEOUT, validateStatus: () => true,
+      } as any);
+      if (res.status !== 401 && res.status !== 403) break;
+      firmaPublica = null;
+    }
+    if (res.status === 401 || res.status === 403) throw new Error(`MOVIEDAYS_AUTH: HTTP ${res.status}`);
     const data = res.data as any;
     if (!data || typeof data !== 'object' || data.success !== true) return null;
     return data as MoviedaysPayload;
-  } catch {
+  } catch (err: any) {
+    if (String(err?.message || '').startsWith('MOVIEDAYS_AUTH')) throw err;
     return null;
   }
 }
