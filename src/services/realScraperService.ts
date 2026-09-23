@@ -1700,10 +1700,28 @@ export class RealScraperService {
      * anunciado como el del 3x5.
      */
     const sondeo = { season: ref.season || 1, episode: ref.episode || 1 };
-    const seasons =
+    let seasons =
       ref.type === 'tvseries'
         ? temporadasDeMoviedays(await pedirTemporadasMoviedays(ref.tmdbId), servers, sondeo)
         : [];
+    if (ref.type === 'tvseries' && seasons.length === 0) {
+      // seasons.php ya no está disponible. TMDB aporta el índice, pero sus capítulos deben
+      // empezar SIN servidores: el enlace de la sonda corresponde únicamente a T1E1.
+      const oficiales = opts.resolverServidores === false ? []
+        : await TmdbService.getTmdbSeasons(
+            ref.tmdbId, Number(payload.total_seasons) || 1, payload.poster || null, [],
+          ).catch(() => [] as any[]);
+      seasons = oficiales.length ? oficiales : [{
+        season_number: sondeo.season,
+        name: `Temporada ${sondeo.season}`,
+        episodes_count: 1,
+        poster: payload.poster || null,
+        episodes: [{ episode_number: sondeo.episode, name: `Episodio ${sondeo.episode}`, servers: [] }],
+      }];
+      const temporada = seasons.find((t: any) => t.season_number === sondeo.season);
+      const capitulo = temporada?.episodes?.find((e: any) => e.episode_number === sondeo.episode);
+      if (capitulo) capitulo.servers = servers;
+    }
 
     return {
       // El id lleva el tmdb dentro porque es lo único estable que tiene esta fuente: no hay slug.
