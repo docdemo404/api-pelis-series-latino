@@ -303,6 +303,15 @@ async function pool<T>(items: T[], concurr: number, fn: (x: T) => Promise<void>)
 
 async function main() {
   await cargarTokenSiFalta();
+  if (VIA_API && soloTipo === 'tvseries') {
+    const q = new URLSearchParams({ title: 'Breaking Bad', year: '2008', ott: 'nf' });
+    const testigo = await fetch(`${API_PELIS}/api/v1/netmirror/newtv/series?${q}`, {
+      signal: AbortSignal.timeout(30_000),
+    });
+    const j = testigo.ok ? await testigo.json() as any : null;
+    if (!testigo.ok || !Array.isArray(j?.data?.episodios) || j.data.episodios.length < 62)
+      throw new Error(`NewTV no responde desde el puente API (testigo Breaking Bad: HTTP ${testigo.status})`);
+  }
   console.log(`Escaneo NetMirror  concurr=${CONCURRENCIA}  refrescar=${refrescar}  soloIdiomas=${soloIdiomas}  soloSinId=${soloSinId}  sinAudios=${sinAudios}  tipo=${soloTipo || 'todos'}  token=${NM_TOKEN ? 'sí' : 'no'}`);
 
   const tipos: Array<'movie' | 'tvseries'> = soloTipo ? [soloTipo] : ['movie', 'tvseries'];
@@ -388,8 +397,10 @@ async function main() {
       if (tipo === 'tvseries' && soloTipo === 'tvseries' && !TMDB_EXPLICITO)
         consulta = consulta.gt('tmdb_id', cursorTv);
       if (TMDB_EXPLICITO) consulta = consulta.eq('tmdb_id', TMDB_EXPLICITO);
+      // TV avanza de veinte en veinte y guarda el cursor tras cada lote. Una caída local
+      // no obliga a rehacer cientos de series ni pierde el punto de continuación.
       const { data, error } = await consulta.range(tipo === 'tvseries' && soloTipo === 'tvseries' ? 0 : offset,
-        tipo === 'tvseries' && soloTipo === 'tvseries' ? 999 : offset + 999);
+        tipo === 'tvseries' && soloTipo === 'tvseries' ? 19 : offset + 999);
       if (error) { console.error(error); break; }
       const filas = (data as Ficha[]) || [];
       if (filas.length === 0) {

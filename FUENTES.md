@@ -841,8 +841,10 @@ npx ts-node -T scripts/dev/test_manual_ledger.ts   # el banco de pruebas del lib
 - **NetMirror series:** `embed-tmdb?type=tv` repite el mismo MP4 para capítulos distintos. El
   escáner usa ahora `post.php` y `episodes.php` de NewTV para obtener un ID por episodio, comprueba
   el master y guarda `(tmdb_id, temporada, episodio)` en `netmirror_cache`. El cursor
-  `netmirror_newtv_cursor_tv` permite continuar entre tandas. `netmirror-series.yml` recorre las
-  series ya presentes en el catálogo; una serie sin pista Español Latino no se anuncia.
+  `netmirror_newtv_cursor_tv` permite continuar entre tandas. El barrido corre desde una máquina
+  que NewTV atienda (`scripts/scanNetmirror.ts --tipo=tvseries --limite=0`); Vercel y GitHub Actions
+  reciben 404 incluso para el testigo Breaking Bad. El workflow cloud queda solo manual y falla
+  antes de tocar el cursor si ese testigo no responde. Una serie sin pista Español Latino no se anuncia.
 - **UnlimPlay y MovieDays:** ninguno publica un índice propio. Sus barridos rotan por las 500
   páginas accesibles de `discover` de TMDB para películas y series. Eso evita repetir siempre las
   primeras páginas, pero no demuestra exhaustividad absoluta: el catálogo de TMDB puede superar

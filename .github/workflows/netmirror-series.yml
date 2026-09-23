@@ -1,8 +1,6 @@
 name: Descubrir capítulos NewTV de NetMirror
 
 on:
-  schedule:
-    - cron: '35 */2 * * *'
   workflow_dispatch:
     inputs:
       tmdb:
