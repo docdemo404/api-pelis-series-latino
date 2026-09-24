@@ -4,7 +4,7 @@ import { publicOrigin } from '../utils/publicUrl';
 import { CatalogService } from '../services/catalogService';
 import {
   listarCuentas, anadirCuenta, anadirCuentaGDrive, borrarCuenta, marcarCuenta, configurarCors,
-  presignSubida, registrarObjeto, resolverSubidaGDrive, objeto, objetosDeFicha, borrarObjeto,
+  presignSubida, registrarObjeto, resolverSubidaGDrive, objeto, objetosDeFicha, listarTodosLosObjetos, borrarObjeto,
   urlDeReproduccion, urlDeParte, completarMultipart, abortarMultipart, Proveedor, CAP_POR_DEFECTO,
 } from '../services/poolStore';
 import * as gdrive from '../services/gdrive';
@@ -334,13 +334,15 @@ router.get('/api/v1/panel/pool/objects', async (req: Request, res: Response, nex
   try {
     const tmdbId = Number(req.query.tmdb_id);
     const tipo = String(req.query.type) === 'tvseries' ? 'tvseries' : 'movie';
-    if (!Number.isFinite(tmdbId) || tmdbId <= 0) return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'Se requiere tmdb_id');
-    const objetos = await objetosDeFicha(tmdbId, tipo);
+    // Con tmdb_id → lo de una ficha (editor del panel). Sin tmdb_id → TODO lo subido (admin de la app).
+    const objetos = (Number.isFinite(tmdbId) && tmdbId > 0)
+      ? await objetosDeFicha(tmdbId, tipo)
+      : await listarTodosLosObjetos();
     res.json({
       status: 'success',
       objects: objetos.map(o => ({
-        id: o.id, season: o.season, episode: o.episode, size_gb: gb(o.size_bytes),
-        filename: o.orig_filename, account_id: o.account_id, created_at: o.created_at,
+        id: o.id, tmdb_id: o.tmdb_id, type: o.type, season: o.season, episode: o.episode,
+        size_gb: gb(o.size_bytes), filename: o.orig_filename, account_id: o.account_id, created_at: o.created_at,
       })),
     });
   } catch (err) { next(err); }

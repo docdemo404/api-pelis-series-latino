@@ -457,6 +457,13 @@ export async function objetosDeFicha(tmdbId: number, tipo: 'movie' | 'tvseries')
   return (data as ObjetoCasillero[]) || [];
 }
 
+/** TODO lo subido, lo más nuevo primero (para la pantalla de administración de la app). */
+export async function listarTodosLosObjetos(limite = 300): Promise<ObjetoCasillero[]> {
+  const { data } = await db().from<ObjetoCasillero[]>('pool_objects')
+    .select('*').order('created_at', { ascending: false });
+  return ((data as ObjetoCasillero[]) || []).slice(0, limite);
+}
+
 /**
  * La URL FRESCA de reproducción de un objeto: GET prefirmado con `response-content-type` forzado a
  * su mime, para que un .mkv se sirva como vídeo y no como descarga. Es a donde hace 302 el endpoint
