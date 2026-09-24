@@ -2000,16 +2000,33 @@ async function main() {
    */
   if (process.argv.includes('--saltar-guardados')) {
     const yaEstan = new Set<string>();
+    const paginasGuardadas = new Set<string>();
     let ultimo = '';
     for (;;) {
-      const { data } = await db.from('media_items').select('id').gt('id', ultimo).order('id').limit(1000);
+      const { data, error } = await db.from('media_items')
+        .select('id,source_url,source_urls').gt('id', ultimo).order('id').limit(1000);
+      if (error) throw new Error(`No se pudieron leer las páginas ya importadas: ${error.message}`);
       if (!data?.length) break;
-      for (const fila of data as any[]) yaEstan.add(fila.id);
+      for (const fila of data as any[]) {
+        yaEstan.add(fila.id);
+        if (fila.source_url) paginasGuardadas.add(fila.source_url);
+        for (const url of (Array.isArray(fila.source_urls) ? fila.source_urls : [])) {
+          if (url) paginasGuardadas.add(url);
+        }
+      }
       ultimo = (data[data.length - 1] as any).id;
     }
     const antes = items.length;
     items = items.filter(it => !yaEstan.has(it.id));
-    console.log(`   ${antes - items.length} ya estaban guardados; quedan ${items.length} por trabajar`);
+    const porId = antes - items.length;
+    // Una ficha fusionada conserva el id de la fuente anterior, pero registra la URL de esta.
+    // Saltarla por id solamente repetiría la misma fusión en cada corrida y bloquearía el avance.
+    const antesDePaginas = items.length;
+    items = items.filter(it => {
+      const pagina = (it as any)._tioplus_url || it._source_url;
+      return !pagina || !paginasGuardadas.has(pagina);
+    });
+    console.log(`   ${porId} ya guardados por id, ${antesDePaginas - items.length} por página; quedan ${items.length} por trabajar`);
 
     // Y lo que se miró hace poco y no tenía vídeo, que no está en la base y por eso volvía cada
     // media hora a comerse el presupuesto de la tanda. Ver `descartesVigentes`.
