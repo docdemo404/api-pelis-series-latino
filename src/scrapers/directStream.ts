@@ -242,7 +242,7 @@ export function hasVolatileToken(url: string): boolean {
  * marca de tiempo Unix (`e=` en la familia Earnvids, `kx=` en upns). Se coge la mayor que esté
  * en el futuro, que es la que manda. Sirve para no re-acuñar una URL que aún vale horas.
  *
- * Devuelve null cuando la URL no declara ninguna: entonces no se puede saber y toca asumir poco.
+ * Devuelve 0 si declara una marca ya vencida y null si no declara ninguna.
  */
 export function tokenExpirySeconds(url: string): number | null {
   let params: URLSearchParams;
@@ -253,12 +253,14 @@ export function tokenExpirySeconds(url: string): number | null {
   }
   const now = Math.floor(Date.now() / 1000);
   let best: number | null = null;
+  let vioMarca = false;
   for (const [, raw] of params) {
     if (!/^1[6-9]\d{8}$/.test(raw)) continue;
+    vioMarca = true;
     const remaining = Number(raw) - now;
     if (remaining > 0 && (best === null || remaining > best)) best = remaining;
   }
-  return best;
+  return best ?? (vioMarca ? 0 : null);
 }
 
 /** ¿El host ata el vídeo a la IP que lo pidió? */
@@ -1246,6 +1248,7 @@ const HOSTS_CON_EXTRACTOR = [
   'blogspot', 'blogfc',                              // envoltorio de FuegoCine (`link=`)
   'gscdn', 'goodstream',                             // `sources:[{file:…}]` a la vista
   'dropload', 'streamwish', 'filelions', 'lulustream', // P.A.C.K.E.R.
+  'fastream',                                        // P.A.C.K.E.R. (JWPlayer); lo usa SeriesMetro. Verificar con URL viva.
   'ok.ru', 'odnoklassniki',                          // `data-options` con la ficha entera
   'unlimplay', 'vimeos',                             // agregador con `remux` propio
   'videoapi.la', 'videoapp.zip',                     // agregador: el reproductor real va en un iframe
