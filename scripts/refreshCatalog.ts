@@ -1651,14 +1651,28 @@ const CLAVE_DESCARTES = 'crawl:descartes:v2';
 const DIAS_DESCARTE = 14;
 /** Tope de la lista, para que el blob no crezca sin fin. Se van los más antiguos. */
 const MAX_DESCARTES = 20000;
+const FUENTES_CON_TANDA = ['fuegocine', 'archive', 'peliculas', 'series', 'animes', 'moviedays'];
+
+function claveDescartesDeEstaTanda(): string {
+  const solo = (process.argv.find(a => a.startsWith('--solo=')) || '').split('=')[1];
+  return solo ? `${CLAVE_DESCARTES}:${solo}` : CLAVE_DESCARTES;
+}
 
 async function descartesVigentes(): Promise<Set<string>> {
   const vigentes = new Set<string>();
   try {
-    const guardado = await CacheStore.get<Record<string, number>>(CLAVE_DESCARTES);
+    // Cada fuente escribe su propia clave. Dos trabajos simultáneos ya no pisan el mapa entero
+    // al guardar sus descartes. Se lee también la clave histórica hasta que caduque sola.
+    const propia = claveDescartesDeEstaTanda();
+    const claves = propia === CLAVE_DESCARTES
+      ? [CLAVE_DESCARTES, ...FUENTES_CON_TANDA.map(f => `${CLAVE_DESCARTES}:${f}`)]
+      : [CLAVE_DESCARTES, propia];
+    const guardados = await CacheStore.mget<Record<string, number>>(...claves);
     const ahora = Date.now();
-    for (const [id, caduca] of Object.entries(guardado || {})) {
-      if (caduca > ahora) vigentes.add(id);
+    for (const guardado of guardados) {
+      for (const [id, caduca] of Object.entries(guardado || {})) {
+        if (caduca > ahora) vigentes.add(id);
+      }
     }
   } catch { /* sin memoria de descartes se trabaja igual, solo que repitiendo */ }
   return vigentes;
@@ -1667,7 +1681,8 @@ async function descartesVigentes(): Promise<Set<string>> {
 async function anotarDescartes(ids: string[]): Promise<void> {
   if (!ids.length) return;
   try {
-    const guardado = (await CacheStore.get<Record<string, number>>(CLAVE_DESCARTES)) || {};
+    const clave = claveDescartesDeEstaTanda();
+    const guardado = (await CacheStore.get<Record<string, number>>(clave)) || {};
     const ahora = Date.now();
     const caduca = ahora + DIAS_DESCARTE * 24 * 3600_000;
     // Se limpian de paso los que ya caducaron: si no, el blob solo crece.
@@ -1679,7 +1694,7 @@ async function anotarDescartes(ids: string[]): Promise<void> {
     const mapa: Record<string, number> = {};
     for (const [id, c] of vivos.slice(0, MAX_DESCARTES)) mapa[id] = c;
 
-    await CacheStore.set(CLAVE_DESCARTES, mapa, (DIAS_DESCARTE + 1) * 24 * 3600);
+    await CacheStore.set(clave, mapa, (DIAS_DESCARTE + 1) * 24 * 3600);
     console.log(`   🧠 ${ids.length} títulos mirados sin vídeo: no se repetirán en ${DIAS_DESCARTE} días (${Object.keys(mapa).length} recordados)`);
   } catch { /* nunca puede tumbar la corrida */ }
 }
