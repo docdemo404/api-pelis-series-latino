@@ -175,6 +175,12 @@ export const DEFAULT_SOURCES: SourceConfig[] = [
    * `pluto_titulos` se conservan: volver a encenderla es poner `true` y lanzar pluto.yml.
    */
   { id: 'pluto', name: 'Pluto TV (desde el móvil)', enabled: false, priority: 8 },
+  /**
+   * ADDON LATAM — RESPALDO (prioridad la más baja). Reempaqueta paneles IPTV Xtream con credenciales
+   * compartidas que rotan/caducan y van por HTTP; por eso nunca pasa por delante de una fuente de
+   * verdad. Resuelve en vivo por IMDB id; ver src/scrapers/addonlatam.ts. Se filtra lo inalcanzable.
+   */
+  { id: 'addonlatam', name: 'Addon Latam (respaldo)', enabled: true, priority: 9 },
 ];
 
 /**
