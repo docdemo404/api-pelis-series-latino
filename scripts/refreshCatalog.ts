@@ -20,6 +20,7 @@ import { RealScraperService } from '../src/services/realScraperService';
 import { CatalogService, fusionarTemporadas } from '../src/services/catalogService';
 import { TmdbService } from '../src/services/tmdbService';
 import { getSupabaseAdmin } from '../src/services/supabaseService';
+import { getDb } from '../src/db/libsql';
 import { canonicalTitle, searchIndexKey, yearFromSlug } from '../src/utils/text';
 import { mereceRepasoDeExtraccion, hasVolatileToken, canonicalArchiveOrg, esUrlDeFicheroPermanente, extractDirect } from '../src/scrapers/directStream';
 import { inspectEmbed } from '../src/scrapers/embedHealth';
@@ -2055,22 +2056,38 @@ async function main() {
    * pasadas largas de este proyecto.
    */
   if (process.argv.includes('--saltar-guardados')) {
+    // ANTES: se descargaba la tabla `media_items` ENTERA en cada corrida (cientos de miles de
+    // filas leídas × cada 30 min × varios jobs). Eso era ~el 99% del gasto de lecturas que agotó
+    // la cuota de Turso. AHORA: se consulta SOLO por los candidatos de esta corrida (id y página),
+    // que van por índice (clave primaria e `idx_media_source_url`), leyendo unas pocas miles de
+    // filas en vez de la tabla completa.
+    try { await getDb().execute('CREATE INDEX IF NOT EXISTS idx_media_source_url ON media_items(source_url)'); } catch { /* idempotente */ }
+
+    const idsCand = Array.from(new Set(items.map(it => it.id).filter(Boolean))) as string[];
+    const paginasCand = Array.from(new Set(
+      items.map(it => (it as any)._tioplus_url || it._source_url).filter(Boolean),
+    )) as string[];
     const yaEstan = new Set<string>();
     const paginasGuardadas = new Set<string>();
-    let ultimo = '';
-    for (;;) {
-      const { data, error } = await db.from('media_items')
-        .select('id,source_url,source_urls').gt('id', ultimo).order('id').limit(1000);
-      if (error) throw new Error(`No se pudieron leer las páginas ya importadas: ${error.message}`);
-      if (!data?.length) break;
-      for (const fila of data as any[]) {
-        yaEstan.add(fila.id);
-        if (fila.source_url) paginasGuardadas.add(fila.source_url);
-        for (const url of (Array.isArray(fila.source_urls) ? fila.source_urls : [])) {
-          if (url) paginasGuardadas.add(url);
-        }
+    const TANDA = 400;
+    const registrar = (filas: any[]) => {
+      for (const f of filas) {
+        if (f.id) yaEstan.add(f.id);
+        if (f.source_url) paginasGuardadas.add(f.source_url);
+        for (const url of (Array.isArray(f.source_urls) ? f.source_urls : [])) if (url) paginasGuardadas.add(url);
       }
-      ultimo = (data[data.length - 1] as any).id;
+    };
+    for (let i = 0; i < idsCand.length; i += TANDA) {
+      const { data, error } = await db.from('media_items')
+        .select('id,source_url,source_urls').in('id', idsCand.slice(i, i + TANDA));
+      if (error) throw new Error(`No se pudo comprobar ids guardados: ${error.message}`);
+      registrar((data as any[]) || []);
+    }
+    for (let i = 0; i < paginasCand.length; i += TANDA) {
+      const { data, error } = await db.from('media_items')
+        .select('id,source_url,source_urls').in('source_url', paginasCand.slice(i, i + TANDA));
+      if (error) throw new Error(`No se pudo comprobar páginas guardadas: ${error.message}`);
+      registrar((data as any[]) || []);
     }
     const antes = items.length;
     items = items.filter(it => !yaEstan.has(it.id));

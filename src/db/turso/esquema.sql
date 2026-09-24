@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS media_items (
 
 CREATE INDEX IF NOT EXISTS idx_media_type              ON media_items (type);
 CREATE INDEX IF NOT EXISTS idx_media_tmdb_id           ON media_items (tmdb_id);
+CREATE INDEX IF NOT EXISTS idx_media_source_url         ON media_items (source_url);
 CREATE INDEX IF NOT EXISTS idx_media_title_norm        ON media_items (title_normalized);
 CREATE INDEX IF NOT EXISTS idx_media_updated_at        ON media_items (updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_media_type_rating       ON media_items (type, rating DESC);
