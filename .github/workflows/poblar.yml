@@ -67,6 +67,11 @@ jobs:
   tanda:
     runs-on: ubuntu-latest
     timeout-minutes: 50
+    # Comparte el candado con las tandas dedicadas: dos crawls de la misma web no deben
+    # escoger simultáneamente los mismos 300 títulos ni duplicar la carga sobre el host.
+    concurrency:
+      group: ${{ matrix.fuente == 'fuegocine' && 'fuegocine-catalogo' || matrix.fuente == 'moviedays' && 'moviedays' || matrix.fuente == 'archive' && 'archive-catalogo' || 'tioplus-catalogo' }}
+      cancel-in-progress: false
     strategy:
       # Secuencial a propósito, por lo mismo que la guarda de concurrencia.
       max-parallel: 1
@@ -118,5 +123,6 @@ jobs:
           # 140 ids por tipo = 7 páginas y como mucho 280 fichas entre ambos tipos:
           # caben bajo el límite de 300. Setenta y dos tandas cubren las 500 páginas de TMDB.
           if [ "$FUENTE" = "moviedays" ]; then EXTRA="--desde=$(( ( (${{ github.run_number }} - 1) % 72 ) * 7 + 1 )) --titulos=140"; fi
+          if [ "$FUENTE" = "peliculas" ] || [ "$FUENTE" = "series" ] || [ "$FUENTE" = "animes" ]; then EXTRA="$EXTRA --verificar-antes-de-tmdb"; fi
           echo "refreshCatalog --solo=$FUENTE $EXTRA"
           npx ts-node scripts/refreshCatalog.ts --solo=$FUENTE --saltar-guardados --minutos=18 --completar-minutos=20 $EXTRA 300
