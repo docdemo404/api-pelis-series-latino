@@ -52,6 +52,7 @@ export async function servidoresPorIdioma(url: string): Promise<Record<string, R
     transformResponse: [(d: unknown) => d],
     validateStatus: () => true,
   });
+  if (r.status === 404) return {};
   if (r.status !== 200) return null;
   const m = String(r.data).match(/finalizePlayer\((\{[\s\S]*?\})\)\s*;?\s*\}?\s*<\/script>/);
   if (!m) return null;

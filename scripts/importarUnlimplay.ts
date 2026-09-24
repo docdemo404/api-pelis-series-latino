@@ -128,6 +128,28 @@ async function guardarCursor(type: ContentType, tmdb: number): Promise<void> {
   if (error) console.log(`   ! cursor ${type}: ${error.message}`);
 }
 
+const CLAVE_REINTENTOS = 'unlimplay_reintentos';
+const claveTrabajo = (t: { type: ContentType; tmdb: number }) => `${t.type}:${t.tmdb}`;
+
+async function leerReintentos(): Promise<Array<{ type: ContentType; tmdb: number }>> {
+  const { data, error } = await db.from('esquema').select('valor').eq('clave', CLAVE_REINTENTOS).maybeSingle();
+  if (error) throw new Error(`No se pudieron leer los reintentos de UnlimPlay: ${error.message}`);
+  try {
+    const lista = JSON.parse(String((data as any)?.valor || '[]'));
+    return Array.isArray(lista) ? lista.filter((t: any) =>
+      (t?.type === 'movie' || t?.type === 'tvseries') && Number.isInteger(t.tmdb) && t.tmdb > 0) : [];
+  } catch {
+    throw new Error('La cola de reintentos de UnlimPlay está dañada');
+  }
+}
+
+async function guardarReintentos(trabajos: Array<{ type: ContentType; tmdb: number }>): Promise<void> {
+  if (DRY || TMDB_IDS.length) return;
+  const { error } = await db.from('esquema').upsert(
+    { clave: CLAVE_REINTENTOS, valor: JSON.stringify(trabajos) }, { onConflict: 'clave' });
+  if (error) throw new Error(`No se pudieron guardar los reintentos de UnlimPlay: ${error.message}`);
+}
+
 /** Nuestras fichas a partir del cursor, dando la vuelta al llegar al final. */
 function enVuelta(filas: Map<number, string>, cursor: number): Array<[number, string]> {
   const todas = [...filas.entries()].sort((a, b) => a[0] - b[0]);
@@ -319,34 +341,38 @@ interface Trabajo {
   filaExistente?: string;
 }
 
-async function pelicula(t: Trabajo): Promise<void> {
+/** true = respuesta definitiva; false = fallo transitorio que queda en la cola. */
+async function pelicula(t: Trabajo): Promise<boolean> {
   const url = urlDeEmbed('movie', t.tmdb);
   const servers = await servidoresDe(url, String(t.tmdb), 3);
   if (servers === null) {
     cuenta.errores++;
-    return;
+    return false;
   }
   if (!servers.length) {
     cuenta.sinVideo++;
-    return;
+    return true;
   }
   if (DRY) {
     t.filaExistente ? cuenta.fichasEnriquecidas++ : cuenta.fichasNuevas++;
-    return;
+    return true;
   }
   if (t.filaExistente) {
-    if (await actualizarFicha(t.filaExistente, servers, [])) cuenta.fichasEnriquecidas++;
-    return;
+    const guardada = await actualizarFicha(t.filaExistente, servers, []);
+    if (guardada) cuenta.fichasEnriquecidas++;
+    return guardada;
   }
   const ficha = await fichaDesdeTmdb(t.tmdb, 'movie');
   if (!ficha) {
     cuenta.sinTmdb++;
-    return;
+    return false;
   }
-  if (await insertarFicha(ficha, servers, [], url)) {
+  const guardada = await insertarFicha(ficha, servers, [], url);
+  if (guardada) {
     cuenta.fichasNuevas++;
     console.log(`   + ${ficha.title} (${String(ficha.release_date || '').slice(0, 4)}) · ${servers.length} servidores`);
   }
+  return guardada;
 }
 
 /** Los capítulos a pedir: los que menos servidores tienen primero, luego en orden. */
@@ -366,7 +392,7 @@ function capitulosAPedir(seasons: any[]): Array<{ temporada: number; capitulo: n
     .map(({ temporada, capitulo }) => ({ temporada, capitulo }));
 }
 
-async function serie(t: Trabajo): Promise<void> {
+async function serie(t: Trabajo): Promise<boolean> {
   let ficha: MediaItem | null = null;
   let seasonsBase: any[] = [];
   if (t.filaExistente) {
@@ -374,28 +400,33 @@ async function serie(t: Trabajo): Promise<void> {
     seasonsBase = (data as any)?.seasons || [];
   } else {
     // Sonda barata antes de pedir la ficha entera a TMDB: si no hay latino en el 1x1, no se sigue.
-    const sonda = embedsLatinos(await servidoresPorIdioma(urlDeEmbed('tv', t.tmdb, 1, 1)).catch(() => null));
+    const respuesta = await servidoresPorIdioma(urlDeEmbed('tv', t.tmdb, 1, 1)).catch(() => null);
+    if (respuesta === null) { cuenta.errores++; return false; }
+    const sonda = embedsLatinos(respuesta);
     if (!sonda.length) {
       cuenta.sinLatino++;
-      return;
+      return true;
     }
     ficha = await fichaDesdeTmdb(t.tmdb, 'tvseries');
     if (!ficha) {
       cuenta.sinTmdb++;
-      return;
+      return false;
     }
     seasonsBase = (ficha as any).seasons || [];
   }
 
   const resueltos: Array<{ temporada: number; capitulo: number; servers: ServerOption[] }> = [];
+  let falloDeRed = false;
   for (const c of capitulosAPedir(seasonsBase)) {
     if (!quedaTiempo()) break;
     const servers = await servidoresDe(urlDeEmbed('tv', t.tmdb, c.temporada, c.capitulo), `${t.tmdb}-${c.temporada}x${c.capitulo}`, 2).catch(() => null);
+    if (servers === null) falloDeRed = true;
     if (servers && servers.length) resueltos.push({ ...c, servers });
   }
   if (!resueltos.length) {
-    cuenta.sinVideo++;
-    return;
+    if (falloDeRed) cuenta.errores++;
+    else cuenta.sinVideo++;
+    return !falloDeRed;
   }
 
   const ahora = new Date().toISOString();
@@ -412,22 +443,27 @@ async function serie(t: Trabajo): Promise<void> {
   if (DRY) {
     cuenta.capitulos += resueltos.length;
     t.filaExistente ? cuenta.fichasEnriquecidas++ : cuenta.fichasNuevas++;
-    return;
+    return !falloDeRed;
   }
   if (t.filaExistente) {
-    if (await actualizarFicha(t.filaExistente, [], seasons)) {
+    const guardada = await actualizarFicha(t.filaExistente, [], seasons);
+    if (guardada) {
       cuenta.fichasEnriquecidas++;
       cuenta.capitulos += resueltos.length;
     }
+    return guardada && !falloDeRed;
   } else if (ficha) {
     // Los rótulos de TMDB primero y los enlaces encima, para que los capítulos no se llamen «SERIE 1x1».
     const conRotulos = fusionarTemporadas(seasonsBase, seasons);
-    if (await insertarFicha(ficha, [], conRotulos.length ? conRotulos : seasons, urlDeEmbed('tv', t.tmdb, 1, 1))) {
+    const guardada = await insertarFicha(ficha, [], conRotulos.length ? conRotulos : seasons, urlDeEmbed('tv', t.tmdb, 1, 1));
+    if (guardada) {
       cuenta.fichasNuevas++;
       cuenta.capitulos += resueltos.length;
       console.log(`   + ${ficha.title} (serie) · ${resueltos.length} capítulos`);
     }
+    return guardada && !falloDeRed;
   }
+  return false;
 }
 
 async function main() {
@@ -437,8 +473,10 @@ async function main() {
   const nuevas: Trabajo[] = [];
   const existentes: Trabajo[] = [];
   const cursores = new Map<ContentType, number>();
+  const filasPorTipo = new Map<ContentType, Map<number, string>>();
   for (const type of tipos) {
     const nuestras = await nuestrasFilas(type);
+    filasPorTipo.set(type, nuestras);
     if (TMDB_IDS.length) {
       for (const tmdb of TMDB_IDS) (nuestras.has(tmdb) ? existentes : nuevas).push({ type, tmdb, filaExistente: nuestras.get(tmdb) });
       continue;
@@ -464,24 +502,44 @@ async function main() {
     if (series[i]) intercaladas.push(series[i]);
   }
   // Una nueva de cada tres: la primera corrida gastó los 40 minutos solo en novedades.
-  const cola: Trabajo[] = [];
+  const colaNormal: Trabajo[] = [];
   for (let i = 0, j = 0; i < nuevas.length || j < intercaladas.length; ) {
-    if (i < nuevas.length) cola.push(nuevas[i++]);
-    for (let k = 0; k < 2 && j < intercaladas.length; k++) cola.push(intercaladas[j++]);
+    if (i < nuevas.length) colaNormal.push(nuevas[i++]);
+    for (let k = 0; k < 2 && j < intercaladas.length; k++) colaNormal.push(intercaladas[j++]);
   }
+  // El número de corrida avanza incluso si UnlimPlay no responde. Sin una cola durable, cada
+  // timeout y cada novedad que queda fuera del presupuesto desaparecen durante toda la vuelta.
+  const guardados = TMDB_IDS.length || DRY ? [] : await leerReintentos();
+  const pendientes = new Map(guardados.map(t => [claveTrabajo(t), t]));
+  const prioritarios: Trabajo[] = guardados
+    .filter(t => tipos.includes(t.type))
+    .map(t => ({ ...t, filaExistente: filasPorTipo.get(t.type)?.get(t.tmdb) }));
+  const vistos = new Set<string>();
+  const cola = [...prioritarios, ...colaNormal].filter(t => {
+    const k = claveTrabajo(t);
+    if (vistos.has(k)) return false;
+    vistos.add(k);
+    return true;
+  });
   const tanda = cola.slice(0, LIMITE === SIN_TOPE ? cola.length : LIMITE);
-  console.log(`\nCola: ${nuevas.length} nuevas + ${existentes.length} existentes · esta tanda: ${tanda.length}\n`);
+  console.log(`\nCola: ${nuevas.length} nuevas + ${existentes.length} existentes + ${prioritarios.length} reintentos · esta tanda: ${tanda.length}\n`);
 
   const ultimoDespachado = new Map<ContentType, number>();
+  const despachados = new Set<string>();
   let siguiente = 0;
   const obrero = async () => {
     while (siguiente < tanda.length && quedaTiempo()) {
       const t = tanda[siguiente++];
+      const k = claveTrabajo(t);
+      despachados.add(k);
       if (t.filaExistente) ultimoDespachado.set(t.type, t.tmdb);
       try {
-        await (t.type === 'movie' ? pelicula(t) : serie(t));
+        const definitiva = await (t.type === 'movie' ? pelicula(t) : serie(t));
+        if (definitiva) pendientes.delete(k);
+        else pendientes.set(k, { type: t.type, tmdb: t.tmdb });
       } catch (e: any) {
         cuenta.errores++;
+        pendientes.set(k, { type: t.type, tmdb: t.tmdb });
         console.log(`   ! ${t.type} ${t.tmdb}: ${e?.message}`);
       }
     }
@@ -489,6 +547,13 @@ async function main() {
   await Promise.all(Array.from({ length: TITULOS_A_LA_VEZ }, obrero));
   if (!quedaTiempo()) console.log('\n(se acabó el tiempo de la tanda)');
 
+  if (!TMDB_IDS.length && !DRY) {
+    for (const t of nuevas) {
+      const k = claveTrabajo(t);
+      if (!despachados.has(k)) pendientes.set(k, { type: t.type, tmdb: t.tmdb });
+    }
+    await guardarReintentos([...pendientes.values()]);
+  }
   if (!TMDB_IDS.length) for (const [type, tmdb] of ultimoDespachado) await guardarCursor(type, tmdb);
 
   console.log(
@@ -500,6 +565,7 @@ async function main() {
       `  sin vídeo que valga:  ${cuenta.sinVideo}\n` +
       `  sin ficha de TMDB:    ${cuenta.sinTmdb}\n` +
       `  errores:              ${cuenta.errores}\n` +
+      `  pendientes para otra tanda: ${pendientes.size}\n` +
       `  vuelta: ${[...ultimoDespachado].map(([t, n]) => `${t} hasta tmdb ${n}`).join(' · ') || '—'}`
   );
 }
