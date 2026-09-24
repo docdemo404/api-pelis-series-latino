@@ -832,7 +832,8 @@ async function main() {
   }
   // Un lote donde casi todas las fichas dan error indica que el Worker o su origen cayó.
   // No mover el cursor: esas fichas siguen pendientes y la siguiente corrida debe reintentarlas.
-  const fuenteCaida = visitadas >= 10 && cuenta.errores >= Math.ceil(visitadas * 0.9);
+  const fuenteCaida = visitadas >= 10 && cuenta.errores >= Math.ceil(visitadas * 0.9)
+    && cuenta.fichasNuevas + cuenta.fichasEnriquecidas + cuenta.capitulos === 0;
   if (!DRY && !SLUGS.length && cola.length && visitadas && !fuenteCaida) {
     const { error } = await db.from('esquema').upsert({ clave: claveCursor, valor: String((desde + visitadas) % cola.length) }, { onConflict: 'clave' });
     if (error) throw new Error(`No se pudo guardar cursor Lamoviebot: ${error.message}`);
