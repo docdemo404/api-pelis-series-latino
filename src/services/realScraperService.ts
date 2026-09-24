@@ -26,7 +26,7 @@ const BASE_URL = 'https://tioplus.app';
 const UA = USER_AGENT;
 const TIMEOUT = 8000;
 
-function httpGet(url: string) {
+function httpGet(url: string, timeout = TIMEOUT) {
   // Usa el cliente compartido con keep-alive: reutiliza la conexión TCP/TLS a
   // tioplus.app entre peticiones (homepage, búsqueda, detalle, /player), reduciendo latencia.
   return httpClient.get(url, {
@@ -35,7 +35,7 @@ function httpGet(url: string) {
       'Accept-Language': 'es-ES,es;q=0.9',
       'Referer': BASE_URL,
     },
-    timeout: TIMEOUT,
+    timeout,
   });
 }
 
@@ -1081,7 +1081,8 @@ export class RealScraperService {
     }
 
     try {
-      const res = await httpGet(tioplusUrl);
+      // El detalle carga reproductores y responde más lento que una página del índice.
+      const res = await httpGet(tioplusUrl, 15000);
       const html = typeof res.data === 'string' ? res.data : '';
 
       // Validación estricta de páginas de error 404
