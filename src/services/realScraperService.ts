@@ -1056,7 +1056,10 @@ export class RealScraperService {
    * Scrapea el detalle de una película/serie y resuelve los servidores embed REALES.
    * Cada token data-server se resuelve a una URL de iframe real (vidhideplus, streamwish, etc).
    */
-  static async scrapeDetail(tioplusUrl: string): Promise<MediaItem | null> {
+  static async scrapeDetail(
+    tioplusUrl: string,
+    opts: { throwOnError?: boolean } = {}
+  ): Promise<MediaItem | null> {
     // Moviedays no tiene página que scrapear: su ficha es una llamada a `api/embed.php`.
     if (esUrlDeMoviedays(tioplusUrl)) {
       return this.scrapeMoviedaysDetail(tioplusUrl);
@@ -1312,6 +1315,7 @@ export class RealScraperService {
       };
     } catch (err: any) {
       console.error('[TioPlus] Error scrapeando detalle:', err.message);
+      if (opts.throwOnError) throw err;
       return null;
     }
   }

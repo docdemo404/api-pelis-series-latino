@@ -1435,7 +1435,8 @@ async function quedarseConLoQueReproduce(
    * presupuesto no entran aquí: no se sabe nada de ellos. Ver `anotarDescartes`.
    */
   descartados?: string[],
-  minutosTope?: number
+  minutosTope?: number,
+  reintentos?: string[]
 ): Promise<MediaItem[]> {
   console.log(`🎬 Extrayendo la url directa de ${items.length} títulos (solo entra lo que reproduzca)...`);
   const buenos: MediaItem[] = [];
@@ -1460,6 +1461,7 @@ async function quedarseConLoQueReproduce(
   const minutos = minutosTope ?? (Number((process.argv.find(a => a.startsWith('--minutos=')) || '').split('=')[1]) || 200);
   const limite = Date.now() + minutos * 60_000;
   let mirados = 0;
+  let fallosDeRed = 0;
 
   for (let i = 0; i < items.length; i += CONC) {
     if (Date.now() > limite) {
@@ -1470,7 +1472,15 @@ async function quedarseConLoQueReproduce(
       mirados++;
       const pagina = (item as any)._tioplus_url || item._source_url;
       if (!pagina) { descartados?.push(item.id); return; }
-      const detalle = await RealScraperService.scrapeDetail(pagina).catch(() => null);
+      let detalle: MediaItem | null;
+      try {
+        detalle = await RealScraperService.scrapeDetail(pagina, { throwOnError: true });
+      } catch {
+        // Un timeout no demuestra que falte vídeo. Se reintentará en otra tanda.
+        fallosDeRed++;
+        reintentos?.push(item.id);
+        return;
+      }
       /**
        * UNA SERIE NO TIENE SERVIDORES EN LA FICHA: LOS TIENE EN SUS CAPÍTULOS.
        *
@@ -1618,6 +1628,7 @@ async function quedarseConLoQueReproduce(
   if (alEncontrar && buenos.length > entregados) {
     await alEncontrar(buenos.slice(entregados));
   }
+  if (fallosDeRed) console.log(`   ⚠ ${fallosDeRed} detalles fallaron por red; se reintentarán`);
   return buenos;
 }
 
@@ -1647,7 +1658,8 @@ async function quedarseConLoQueReproduce(
  * Cambiar el nombre de la clave tira ese recuerdo equivocado en vez de arrastrarlo catorce días.
  * Quien cambie lo que significa un descarte, que suba el número.
  */
-const CLAVE_DESCARTES = 'crawl:descartes:v2';
+// v3 descarta la memoria anterior: v2 anotó timeouts de TioPlus como si no hubiera vídeo.
+const CLAVE_DESCARTES = 'crawl:descartes:v3';
 const DIAS_DESCARTE = 14;
 /** Tope de la lista, para que el blob no crezca sin fin. Se van los más antiguos. */
 const MAX_DESCARTES = 20000;
@@ -1678,13 +1690,13 @@ async function descartesVigentes(): Promise<Set<string>> {
   return vigentes;
 }
 
-async function anotarDescartes(ids: string[]): Promise<void> {
+async function anotarDescartes(ids: string[], horas = DIAS_DESCARTE * 24): Promise<void> {
   if (!ids.length) return;
   try {
     const clave = claveDescartesDeEstaTanda();
     const guardado = (await CacheStore.get<Record<string, number>>(clave)) || {};
     const ahora = Date.now();
-    const caduca = ahora + DIAS_DESCARTE * 24 * 3600_000;
+    const caduca = ahora + horas * 3600_000;
     // Se limpian de paso los que ya caducaron: si no, el blob solo crece.
     const vivos: Array<[string, number]> = Object.entries(guardado).filter(([, c]) => c > ahora);
     for (const id of ids) vivos.push([id, caduca]);
@@ -1695,7 +1707,10 @@ async function anotarDescartes(ids: string[]): Promise<void> {
     for (const [id, c] of vivos.slice(0, MAX_DESCARTES)) mapa[id] = c;
 
     await CacheStore.set(clave, mapa, (DIAS_DESCARTE + 1) * 24 * 3600);
-    console.log(`   🧠 ${ids.length} títulos mirados sin vídeo: no se repetirán en ${DIAS_DESCARTE} días (${Object.keys(mapa).length} recordados)`);
+    const motivo = horas < DIAS_DESCARTE * 24
+      ? `fallaron por red; se reintentarán tras ${horas} h`
+      : `mirados sin vídeo; no se repetirán en ${DIAS_DESCARTE} días`;
+    console.log(`   🧠 ${ids.length} títulos ${motivo} (${Object.keys(mapa).length} recordados)`);
   } catch { /* nunca puede tumbar la corrida */ }
 }
 
@@ -2050,7 +2065,7 @@ async function main() {
     if (descartes.size) {
       const conDescartes = items.length;
       items = items.filter(it => !descartes.has(it.id));
-      console.log(`   ${conDescartes - items.length} se miraron hace poco y no tenían vídeo; quedan ${items.length}`);
+      console.log(`   ${conDescartes - items.length} ya revisados o con fallo de red reciente; quedan ${items.length}`);
     }
   }
 
@@ -2063,8 +2078,10 @@ async function main() {
   // calcula el ancho de banda necesario y guarda los enlaces con el mismo criterio de siempre.
   if (process.argv.includes('--verificar-antes-de-tmdb') && items.length) {
     const sinVideoTemprano: string[] = [];
-    const conVideo = await quedarseConLoQueReproduce(items, undefined, sinVideoTemprano, 12);
+    const fallosTempranos: string[] = [];
+    const conVideo = await quedarseConLoQueReproduce(items, undefined, sinVideoTemprano, 12, fallosTempranos);
     await anotarDescartes(sinVideoTemprano);
+    await anotarDescartes(fallosTempranos, 6);
     console.log(`   filtro previo: ${conVideo.length}/${items.length} con vídeo; solo esas fichas consultarán TMDB`);
     items = conVideo;
   }
@@ -2370,9 +2387,11 @@ async function main() {
   };
 
   const sinVideo: string[] = [];
-  const conDirecto = await quedarseConLoQueReproduce(all, guardarTanda, sinVideo);
+  const fallosDeRed: string[] = [];
+  const conDirecto = await quedarseConLoQueReproduce(all, guardarTanda, sinVideo, undefined, fallosDeRed);
   console.log(`   ${conDirecto.length}/${all.length} títulos tienen url directa permanente y funcional`);
   await anotarDescartes(sinVideo);
+  await anotarDescartes(fallosDeRed, 6);
   all.length = 0;
   all.push(...conDirecto);
 
