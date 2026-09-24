@@ -1,6 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { getSupabaseAdmin } from '../services/supabaseService';
 import { CaptionNetmirror } from '../scrapers/netmirror';
+import { sendErrorResponse } from '../utils/apiHelpers';
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -271,6 +272,43 @@ router.post('/api/v1/subtitles/:id/pedir', async (req: Request, res: Response, n
   } catch (err) {
     next(err);
   }
+});
+
+/**
+ * SUBIR UN SUBTÍTULO A MANO (desde la app subidora). Lo guarda como pista propia (origen 'publico')
+ * para la ficha del tmdb_id, y lo sirve el mismo GET de arriba. El contenido se guarda como VTT.
+ * La ficha (media_id) tiene que existir ya: se sube el vídeo primero, luego su subtítulo.
+ */
+router.post('/api/v1/panel/pool/subtitulo', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const tmdbId = Number(b.tmdb_id);
+    const tipo = String(b.type) === 'tvseries' ? 'tvseries' : 'movie';
+    const idioma = (String(b.idioma || 'es').trim().slice(0, 8) || 'es');
+    const etiqueta = String(b.etiqueta || (idioma.startsWith('es') ? 'Español' : idioma)).slice(0, 40);
+    const contenidoCrudo = String(b.contenido || '');
+    if (!Number.isFinite(tmdbId) || tmdbId <= 0) return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'Se requiere tmdb_id');
+    if (!contenidoCrudo.trim()) return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'El subtítulo llegó vacío');
+
+    const { data: item } = await getSupabaseAdmin()
+      .from('media_items').select('id').eq('tmdb_id', tmdbId).eq('type', tipo).maybeSingle();
+    if (!(item as any)?.id) {
+      return sendErrorResponse(res, 404, 'NO_MEDIA', 'La ficha no existe todavía. Sube el vídeo primero y luego su subtítulo.');
+    }
+    const episodioId = tipo === 'tvseries' ? `${Number(b.season) || 0}-${Number(b.episode) || 0}` : '';
+    const vtt = /^WEBVTT/.test(contenidoCrudo.trimStart()) ? contenidoCrudo : srtAVtt(contenidoCrudo);
+
+    const { error } = await getSupabaseAdmin().from('subtitulos').upsert({
+      media_id: (item as any).id,
+      episodio_id: episodioId,
+      idioma,
+      etiqueta,
+      origen: 'publico',
+      contenido: vtt,
+    }, { onConflict: 'media_id,episodio_id,idioma' });
+    if (error) return sendErrorResponse(res, 500, 'STORE_FAILED', error.message);
+    res.json({ status: 'success', idioma, episodio_id: episodioId });
+  } catch (err) { next(err); }
 });
 
 export default router;
