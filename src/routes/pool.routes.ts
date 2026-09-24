@@ -158,16 +158,26 @@ router.get('/api/v1/panel/pool/gdrive/auth-url', async (req: Request, res: Respo
   try {
     const cfg = await gdrive.leerConfig();
     if (!cfg) return sendErrorResponse(res, 422, 'NOT_CONFIGURED', 'Configura primero el cliente OAuth de Google.');
-    res.json({ status: 'success', url: gdrive.urlDeConsentimiento(cfg, gdriveRedirectUri(req)) });
+    // `?app=1` viene de la app Android: el callback volverá a ella por deep-link al terminar.
+    const state = req.query.app ? 'app' : undefined;
+    res.json({ status: 'success', url: gdrive.urlDeConsentimiento(cfg, gdriveRedirectUri(req), state) });
   } catch (err) { next(err); }
 });
 
 /** Callback de OAuth: cambia el code por tokens y da de alta el casillero de Drive. Devuelve HTML. */
 router.get('/api/v1/panel/pool/gdrive/callback', async (req: Request, res: Response) => {
-  const pagina = (titulo: string, cuerpo: string) =>
+  // Si vino de la app (`state=app`), al terminar se vuelve a ella por deep-link; si vino del panel
+  // web, se avisa a la ventana que abrió el popup.
+  const deApp = String(req.query.state || '') === 'app';
+  const pagina = (titulo: string, cuerpo: string, ok = false) =>
     `<!doctype html><meta charset="utf-8"><body style="font-family:system-ui;background:#0b0f14;color:#e6e6e6;padding:40px;text-align:center">` +
-    `<h2>${titulo}</h2><p>${cuerpo}</p><p style="color:#9aa">Puedes cerrar esta pestaña y volver al panel.</p>` +
-    `<script>try{if(window.opener)window.opener.postMessage('gdrive-ok','*')}catch(e){}</script></body>`;
+    `<h2>${titulo}</h2><p>${cuerpo}</p>` +
+    (deApp
+      ? `<p style="color:#9aa">Volviendo a la app…</p>` +
+        (ok ? `<a href="subidorpelis://drive-ok" style="color:#4ea1ff">Abrir la app</a><script>setTimeout(function(){location.replace("subidorpelis://drive-ok")},400)</script>` : '')
+      : `<p style="color:#9aa">Puedes cerrar esta pestaña y volver al panel.</p>` +
+        `<script>try{if(window.opener)window.opener.postMessage('gdrive-ok','*')}catch(e){}</script>`) +
+    `</body>`;
   try {
     const code = String(req.query.code || '').trim();
     const err = String(req.query.error || '').trim();
@@ -179,7 +189,7 @@ router.get('/api/v1/panel/pool/gdrive/callback', async (req: Request, res: Respo
     const tok = await gdrive.intercambiarCodigo(cfg, code, gdriveRedirectUri(req));
     const r = await anadirCuentaGDrive({ refreshToken: tok.refresh_token, email: tok.email });
     if (!r.ok) return res.status(500).send(pagina('❌ No se pudo guardar', r.error || ''));
-    res.send(pagina('✅ Google Drive conectado', `Cuenta <b>${tok.email || ''}</b> añadida como casillero.`));
+    res.send(pagina('✅ Google Drive conectado', `Cuenta <b>${tok.email || ''}</b> añadida como casillero.`, true));
   } catch (e: any) {
     res.status(500).send(pagina('❌ Error al conectar', String(e?.message || e).slice(0, 300)));
   }

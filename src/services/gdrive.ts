@@ -51,8 +51,12 @@ export async function guardarConfig(cfg: GDriveConfig): Promise<void> {
   if (error) throw new Error(error.message);
 }
 
-/** La URL de consentimiento de Google. `access_type=offline` + `prompt=consent` para que dé refresh_token. */
-export function urlDeConsentimiento(cfg: GDriveConfig, redirectUri: string): string {
+/**
+ * La URL de consentimiento de Google. `access_type=offline` + `prompt=consent` para que dé
+ * refresh_token. `state` marca de dónde vino (p.ej. 'app'), para que el callback sepa si al terminar
+ * debe volver a la app por deep-link o cerrar la pestaña del panel web.
+ */
+export function urlDeConsentimiento(cfg: GDriveConfig, redirectUri: string, state?: string): string {
   const p = new URLSearchParams({
     client_id: cfg.client_id,
     redirect_uri: redirectUri,
@@ -62,6 +66,7 @@ export function urlDeConsentimiento(cfg: GDriveConfig, redirectUri: string): str
     prompt: 'consent',
     include_granted_scopes: 'true',
   });
+  if (state) p.set('state', state);
   return `${AUTH_URL}?${p.toString()}`;
 }
 
