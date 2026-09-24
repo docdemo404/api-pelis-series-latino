@@ -830,7 +830,10 @@ async function main() {
     }
     visitadas++;
   }
-  if (!DRY && !SLUGS.length && cola.length && visitadas) {
+  // Un lote donde casi todas las fichas dan error indica que el Worker o su origen cayó.
+  // No mover el cursor: esas fichas siguen pendientes y la siguiente corrida debe reintentarlas.
+  const fuenteCaida = visitadas >= 10 && cuenta.errores >= Math.ceil(visitadas * 0.9);
+  if (!DRY && !SLUGS.length && cola.length && visitadas && !fuenteCaida) {
     const { error } = await db.from('esquema').upsert({ clave: claveCursor, valor: String((desde + visitadas) % cola.length) }, { onConflict: 'clave' });
     if (error) throw new Error(`No se pudo guardar cursor Lamoviebot: ${error.message}`);
   }
@@ -845,6 +848,7 @@ async function main() {
       `  IDENTIDAD RECHAZADA:  ${cuenta.identidadRota}   ← su tmdb_id se contradecía; no se escribió\n` +
       `  errores:              ${cuenta.errores}`
   );
+  if (fuenteCaida) throw new Error(`Lamoviebot falló en ${cuenta.errores}/${visitadas} fichas; se conserva el cursor para reintentarlas`);
 }
 
 main().catch((e) => {
