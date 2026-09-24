@@ -1674,11 +1674,14 @@ async function descartesVigentes(): Promise<Set<string>> {
   const vigentes = new Set<string>();
   try {
     // Cada fuente escribe su propia clave. Dos trabajos simultáneos ya no pisan el mapa entero
-    // al guardar sus descartes. Se lee también la clave histórica hasta que caduque sola.
+    // al guardar sus descartes. FuegoCine/Archive/Moviedays pueden aprovechar la memoria v2;
+    // TioPlus no, porque allí v2 confundió timeouts con falta de vídeo.
     const propia = claveDescartesDeEstaTanda();
+    const solo = (process.argv.find(a => a.startsWith('--solo=')) || '').split('=')[1];
     const claves = propia === CLAVE_DESCARTES
       ? [CLAVE_DESCARTES, ...FUENTES_CON_TANDA.map(f => `${CLAVE_DESCARTES}:${f}`)]
       : [CLAVE_DESCARTES, propia];
+    if (['fuegocine', 'archive', 'moviedays'].includes(solo)) claves.push('crawl:descartes:v2');
     const guardados = await Promise.all(claves.map(k => CacheStore.get<Record<string, number>>(k)));
     const ahora = Date.now();
     for (const guardado of guardados) {
