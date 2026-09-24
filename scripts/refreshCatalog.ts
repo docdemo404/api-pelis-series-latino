@@ -1434,7 +1434,8 @@ async function quedarseConLoQueReproduce(
    * Se rellena con los títulos que SE MIRARON y no dieron vídeo. Los que se quedan sin mirar por
    * presupuesto no entran aquí: no se sabe nada de ellos. Ver `anotarDescartes`.
    */
-  descartados?: string[]
+  descartados?: string[],
+  minutosTope?: number
 ): Promise<MediaItem[]> {
   console.log(`🎬 Extrayendo la url directa de ${items.length} títulos (solo entra lo que reproduzca)...`);
   const buenos: MediaItem[] = [];
@@ -1456,7 +1457,7 @@ async function quedarseConLoQueReproduce(
    * webs, así que puede dedicar mucho más tiempo a lo caro, que es bajarse un trozo de cada
    * fichero para comprobar que reproduce.
    */
-  const minutos = Number((process.argv.find(a => a.startsWith('--minutos=')) || '').split('=')[1]) || 200;
+  const minutos = minutosTope ?? (Number((process.argv.find(a => a.startsWith('--minutos=')) || '').split('=')[1]) || 200);
   const limite = Date.now() + minutos * 60_000;
   let mirados = 0;
 
@@ -2041,6 +2042,16 @@ async function main() {
   if (Number.isFinite(limitArg) && limitArg > 0) {
     items = items.slice(0, limitArg);
     console.log(`   tope de esta corrida: ${items.length}`);
+  }
+  // TioPlus tiene muchas fichas sin vídeo verificable. Comprobarlas antes evita gastar TMDB
+  // y Wikidata en cada descarte. Se conserva la comprobación final: con la metadata completa
+  // calcula el ancho de banda necesario y guarda los enlaces con el mismo criterio de siempre.
+  if (process.argv.includes('--verificar-antes-de-tmdb') && items.length) {
+    const sinVideoTemprano: string[] = [];
+    const conVideo = await quedarseConLoQueReproduce(items, undefined, sinVideoTemprano, 12);
+    await anotarDescartes(sinVideoTemprano);
+    console.log(`   filtro previo: ${conVideo.length}/${items.length} con vídeo; solo esas fichas consultarán TMDB`);
+    items = conVideo;
   }
   await latir('enriqueciendo con TMDB', 0, items.length);
 

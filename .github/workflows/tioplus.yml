@@ -35,5 +35,5 @@ jobs:
             3) FUENTE=animes ;;
           esac
           npx ts-node scripts/refreshCatalog.ts \
-            --solo="$FUENTE" --saltar-guardados \
+            --solo="$FUENTE" --saltar-guardados --verificar-antes-de-tmdb \
             --minutos=25 --completar-minutos=10 300
