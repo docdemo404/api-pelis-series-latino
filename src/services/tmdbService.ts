@@ -1650,7 +1650,7 @@ export class TmdbService {
    */
   static async discoverIds(
     type: ContentType,
-    opts: { pages?: number; desde?: number; orderBy?: string } = {}
+    opts: { pages?: number; desde?: number; orderBy?: string; throwOnError?: boolean } = {}
   ): Promise<number[]> {
     const endpoint = type === 'tvseries' ? 'tv' : 'movie';
     const pages = Math.max(1, opts.pages || 1);
@@ -1658,6 +1658,7 @@ export class TmdbService {
     const ids: number[] = [];
 
     for (let page = primera; page < primera + pages; page++) {
+      if (page > 500) break;
       try {
         const res = await axios.get(`https://api.themoviedb.org/3/discover/${endpoint}`, {
           params: {
@@ -1671,9 +1672,13 @@ export class TmdbService {
         });
         const results = res.data?.results || [];
         // TMDB corta en la página 500; más allá contesta 422 y seguir pidiendo es gastar por nada.
-        if (results.length === 0) break;
+        if (results.length === 0) {
+          if (opts.throwOnError) throw new Error(`TMDB devolvió una página vacía: ${endpoint}/${page}`);
+          break;
+        }
         for (const r of results) if (r?.id) ids.push(Number(r.id));
-      } catch {
+      } catch (err) {
+        if (opts.throwOnError) throw err;
         break;
       }
     }

@@ -115,14 +115,13 @@ jobs:
         #
         # Y moviedays necesita ADEMÁS por dónde empezar. Es la única fuente sin índice que
         # recorrer: baja por el catálogo de TMDB ordenado por número de votos, así que sin
-        # `--desde` cada tanda vuelve a pedir las mismas primeras páginas y no avanza nunca por
-        # muchas vueltas que dé. Se rota con el número de corrida, que es lo único que cambia
-        # entre tandas y no exige guardar estado en ningún sitio.
+        # `--desde` cada tanda vuelve a pedir las mismas primeras páginas y no avanza nunca.
+        # El cursor persistido se comparte con el workflow dedicado.
         run: |
           EXTRA=""
           # 140 ids por tipo = 7 páginas y como mucho 280 fichas entre ambos tipos:
-          # caben bajo el límite de 300. Setenta y dos tandas cubren las 500 páginas de TMDB.
-          if [ "$FUENTE" = "moviedays" ]; then EXTRA="--desde=$(( ( (${{ github.run_number }} - 1) % 72 ) * 7 + 1 )) --titulos=140"; fi
+          # caben bajo el límite de 300.
+          if [ "$FUENTE" = "moviedays" ]; then EXTRA="--avanzar-desde --titulos=140"; fi
           if [ "$FUENTE" = "peliculas" ] || [ "$FUENTE" = "series" ] || [ "$FUENTE" = "animes" ]; then EXTRA="$EXTRA --verificar-antes-de-tmdb"; fi
           echo "refreshCatalog --solo=$FUENTE $EXTRA"
           npx ts-node scripts/refreshCatalog.ts --solo=$FUENTE --saltar-guardados --minutos=18 --completar-minutos=20 $EXTRA 300

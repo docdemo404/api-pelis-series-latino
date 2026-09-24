@@ -1672,12 +1672,14 @@ export class RealScraperService {
      * Con la sonda, el descubrimiento solo pregunta «¿tienes algún servidor alcanzable de esto?»,
      * que es una petición y ninguna extracción. Quien de verdad necesita el vídeo lo pide luego.
      */
-    opts: { resolverServidores?: boolean } = {}
+    opts: { resolverServidores?: boolean; throwOnError?: boolean } = {}
   ): Promise<MediaItem | null> {
     const ref = parseMoviedaysUrl(url);
     if (!ref) return null;
 
-    const payload = await pedirMoviedays(ref.tmdbId, ref.type, ref.season, ref.episode);
+    const payload = await pedirMoviedays(ref.tmdbId, ref.type, ref.season, ref.episode, {
+      throwOnError: opts.throwOnError,
+    });
     if (!payload) return null;
 
     const title = tituloDeMoviedays(payload);
@@ -1811,14 +1813,15 @@ export class RealScraperService {
   static async scrapeMoviedaysLatest(
     tipo: ContentType,
     limit = 40,
-    opts: { desdePagina?: number } = {}
+    opts: { desdePagina?: number; exigirCompleto?: boolean } = {}
   ): Promise<MediaItem[]> {
     // TMDB pagina de 20 en 20, así que se piden las páginas justas para cubrir el límite pedido.
     const paginas = Math.max(1, Math.ceil(limit / 20));
     const ids = await TmdbService.discoverIds(tipo, {
       pages: paginas,
       desde: opts.desdePagina || 1,
-    }).catch(() => [] as number[]);
+      throwOnError: opts.exigirCompleto,
+    });
     if (ids.length === 0) return [];
 
     const items: MediaItem[] = [];
@@ -1828,12 +1831,18 @@ export class RealScraperService {
         ids.slice(i, i + LOTE).map(id =>
           // Solo la sonda: el crawl vuelve a bajar a la ficha después, y extraer aquí sería
           // pagar la extracción dos veces por cada título. Ver el comentario de `opts`.
-          this.scrapeMoviedaysDetail(moviedaysSourceUrl(id, tipo), { resolverServidores: false })
+          this.scrapeMoviedaysDetail(moviedaysSourceUrl(id, tipo), {
+            resolverServidores: false, throwOnError: opts.exigirCompleto,
+          })
         )
       );
       const falloAcceso = tanda.find(r => r.status === 'rejected'
         && String(r.reason?.message || '').startsWith('MOVIEDAYS_AUTH'));
       if (falloAcceso?.status === 'rejected') throw falloAcceso.reason;
+      if (opts.exigirCompleto) {
+        const falloRed = tanda.find(r => r.status === 'rejected');
+        if (falloRed?.status === 'rejected') throw falloRed.reason;
+      }
       for (const r of tanda) {
         if (r.status === 'fulfilled' && r.value) items.push(r.value);
       }
@@ -2787,8 +2796,8 @@ export class RealScraperService {
       // que el runner se lleve por delante el trabajo, que es la lección de `--saltar-guardados`.
       const cuantos = bandera('titulos') || 500;
       const [pelis, series] = await Promise.all([
-        this.scrapeMoviedaysLatest('movie', cuantos, { desdePagina }),
-        this.scrapeMoviedaysLatest('tvseries', cuantos, { desdePagina }),
+        this.scrapeMoviedaysLatest('movie', cuantos, { desdePagina, exigirCompleto: process.argv.includes('--avanzar-desde') }),
+        this.scrapeMoviedaysLatest('tvseries', cuantos, { desdePagina, exigirCompleto: process.argv.includes('--avanzar-desde') }),
       ]);
       return dedup([pelis, series]);
     }

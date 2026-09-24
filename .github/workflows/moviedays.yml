@@ -28,8 +28,6 @@ jobs:
           UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
         run: |
-          # 10 páginas por clase y tanda; 50 tandas cubren las 500 páginas de TMDB.
-          DESDE=$(( ( (${{ github.run_number }} - 1) % 50 ) * 10 + 1 ))
           npx ts-node scripts/refreshCatalog.ts \
-            --solo=moviedays --desde="$DESDE" --titulos=200 \
+            --solo=moviedays --avanzar-desde --titulos=200 \
             --saltar-guardados --minutos=25 --completar-minutos=5 400

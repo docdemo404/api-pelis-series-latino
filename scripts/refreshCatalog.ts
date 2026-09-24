@@ -2013,6 +2013,28 @@ async function main() {
     return;
   }
 
+  // Ambos workflows de Moviedays comparten este cursor. Una corrida cancelada vuelve a
+  // intentar la misma ventana; el número de ejecución de GitHub puede saltarse ventanas.
+  const avanzarMoviedays = process.argv.includes('--avanzar-desde')
+    && process.argv.includes('--solo=moviedays');
+  let paginaMoviedays = 0;
+  let paginasMoviedays = 0;
+  if (avanzarMoviedays) {
+    const { data, error } = await db.from('esquema').select('valor')
+      .eq('clave', 'moviedays_pagina_siguiente').maybeSingle();
+    if (error) throw new Error(`No se pudo leer el cursor de Moviedays: ${error.message}`);
+    const guardada = Number(data?.valor || 1);
+    if (!Number.isInteger(guardada) || guardada < 1 || guardada > 500) {
+      throw new Error(`Cursor de Moviedays inválido: ${data?.valor}`);
+    }
+    paginaMoviedays = guardada;
+    const titulos = Number((process.argv.find(a => a.startsWith('--titulos=')) || '').split('=')[1]) || 500;
+    paginasMoviedays = Math.ceil(titulos / 20);
+    process.argv = process.argv.filter(a => !a.startsWith('--desde='));
+    process.argv.push(`--desde=${paginaMoviedays}`);
+    console.log(`   Moviedays: páginas ${paginaMoviedays}-${Math.min(500, paginaMoviedays + paginasMoviedays - 1)} de TMDB`);
+  }
+
   await latir('recolectando los títulos de las webs');
   console.log('🔎 Recolectando catálogo desde las fuentes...');
   let items = await collectCatalog();
@@ -2391,10 +2413,24 @@ async function main() {
 
   const sinVideo: string[] = [];
   const fallosDeRed: string[] = [];
+  const totalPorRevisar = all.length;
   const conDirecto = await quedarseConLoQueReproduce(all, guardarTanda, sinVideo, undefined, fallosDeRed);
   console.log(`   ${conDirecto.length}/${all.length} títulos tienen url directa permanente y funcional`);
   await anotarDescartes(sinVideo);
   await anotarDescartes(fallosDeRed, 6);
+  if (avanzarMoviedays) {
+    const completo = conDirecto.length + sinVideo.length + fallosDeRed.length === totalPorRevisar;
+    if (completo && fallosDeRed.length === 0 && escritas.fail === 0) {
+      const siguiente = paginaMoviedays + paginasMoviedays > 500 ? 1 : paginaMoviedays + paginasMoviedays;
+      const { error } = await db.from('esquema').upsert(
+        { clave: 'moviedays_pagina_siguiente', valor: String(siguiente) }, { onConflict: 'clave' }
+      );
+      if (error) throw new Error(`No se pudo avanzar el cursor de Moviedays: ${error.message}`);
+      console.log(`   Moviedays: próxima tanda desde la página ${siguiente}`);
+    } else {
+      console.warn(`   Moviedays: cursor en página ${paginaMoviedays}; quedan títulos pendientes o con error`);
+    }
+  }
   all.length = 0;
   all.push(...conDirecto);
 

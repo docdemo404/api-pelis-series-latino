@@ -206,7 +206,8 @@ export async function pedirMoviedays(
   tmdbId: number,
   type: ContentType,
   season?: number,
-  episode?: number
+  episode?: number,
+  opts: { throwOnError?: boolean } = {}
 ): Promise<MoviedaysPayload | null> {
   if (!tmdbId || tmdbId <= 0) return null;
   /**
@@ -235,11 +236,14 @@ export async function pedirMoviedays(
       firmaPublica = null;
     }
     if (res.status === 401 || res.status === 403) throw new Error(`MOVIEDAYS_AUTH: HTTP ${res.status}`);
+    if (opts.throwOnError && (res.status === 429 || res.status >= 500)) {
+      throw new Error(`MOVIEDAYS_RED: HTTP ${res.status}`);
+    }
     const data = res.data as any;
     if (!data || typeof data !== 'object' || data.success !== true) return null;
     return data as MoviedaysPayload;
   } catch (err: any) {
-    if (String(err?.message || '').startsWith('MOVIEDAYS_AUTH')) throw err;
+    if (opts.throwOnError || String(err?.message || '').startsWith('MOVIEDAYS_AUTH')) throw err;
     return null;
   }
 }
