@@ -249,7 +249,7 @@
         <!-- Fuente propia: añadir a mano -->
         <!-- CASILLEROS: cuentas de almacenamiento propio (R2/B2) -->
         <div class="card main-card p-4 p-md-5 mb-4">
-          <h3 class="brand-title fw-bold mb-2">🗄️ Casilleros (almacenamiento propio) <span class="badge bg-secondary align-middle" style="font-size:.6em">panel v7</span></h3>
+          <h3 class="brand-title fw-bold mb-2">🗄️ Casilleros (almacenamiento propio) <span class="badge bg-secondary align-middle" style="font-size:.6em">panel v8</span></h3>
           <p class="text-secondary mb-3">
             Cuentas de Cloudflare R2 o Backblaze B2 donde subes tus propias películas y series. Añade
             cuantas quieras: el sistema reparte cada archivo en la que tenga hueco. Registras cuentas
@@ -1715,6 +1715,64 @@
       });
     }
 
+    // Sube un archivo grande (> 5 GB) en PARTES, directo al casillero.
+    async function poolSubirMultipart(pre, file, onProgreso) {
+      const partSize = pre.part_size || (256 * 1024 * 1024);
+      const total = file.size;
+      const nPartes = Math.ceil(total / partSize);
+      const partes = [];
+      let subidoBase = 0;
+      try {
+        for (let n = 1; n <= nPartes; n++) {
+          const ini = (n - 1) * partSize;
+          const fin = Math.min(ini + partSize, total);
+          const trozo = file.slice(ini, fin);
+          const pj = await (await fetch('/api/v1/panel/pool/multipart/part', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ account_id: pre.account_id, key: pre.key, upload_id: pre.upload_id, part_number: n }),
+          })).json();
+          if (pj.status !== 'success') throw new Error((pj.error && pj.error.message) || ('No se pudo firmar la parte ' + n));
+          const etag = await poolPutParte(pj.url, trozo, function (loaded) { onProgreso(subidoBase + loaded, total); });
+          if (!etag) throw new Error('El casillero no devolvió ETag de la parte ' + n + '. Vuelve a pulsar 🔓 CORS en esa cuenta y reintenta.');
+          partes.push({ part_number: n, etag: etag });
+          subidoBase = fin;
+          onProgreso(subidoBase, total);
+        }
+        const cj = await (await fetch('/api/v1/panel/pool/multipart/complete', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ account_id: pre.account_id, key: pre.key, upload_id: pre.upload_id, parts: partes }),
+        })).json();
+        if (cj.status !== 'success') throw new Error((cj.error && cj.error.message) || 'No se pudo cerrar la subida');
+      } catch (e) {
+        try {
+          await fetch('/api/v1/panel/pool/multipart/abort', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ account_id: pre.account_id, key: pre.key, upload_id: pre.upload_id }),
+          });
+        } catch (_) { /* best-effort */ }
+        throw e;
+      }
+    }
+
+    // PUT de UNA parte; devuelve su ETag (de la cabecera de respuesta, que el CORS debe exponer).
+    function poolPutParte(url, blob, onProgreso) {
+      return new Promise(function (resolve, reject) {
+        const xhr = new XMLHttpRequest();
+        xhr.open('PUT', url, true);
+        xhr.upload.onprogress = function (ev) { if (ev.lengthComputable) onProgreso(ev.loaded); };
+        xhr.onload = function () {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve(xhr.getResponseHeader('ETag') || xhr.getResponseHeader('etag') || '');
+          } else {
+            const detalle = (xhr.responseText || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 180);
+            reject(new Error('El bucket rechazó una parte (HTTP ' + xhr.status + (detalle ? '. ' + detalle : '') + ')'));
+          }
+        };
+        xhr.onerror = function () { reject(new Error('Fallo de red subiendo una parte.')); };
+        xhr.send(blob);
+      });
+    }
+
     document.getElementById('poolSubirBtn').addEventListener('click', async function () {
       if (poolSubiendo || !manualSel) return;
       const aviso = document.getElementById('poolAviso');
@@ -1747,15 +1805,20 @@
         })).json();
         if (pre.status !== 'success') throw new Error((pre.error && pre.error.message) || pre.message || 'No hay hueco');
 
-        // 2) PUT directo al bucket
+        // 2) subir los bytes directo al casillero
         txt.textContent = 'Subiendo al casillero…';
         const t0 = Date.now();
-        await poolPutConProgreso(pre.upload_url, file, pre.content_type, function (loaded, total) {
+        const onProg = function (loaded, total) {
           const pct = Math.round((loaded / total) * 100);
           barra.style.width = pct + '%'; barra.textContent = pct + '%';
           const mbps = (loaded / 1024 / 1024) / Math.max(0.1, (Date.now() - t0) / 1000);
           txt.textContent = (loaded / 1024 / 1024).toFixed(0) + ' / ' + (total / 1024 / 1024).toFixed(0) + ' MB · ' + mbps.toFixed(1) + ' MB/s';
-        });
+        };
+        if (pre.mode === 'multipart') {
+          await poolSubirMultipart(pre, file, onProg);
+        } else {
+          await poolPutConProgreso(pre.upload_url, file, pre.content_type, onProg);
+        }
 
         // 3) confirm → se registra y se da de alta como fuente propia
         txt.textContent = 'Confirmando y enlazando a la ficha…';

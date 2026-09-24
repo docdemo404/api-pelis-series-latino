@@ -25,7 +25,7 @@ import crypto from 'crypto';
 import { getSupabaseAdmin } from './supabaseService';
 import { getDb } from '../db/libsql';
 import { httpClient } from '../utils/httpClient';
-import { CredencialesS3, getPrefirmado, putPrefirmado, deletePrefirmado, listarPrefirmado, firmarConCabecera, corsXml } from '../utils/s3sign';
+import { CredencialesS3, getPrefirmado, putPrefirmado, putPartePrefirmado, deletePrefirmado, listarPrefirmado, firmarConCabecera, corsXml } from '../utils/s3sign';
 import * as gdrive from './gdrive';
 
 export type Proveedor = 'r2' | 'b2' | 'gdrive';
@@ -231,7 +231,7 @@ export async function configurarCors(accountId: string, origenes: string[]): Pro
   if (c.provider === 'r2') {
     try {
       const xml = corsXml(origenes);
-      const { url, headers } = firmarConCabecera(credDe(c), { metodo: 'PUT', subrecurso: 'cors', body: xml, contentType: 'application/xml' });
+      const { url, headers } = firmarConCabecera(credDe(c), { metodo: 'PUT', query: { cors: '' }, body: xml, contentType: 'application/xml' });
       const r = await httpClient.put(url, xml, { headers, validateStatus: () => true, timeout: 15000 } as any);
       if (r.status >= 200 && r.status < 300) return { ok: true };
       return { ok: false, error: `R2 rechazó el CORS (HTTP ${r.status}): ${String(r.data || '').slice(0, 200)}` };
@@ -290,7 +290,7 @@ export async function configurarCors(accountId: string, origenes: string[]): Pro
 export async function presignSubida(input: {
   tmdbId: number; tipo: 'movie' | 'tvseries'; season?: number; episode?: number;
   filename: string; size: number; accountId?: string; provider?: Proveedor;
-}): Promise<{ ok: boolean; error?: string; objectId?: string; accountId?: string; key?: string; url?: string; contentType?: string; provider?: Proveedor }> {
+}): Promise<{ ok: boolean; error?: string; objectId?: string; accountId?: string; key?: string; url?: string; contentType?: string; provider?: Proveedor; mode?: 'put' | 'multipart' | 'gdrive'; uploadId?: string; partSize?: number }> {
   const size = Math.max(0, Math.round(input.size || 0));
   let c: CuentaCasillero | null = null;
   if (input.accountId) {
@@ -317,15 +317,88 @@ export async function presignSubida(input: {
     try {
       const token = await gdrive.accessToken(cfg, c.secret_access_key);
       const url = await gdrive.crearSesionSubida(token, objectId, contentType);
-      return { ok: true, objectId, accountId: c.id, key: '', url, contentType, provider: 'gdrive' };
+      return { ok: true, objectId, accountId: c.id, key: '', url, contentType, provider: 'gdrive', mode: 'gdrive' };
     } catch (err: any) {
       return { ok: false, error: String(err?.message || err) };
     }
   }
 
   const key = `${input.tmdbId}/${s}x${e}/${objectId}${extDe(input.filename)}`;
+
+  // Por encima de 5 GB, S3 no acepta un solo PUT: hay que subir en PARTES (multipart). Se abre la
+  // subida aquí y el navegador subirá cada parte con su URL prefirmada (ver rutas multipart).
+  if (size > LIMITE_PUT_SIMPLE) {
+    const mp = await iniciarMultipart(c, key, contentType);
+    if (!mp.ok) return { ok: false, error: mp.error };
+    return { ok: true, objectId, accountId: c.id, key, contentType, provider: c.provider, mode: 'multipart', uploadId: mp.uploadId, partSize: PART_SIZE };
+  }
+
   const url = putPrefirmado(credDe(c), key, 3600);
-  return { ok: true, objectId, accountId: c.id, key, url, contentType, provider: c.provider };
+  return { ok: true, objectId, accountId: c.id, key, url, contentType, provider: c.provider, mode: 'put' };
+}
+
+/* ── Multipart (archivos > 5 GB en R2/B2) ── */
+
+/** Tope de un PUT simple en S3: 5 GB. Por encima, multipart. */
+export const LIMITE_PUT_SIMPLE = 5 * 1024 ** 3;
+/** Tamaño de cada parte: 256 MiB (mín S3 5 MiB; máx 10.000 partes → hasta ~2,5 TB). */
+export const PART_SIZE = 256 * 1024 * 1024;
+
+const extraerXml = (xml: string, tag: string): string | null => {
+  const m = new RegExp(`<${tag}>([^<]+)</${tag}>`).exec(xml || '');
+  return m ? m[1] : null;
+};
+
+/** Abre una subida multipart (CreateMultipartUpload) y devuelve su uploadId. */
+export async function iniciarMultipart(c: CuentaCasillero, key: string, contentType: string): Promise<{ ok: boolean; uploadId?: string; error?: string }> {
+  try {
+    const { url, headers } = firmarConCabecera(credDe(c), { metodo: 'POST', clave: key, query: { uploads: '' }, contentType });
+    const r = await httpClient.post(url, '', { headers, validateStatus: () => true, timeout: 20000 } as any);
+    if (r.status < 200 || r.status >= 300) return { ok: false, error: `No se pudo iniciar multipart (HTTP ${r.status}): ${String(r.data || '').slice(0, 160)}` };
+    const uploadId = extraerXml(String(r.data || ''), 'UploadId');
+    if (!uploadId) return { ok: false, error: 'El bucket no devolvió UploadId' };
+    return { ok: true, uploadId };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
+
+/** URL prefirmada para subir UNA parte. */
+export async function urlDeParte(accountId: string, key: string, uploadId: string, partNumber: number): Promise<{ ok: boolean; url?: string; error?: string }> {
+  const c = await cuenta(accountId);
+  if (!c || (c.provider !== 'r2' && c.provider !== 'b2')) return { ok: false, error: 'Cuenta S3 no encontrada' };
+  return { ok: true, url: putPartePrefirmado(credDe(c), key, uploadId, partNumber) };
+}
+
+/** Cierra la subida multipart (CompleteMultipartUpload) con las partes y sus ETags. */
+export async function completarMultipart(accountId: string, key: string, uploadId: string, partes: Array<{ part_number: number; etag: string }>): Promise<{ ok: boolean; error?: string }> {
+  const c = await cuenta(accountId);
+  if (!c || (c.provider !== 'r2' && c.provider !== 'b2')) return { ok: false, error: 'Cuenta S3 no encontrada' };
+  const ordenadas = [...partes].sort((a, b) => a.part_number - b.part_number);
+  const cuerpo = '<?xml version="1.0" encoding="UTF-8"?><CompleteMultipartUpload xmlns="http://s3.amazonaws.com/doc/2006-03-01/">' +
+    ordenadas.map(p => `<Part><PartNumber>${p.part_number}</PartNumber><ETag>${p.etag.replace(/"/g, '&quot;')}</ETag></Part>`).join('') +
+    '</CompleteMultipartUpload>';
+  try {
+    const { url, headers } = firmarConCabecera(credDe(c), { metodo: 'POST', clave: key, query: { uploadId }, body: cuerpo, contentType: 'application/xml' });
+    const r = await httpClient.post(url, cuerpo, { headers, validateStatus: () => true, timeout: 30000 } as any);
+    const txt = String(r.data || '');
+    // OJO: Complete puede contestar 200 con un <Error> dentro. Hay que mirar el cuerpo.
+    if (r.status >= 200 && r.status < 300 && /<CompleteMultipartUploadResult/i.test(txt)) return { ok: true };
+    const code = extraerXml(txt, 'Code') || `HTTP ${r.status}`;
+    return { ok: false, error: `El bucket rechazó el cierre (${code})` };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
+
+/** Cancela una subida multipart a medias (AbortMultipartUpload). Best-effort. */
+export async function abortarMultipart(accountId: string, key: string, uploadId: string): Promise<void> {
+  const c = await cuenta(accountId);
+  if (!c || (c.provider !== 'r2' && c.provider !== 'b2')) return;
+  try {
+    const { url, headers } = firmarConCabecera(credDe(c), { metodo: 'DELETE', clave: key, query: { uploadId } });
+    await httpClient.delete(url, { headers, validateStatus: () => true, timeout: 15000 } as any);
+  } catch { /* best-effort */ }
 }
 
 /**

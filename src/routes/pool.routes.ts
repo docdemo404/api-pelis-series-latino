@@ -5,7 +5,7 @@ import { CatalogService } from '../services/catalogService';
 import {
   listarCuentas, anadirCuenta, anadirCuentaGDrive, borrarCuenta, marcarCuenta, configurarCors,
   presignSubida, registrarObjeto, resolverSubidaGDrive, objeto, objetosDeFicha, borrarObjeto,
-  urlDeReproduccion, Proveedor, CAP_POR_DEFECTO,
+  urlDeReproduccion, urlDeParte, completarMultipart, abortarMultipart, Proveedor, CAP_POR_DEFECTO,
 } from '../services/poolStore';
 import * as gdrive from '../services/gdrive';
 
@@ -215,7 +215,51 @@ router.post('/api/v1/panel/pool/presign', async (req: Request, res: Response, ne
       status: 'success',
       object_id: r.objectId, account_id: r.accountId, key: r.key,
       upload_url: r.url, content_type: r.contentType, provider: r.provider,
+      mode: r.mode, upload_id: r.uploadId, part_size: r.partSize,
     });
+  } catch (err) { next(err); }
+});
+
+/** MULTIPART (archivos > 5 GB): URL prefirmada para subir UNA parte. */
+router.post('/api/v1/panel/pool/multipart/part', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const b = (req.body ?? {}) as Record<string, any>;
+    const accountId = String(b.account_id || '').trim();
+    const key = String(b.key || '').trim();
+    const uploadId = String(b.upload_id || '').trim();
+    const partNumber = Number(b.part_number);
+    if (!accountId || !key || !uploadId || !Number.isFinite(partNumber) || partNumber < 1) {
+      return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'Faltan account_id, key, upload_id o part_number');
+    }
+    const r = await urlDeParte(accountId, key, uploadId, partNumber);
+    if (!r.ok) return sendErrorResponse(res, 422, 'PART_FAILED', r.error || 'No se pudo firmar la parte');
+    res.json({ status: 'success', url: r.url });
+  } catch (err) { next(err); }
+});
+
+/** MULTIPART: cierra la subida con la lista de partes y sus ETags. */
+router.post('/api/v1/panel/pool/multipart/complete', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const b = (req.body ?? {}) as Record<string, any>;
+    const accountId = String(b.account_id || '').trim();
+    const key = String(b.key || '').trim();
+    const uploadId = String(b.upload_id || '').trim();
+    const partes = Array.isArray(b.parts) ? b.parts.map((p: any) => ({ part_number: Number(p.part_number), etag: String(p.etag || '') })) : [];
+    if (!accountId || !key || !uploadId || !partes.length) {
+      return sendErrorResponse(res, 400, 'MISSING_PARAMETER', 'Faltan account_id, key, upload_id o parts');
+    }
+    const r = await completarMultipart(accountId, key, uploadId, partes);
+    if (!r.ok) return sendErrorResponse(res, 502, 'COMPLETE_FAILED', r.error || 'No se pudo cerrar la subida');
+    res.json({ status: 'success' });
+  } catch (err) { next(err); }
+});
+
+/** MULTIPART: cancela una subida a medias (best-effort). */
+router.post('/api/v1/panel/pool/multipart/abort', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const b = (req.body ?? {}) as Record<string, any>;
+    await abortarMultipart(String(b.account_id || ''), String(b.key || ''), String(b.upload_id || ''));
+    res.json({ status: 'success' });
   } catch (err) { next(err); }
 });
 

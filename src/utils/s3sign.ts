@@ -138,21 +138,23 @@ export function listarPrefirmado(cred: CredencialesS3, expiraEn = 120): string {
  * su MD5— porque S3 lo exige para configurar el bucket. Devuelve la URL y las cabeceras a mandar.
  */
 export function firmarConCabecera(cred: CredencialesS3, opts: {
-  metodo: 'PUT' | 'GET' | 'DELETE';
-  /** Subrecurso a nivel bucket, ej. 'cors'. Va en la query como `?cors=`. */
-  subrecurso?: string;
+  metodo: 'PUT' | 'GET' | 'DELETE' | 'POST';
+  /** Clave del objeto. Vacía para operar sobre el bucket (ej. CORS). */
+  clave?: string;
+  /** Parámetros de query a firmar, ej. `{ cors: '' }`, `{ uploads: '' }`, `{ uploadId: '...' }`. */
+  query?: Record<string, string>;
   body?: string;
   contentType?: string;
 }): { url: string; headers: Record<string, string> } {
   const { amzDate, fecha } = ahoraAmz();
   const host = new URL(cred.endpoint).host;
-  const uri = `/${cred.bucket}`;
+  const clave = opts.clave || '';
+  const uri = `/${cred.bucket}${clave ? '/' + encPath(clave) : ''}`;
   const body = opts.body || '';
   const payloadHash = sha256Hex(body);
   const scope = `${fecha}/${cred.region}/s3/aws4_request`;
 
-  const query: Record<string, string> = {};
-  if (opts.subrecurso) query[opts.subrecurso] = '';
+  const query: Record<string, string> = opts.query || {};
   const qc = queryCanonica(query);
 
   // Cabeceras a firmar, claves en minúscula (como exige el canónico), ordenadas.
@@ -178,6 +180,11 @@ export function firmarConCabecera(cred: CredencialesS3, opts: {
     url: `${cred.endpoint}${uri}${qc ? '?' + qc : ''}`,
     headers: { ...headers, Authorization: auth },
   };
+}
+
+/** PUT prefirmado de UNA PARTE de una subida multipart. */
+export function putPartePrefirmado(cred: CredencialesS3, clave: string, uploadId: string, partNumber: number, expiraEn = 3600): string {
+  return urlPrefirmada(cred, { metodo: 'PUT', clave, expiraEn, extra: { partNumber: String(partNumber), uploadId } });
 }
 
 /** El XML de una regla CORS S3 que permite subir (PUT) y leer (GET/HEAD) desde `origenes`. */
