@@ -1667,7 +1667,7 @@ async function descartesVigentes(): Promise<Set<string>> {
     const claves = propia === CLAVE_DESCARTES
       ? [CLAVE_DESCARTES, ...FUENTES_CON_TANDA.map(f => `${CLAVE_DESCARTES}:${f}`)]
       : [CLAVE_DESCARTES, propia];
-    const guardados = await CacheStore.mget<Record<string, number>>(...claves);
+    const guardados = await Promise.all(claves.map(k => CacheStore.get<Record<string, number>>(k)));
     const ahora = Date.now();
     for (const guardado of guardados) {
       for (const [id, caduca] of Object.entries(guardado || {})) {
