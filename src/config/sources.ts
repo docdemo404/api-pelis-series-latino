@@ -163,6 +163,12 @@ export const DEFAULT_SOURCES: SourceConfig[] = [
    * proyección de ~513 series nuevas con ~7.193 episodios.
    */
   { id: 'hfpro', name: 'HFPro (ficheros directos)', enabled: true, priority: 3 },
+  /**
+   * NUVE+ — addon de Stremio que resuelve por IMDB id a su CDN (apollobox): MKV directo con Range,
+   * 1080p/4K HEVC, audio Latino. Buena fuente; se resuelve en vivo (url de play efímera). El token de
+   * la ruta puede caducar. Ver src/scrapers/nuveplus.ts. Para durabilidad real, ingerir a R2/B2.
+   */
+  { id: 'nuveplus', name: 'Nuve+ (CDN Latino, por IMDB)', enabled: true, priority: 4 },
   { id: 'tioplus', name: 'TioPlus / PelisPlus Latino', enabled: true, priority: 6 },
   { id: 'fuegocine', name: 'FuegoCine', enabled: true, priority: 7 },
   /**
