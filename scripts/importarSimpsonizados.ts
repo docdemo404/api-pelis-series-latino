@@ -42,6 +42,7 @@ import {
   estrenoDeLaSerie,
   codigoVideok,
   masterDeVideok,
+  sinSubtitulos,
   CapituloSimpsonizados,
 } from '../src/scrapers/simpsonizados';
 import { MediaItem } from '../src/types';
@@ -119,10 +120,16 @@ async function resolver(c: CapituloSimpsonizados): Promise<Resuelto> {
   try {
     const codigo = await codigoVideok(c.pagina);
     if (!codigo) return { ...base, motivo: 'sin opción de videok' };
-    const master = await masterDeVideok(codigo);
+    let master = await masterDeVideok(codigo);
     if (!master) return { ...base, codigo, motivo: 'videok no dio fuente' };
     if (esVideoDeMuestra(master)) return { ...base, codigo, master, motivo: 'vídeo de muestra' };
-    const info = await leerMaster(master);
+    let info = await leerMaster(master);
+    // Un subtítulo que falta tumba el master entero (ver `sinSubtitulos`); sin ellos, el vídeo sí.
+    const recortado = info ? null : sinSubtitulos(master);
+    if (recortado) {
+      info = await leerMaster(recortado);
+      if (info) master = recortado;
+    }
     if (!info) return { ...base, codigo, master, motivo: 'el master no se deja leer' };
     const r = { ...base, codigo, master, ...info };
     if (info.minutos < MINUTOS_MINIMOS) return { ...r, motivo: `dura ${info.minutos} min: no es un capítulo` };

@@ -112,6 +112,19 @@ export function sinFirma(url: string): string {
 }
 
 /**
+ * El master sin las pistas de subtítulos (`lang/<idioma>/<code>_<idioma>`), o null si no tenía.
+ *
+ * nginx-vod monta el master con TODO lo que lista el `.urlset`, y si falta uno solo de los
+ * ficheros devuelve 404 al master entero. Pasa: el 3x10 lista subtítulos spa/cat/eng que no existen
+ * y no abre ni firmado —tampoco en la propia web—, pero sus cuatro calidades están enteras. El audio
+ * latino va dentro del vídeo, no en `lang/`, así que quitar los subtítulos no quita el doblaje.
+ */
+export function sinSubtitulos(master: string): string | null {
+  const limpio = master.replace(/,lang\/[^,]+/g, '');
+  return limpio !== master ? limpio : null;
+}
+
+/**
  * El master HLS de un código de videok, YA SIN FIRMA (la firma caduca a las 12 h y lleva la IP de
  * quien lo pidió, pero el CDN no la comprueba — ver la cabecera). Null si no trae fuente.
  */
