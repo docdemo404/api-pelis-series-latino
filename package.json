@@ -19,6 +19,7 @@
     "importar:unlimplay": "ts-node scripts/importarUnlimplay.ts",
     "importar:hfpro": "ts-node scripts/importarHfpro.ts",
     "importar:pluto": "ts-node scripts/importarPluto.ts",
+    "importar:simpsonizados": "ts-node scripts/importarSimpsonizados.ts",
     "preparar:netmirror": "ts-node scripts/prepararColaNetmirror.ts",
     "check:catalog": "ts-node scripts/checkCatalog.ts",
     "check:sources": "ts-node scripts/checkSources.ts",
