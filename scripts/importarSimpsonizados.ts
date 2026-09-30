@@ -290,20 +290,34 @@ async function escribir(seasons: any[]): Promise<void> {
 async function main() {
   console.log(`IMPORTANDO SIMPSONIZADOS${DRY ? ' (--dry, no escribe)' : ''}\n`);
 
-  // Identidad antes que nada: si la web no es la serie 456, no se resuelve ni se escribe.
-  const [estreno, tmdb] = await Promise.all([
-    estrenoDeLaSerie(),
+  const v = leerVolcado();
+
+  // Identidad antes que nada: si la web no es la serie 456, no se resuelve ni se escribe. Si la
+  // web no contesta, vale la fecha que se comprobó al hacer el volcado (se guarda en él).
+  const [estrenoWeb, tmdb] = await Promise.all([
+    estrenoDeLaSerie().catch(() => ''),
     axios.get(`https://api.themoviedb.org/3/tv/${TMDB_SIMPSON}`, { params: { api_key: TMDB_API_KEY }, timeout: 15000 })
       .then((r) => r.data).catch(() => null),
   ]);
+  const estreno = estrenoWeb || v.estreno;
   if (!estreno || !tmdb?.first_air_date || estreno !== tmdb.first_air_date) {
     throw new Error(`identidad sin respaldo: la web dice estreno «${estreno}», TMDB ${TMDB_SIMPSON} dice «${tmdb?.first_air_date}»`);
   }
-  console.log(`Identidad: «${tmdb.name}» (TMDB ${TMDB_SIMPSON}), estreno ${estreno} en los dos lados.`);
-
-  const v = leerVolcado();
+  console.log(`Identidad: «${tmdb.name}» (TMDB ${TMDB_SIMPSON}), estreno ${estreno}${estrenoWeb ? ' en los dos lados' : ' (del volcado)'}.`);
   v.estreno = estreno;
-  await resolverPendientes(v);
+
+  /**
+   * La web es de hosting compartido y a ratos contesta 508 («Resource Limit Is Reached») al
+   * sitemap. Eso no puede frenar la escritura: las urls del volcado son permanentes y ya están
+   * verificadas. Sin web se escribe lo que haya; lo pendiente, en la corrida siguiente.
+   */
+  try {
+    await resolverPendientes(v);
+  } catch (e: any) {
+    const listos = Object.values(v.capitulos).filter((r) => r.ok).length;
+    if (!listos) throw e;
+    console.log(`(la web no contesta: ${e?.message}; se sigue con los ${listos} capítulos del volcado)`);
+  }
 
   const todos = Object.values(v.capitulos)
     .filter((r) => !SOLO_TEMPORADA || r.temporada === SOLO_TEMPORADA);
