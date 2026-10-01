@@ -2,7 +2,7 @@ import { MediaItem, ServerOption, ContentType } from '../types';
 import { supabase, getSupabaseAdmin } from './supabaseService';
 import { RealScraperService } from './realScraperService';
 import { TmdbService } from './tmdbService';
-import { sortServersBySourcePriority, getPrimaryStream, paraElCliente, descartesDelCliente, fichaReproducible, veredictoDisponibilidad, VERIFICADO_VIGENTE_MS, VERIFICADO_PERMANENTE_MS, soloDeEstaObra } from './streamSorter';
+import { sortServersBySourcePriority, getPrimaryStream, paraElCliente, descartesDelCliente, fichaReproducible, veredictoDisponibilidad, VERIFICADO_VIGENTE_MS, VERIFICADO_PERMANENTE_MS, soloDeEstaObra, verificadoVigente } from './streamSorter';
 import { hostNormalizado } from './hostsConCache';
 import { ficheroDentroDeNuestraCache } from '../utils/externalProxy';
 import { normalizeTitle, slugify, yearFromSlug, searchIndexKey } from '../utils/text';
@@ -4174,10 +4174,10 @@ export class CatalogService {
       if (paraElCliente(alDia.servers).length > 0 || this.hasEpisodeServers(alDia)) {
         // La consulta auxiliar es SOLO a nuestra tabla `netmirror_cache`, nunca al upstream.
         // Ahí vive el netflix_id que convierte su MP4 mono-audio en el master multi-audio.
-        alDia.servers = sortServersBySourcePriority(await enriquecerNetmirrorDesdeCache(
+        alDia.servers = sortServersBySourcePriority(await conNuvePlus(await enriquecerNetmirrorDesdeCache(
           alDia.servers || [],
           alDia.type === 'movie' ? alDia.tmdb_id : null,
-        ));
+        ), alDia));
         alDia.primary_stream = getPrimaryStream(alDia.servers);
         return alDia;
       }
@@ -4200,10 +4200,10 @@ export class CatalogService {
     if (!opts.deep) {
       const alDia = this.conSaludAlDia(result);
       if (paraElCliente(alDia.servers).length > 0 || this.hasEpisodeServers(alDia)) {
-        alDia.servers = sortServersBySourcePriority(await enriquecerNetmirrorDesdeCache(
+        alDia.servers = sortServersBySourcePriority(await conNuvePlus(await enriquecerNetmirrorDesdeCache(
           alDia.servers || [],
           alDia.type === 'movie' ? alDia.tmdb_id : null,
-        ));
+        ), alDia));
         alDia.primary_stream = getPrimaryStream(alDia.servers);
         await this.cacheItem('byid', cacheKey, alDia, CACHE_TTL_SECONDS);
         return alDia;
@@ -5265,6 +5265,21 @@ async function serverDeNuvePlus(
     consulta,
     new Promise<null>(resolve => setTimeout(() => resolve(null), 3_000)),
   ]).catch(() => null);
+}
+
+/**
+ * Nuve+ también en los CAMINOS RÁPIDOS de las películas (caché y fila guardada), que solo pasan
+ * por aquí y no por la resolución completa: sin esto, una película solo lo ganaba cuando algo la
+ * obligaba a resolverse de cero. Si ya trae uno con sello vigente no se pregunta al addon — la
+ * entrada del caché dura una hora y no hace falta consultarlo en cada apertura.
+ */
+async function conNuvePlus(servers: ServerOption[], item: MediaItem): Promise<ServerOption[]> {
+  if (item.type !== 'movie') return servers;
+  const previo = servers.find(s => String((s as any)?.source_id || '').toLowerCase() === 'nuveplus');
+  if (previo && verificadoVigente(previo)) return servers;
+  const nuve = await serverDeNuvePlus(item, { tipo: 'movie' });
+  const resto = servers.filter(s => String((s as any)?.source_id || '').toLowerCase() !== 'nuveplus');
+  return nuve ? [...resto, nuve] : resto;
 }
 
 /** Los servers virtuales se rehacen en cada resolución: el que venga guardado lleva un sello viejo. */
