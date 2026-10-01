@@ -458,7 +458,8 @@ export async function revisarServidores(
      * `sinVideoDirecto`, tirandolo. La regla aqui es la misma que aplica a los ficheros
      * permanentes: si el sello del catalogo es reciente, no se re-sondea.
      */
-    if (String((servidor as any)?.source_id || '').toLowerCase() === 'netmirror' && verificadoVigente(servidor)) {
+    // Nuve+ es otro server virtual del mismo tipo (ruta `/api/v1/addon/nuveplus/…`, sello al crearlo).
+    if (['netmirror', 'nuveplus'].includes(String((servidor as any)?.source_id || '').toLowerCase()) && verificadoVigente(servidor)) {
       continue;
     }
 

@@ -134,6 +134,8 @@ export function effectiveDirectMode(server: ServerOption): DirectMode | undefine
   // como si fuese un embed desconocido la mandaba por `bestMode(CONSERVATIVE)` y la convertía
   // falsamente en `proxy`, aunque el endpoint entrega un 302 fresco al CDN para Android.
   if (getSourceId(server) === 'netmirror') return server.direct_mode || 'redirect';
+  // Nuve+ igual: su `direct_stream` es `/api/v1/addon/nuveplus/…`, que contesta 302 fresco.
+  if (getSourceId(server) === 'nuveplus') return 'redirect';
   // `pluto://` lo resuelve el móvil al reproducir; no hay nada que decidir aquí.
   if (getSourceId(server) === 'pluto') return 'public';
 
@@ -535,6 +537,10 @@ export function sortServersBySourcePriority(servers: ServerOption[], sourcesConf
    */
   const directScore = (s: ServerOption): number => {
     if (!s.direct_stream) return 0;
+    // Simpsonizados va primero en Los Simpson, por encima de todo, por decisión del usuario
+    // (2026-10-01): es la fuente dedicada a esa serie —latino, 1080p, URL permanente— y solo
+    // existe en esa ficha, así que esta regla no mueve el orden de ningún otro título.
+    if (getSourceId(s) === 'simpsonizados') return 6;
     // NetMirror va primero por decisión de producto: es la fuente que combina mayor calidad con
     // master HLS multi-audio y subtítulos. Su URL estable acuña el 302 al pulsar Play, así que no
     // se sacrifica vigencia por priorizarla. Si falla, el cliente conserva el failover completo.

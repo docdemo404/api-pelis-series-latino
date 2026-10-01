@@ -11,6 +11,7 @@ import { httpClient } from '../utils/httpClient';
 import { CacheStore } from '../cache/store';
 import { unwrapRedirector, canonicalArchiveOrg } from '../scrapers/directStream';
 import { servidorVirtualDePelicula, decodificarIdNetmirror } from '../scrapers/netmirror';
+import { resolverNuvePlus, elegirStream, servidorNuvePlus, imdbDeTmdb } from '../scrapers/nuveplus';
 import { idsCatalogoNetmirror, muestrasNetmirrorSeries } from './netmirrorSeries';
 import { SourceManager } from './sourceManager';
 import { tieneEspanolLatino } from '../utils/idiomas';
@@ -3818,10 +3819,15 @@ export class CatalogService {
      */
     // NetMirror para capitulos: server virtual por (tmdbSerie, s, e). No persiste; se resuelve
     // fresco descartando el que hubiera con sello viejo.
-    const propiosMasNm = propios.filter(s => String((s as any)?.source_id || '').toLowerCase() !== 'netmirror');
+    // Nuve+ igual, por IMDB; las dos consultas van en paralelo.
+    const propiosMasNm = propios.filter(s => !esServidorVirtual(s));
     if (serie.tmdb_id) {
-      const nm = await serverDeNetmirror(serie.tmdb_id, { tipo: 'tv', s: season, e: episode });
+      const [nm, nuve] = await Promise.all([
+        serverDeNetmirror(serie.tmdb_id, { tipo: 'tv', s: season, e: episode }),
+        serverDeNuvePlus(serie, { tipo: 'tv', s: season, e: episode }),
+      ]);
       if (nm) propiosMasNm.push(nm);
+      if (nuve) propiosMasNm.push(nuve);
     }
 
     const conocidos = sortServersBySourcePriority(aplicarVeredictosRecordados(propiosMasNm));
@@ -4445,12 +4451,17 @@ export class CatalogService {
      */
     // NetMirror: server virtual por tmdb_id, sin persistir. Se elimina el que hubiera y se
     // resuelve de cero, para que el `verified_at` sea de ahora y no del cache viejo.
+    // Nuve+ igual, por IMDB; las dos consultas van en paralelo.
     for (let i = allServers.length - 1; i >= 0; i--) {
-      if (String((allServers[i] as any)?.source_id || '').toLowerCase() === 'netmirror') allServers.splice(i, 1);
+      if (esServidorVirtual(allServers[i])) allServers.splice(i, 1);
     }
     if (result.type === 'movie' && result.tmdb_id) {
-      const nm = await serverDeNetmirror(result.tmdb_id, { tipo: 'movie' });
+      const [nm, nuve] = await Promise.all([
+        serverDeNetmirror(result.tmdb_id, { tipo: 'movie' }),
+        serverDeNuvePlus(result, { tipo: 'movie' }),
+      ]);
       if (nm) allServers.push(nm);
+      if (nuve) allServers.push(nuve);
     }
 
     const revisados = await revisarServidores(sortServersBySourcePriority(allServers), opts.deep
@@ -5224,6 +5235,41 @@ async function serverDeNetmirror(
   };
   return server;
 }
+
+/**
+ * NUVE+ — server virtual por IMDB, como NetMirror pero preguntando al addon en vivo.
+ *
+ * El addon contesta en ~0,35 s (medido el 2026-10-01) y solo se cuelga el servidor si trae un
+ * stream LATINO para esta obra: anunciar uno que no abre es peor que no anunciarlo. Lo que se
+ * entrega es nuestra ruta estable (`servidorNuvePlus`), que pide la url de `play` al pulsar.
+ *
+ * Con techo de 3 s: es una fuente más, y su ausencia nunca puede retrasar Play. Si la fuente está
+ * apagada en el panel ni se le pregunta.
+ */
+async function serverDeNuvePlus(
+  item: { tmdb_id?: number | null; imdb_id?: string | null },
+  contexto: { tipo: 'movie' } | { tipo: 'tv'; s: number; e: number },
+): Promise<ServerOption | null> {
+  if (SourceManager.getSources().find(f => f.id === 'nuveplus')?.enabled === false) return null;
+  const consulta = (async () => {
+    const imdb = /^tt\d+$/.test(String(item.imdb_id || ''))
+      ? String(item.imdb_id)
+      : await imdbDeTmdb(Number(item.tmdb_id) || 0, contexto.tipo === 'movie' ? 'movie' : 'tv');
+    if (!imdb) return null;
+    const s = contexto.tipo === 'tv' ? contexto.s : undefined;
+    const e = contexto.tipo === 'tv' ? contexto.e : undefined;
+    const elegido = elegirStream(await resolverNuvePlus(imdb, contexto.tipo === 'movie' ? 'movie' : 'series', s, e));
+    return elegido ? servidorNuvePlus(imdb, elegido, s, e) : null;
+  })();
+  return Promise.race<ServerOption | null>([
+    consulta,
+    new Promise<null>(resolve => setTimeout(() => resolve(null), 3_000)),
+  ]).catch(() => null);
+}
+
+/** Los servers virtuales se rehacen en cada resolución: el que venga guardado lleva un sello viejo. */
+const esServidorVirtual = (s: any): boolean =>
+  ['netmirror', 'nuveplus'].includes(String(s?.source_id || '').toLowerCase());
 
 /**
  * Recupera el `netflix_id` ya descubierto sin volver a tocar NetMirror en el request de Play.

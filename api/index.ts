@@ -9,6 +9,7 @@ import searchRoutes from '../src/routes/search.routes';
 import mediaRoutes from '../src/routes/media.routes';
 import streamRoutes from '../src/routes/stream.routes';
 import netmirrorRoutes from '../src/routes/netmirror.routes';
+import addonsRoutes from '../src/routes/addons.routes';
 import plutoRoutes from '../src/routes/pluto.routes';
 import poolRoutes from '../src/routes/pool.routes';
 import { filasEscritas } from '../src/db/contadorEscrituras';
@@ -214,6 +215,7 @@ app.use(mediaRoutes);
 app.use(subtitulosRoutes);
 app.use(streamRoutes);
 app.use(netmirrorRoutes);
+app.use(addonsRoutes);
 app.use(plutoRoutes);
 app.use(poolRoutes);
 

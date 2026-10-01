@@ -32,6 +32,15 @@ export const DEFAULT_SOURCES: SourceConfig[] = [
    */
   { id: 'manual', name: 'Fuente propia (panel)', enabled: true, priority: 1 },
   /**
+   * SIMPSONIZADOS — una web de UNA serie: Los Simpson en latino, 767 capítulos de T1–T35 con URL
+   * HLS permanente de videok (ver src/scrapers/simpsonizados.ts). Solo existe en esa ficha.
+   *
+   * La prioridad de aquí es la del panel; lo que de verdad la pone PRIMERA en Los Simpson —por
+   * delante incluso de la fuente propia y de NetMirror— es su puntuación en `directScore`
+   * (streamSorter.ts), por decisión del usuario el 2026-10-01: «debe ser la principal».
+   */
+  { id: 'simpsonizados', name: 'Simpsonizados (Los Simpson)', enabled: true, priority: 2 },
+  /**
    * Internet Archive va SEGUNDA, solo por detrás de lo puesto a mano, y la razón es la misma que
    * pone a la fuente propia la primera: no depende de que nadie siga vivo. Sus ficheros son
    * públicos y sin firma, así que la url que se guarda hoy sirve dentro de un mes — mientras que
