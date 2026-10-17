@@ -1211,16 +1211,22 @@ export class CatalogService {
     limit: number,
     type?: string,
     genre?: string
-  ): Promise<{ items: MediaItem[]; total: number } | null> {
+  ): Promise<{ items: MediaItem[]; total: number; hasMore: boolean } | null> {
     const safeLimit = Math.max(1, Math.min(limit, 100));
     const from = Math.max(0, (Math.max(1, page) - 1) * safeLimit);
 
     try {
+      /**
+       * SIN `count: 'exact'`. Contar es un `count(*)` con todos los filtros de `soloPublicables`,
+       * que escanea `media_items` entero en CADA página del scroll infinito: Turso cobra esas
+       * filas escaneadas aunque vuelva un solo número. Se pide una fila de más y con eso basta
+       * para saber si hay página siguiente; `total` pasa a ser «al menos estas».
+       */
       let query = this.primeroLoCompleto(
-        supabase.from('media_items').select(this.COLUMNAS_DE_TARJETA, { count: 'exact' }),
+        supabase.from('media_items').select(this.COLUMNAS_DE_TARJETA),
         await this.hasScoreColumn()
       );
-      query = query.order('updated_at', { ascending: false }).range(from, from + safeLimit - 1);
+      query = query.order('updated_at', { ascending: false }).range(from, from + safeLimit);
 
       // El "ver todo" tampoco debe pasear fichas sin reproducción posible.
       query = this.soloPublicables(query, await this.hasAvailabilityColumn(), await this.hasOcultoColumn(), await this.estadoDelSello());
@@ -1228,10 +1234,12 @@ export class CatalogService {
       if (type) query = query.eq('type', type);
       if (genre) query = query.contains('genres', [genre]);
 
-      const { data, count, error } = await query;
+      const { data, error } = await query;
       if (error || !data || data.length === 0) return null;
 
-      return { items: data.map(this.mapDbItemToMediaItem), total: count ?? data.length };
+      const hasMore = data.length > safeLimit;
+      const pagina = data.slice(0, safeLimit);
+      return { items: pagina.map(this.mapDbItemToMediaItem), total: from + data.length, hasMore };
     } catch {
       return null;
     }
@@ -2674,9 +2682,13 @@ export class CatalogService {
       medido_en: new Date().toISOString(),
     };
 
-    // Un minuto: bastante para que recargar el panel no cueste quince consultas, y poco para que
-    // el número que se mira mientras corre un barrido no se quede viejo delante de los ojos.
-    await CacheStore.set(cacheKey, estado, 60);
+    /**
+     * MEDIA HORA, no un minuto. Cada medición son ~17 `count(*)` sobre columnas sin índice más un
+     * recorrido de `media_items` entero: cientos de miles de filas ESCANEADAS (lo que factura
+     * Turso), aunque solo vuelvan diecisiete números. Con un minuto de caché y el endpoint abierto,
+     * cualquiera que lo consultara de vez en cuando se comía la cuota del mes en días (2026-10-06).
+     */
+    await CacheStore.set(cacheKey, estado, 1800);
     return estado;
   }
 

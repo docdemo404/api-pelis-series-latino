@@ -83,9 +83,22 @@ router.get('/api/v1/panel', async (_req: Request, res: Response, next: NextFunct
  * conteo (unos 3 s en frío, cacheadas un minuto), y el panel pinta las fuentes al instante
  * mientras esto llega. Meterlo en el mismo payload haría lento lo que hoy es inmediato.
  */
-router.get('/api/v1/panel/estado', async (_req: Request, res: Response, next: NextFunction) => {
+/**
+ * Y va CON LLAVE (`PANEL_TOKEN`, en cabecera `x-panel-token` o `?token=`). Estaba abierto y anunciado
+ * en la portada, y cada medición en frío escanea cientos de miles de filas: la API sin freno fue lo
+ * que agotó la cuota de lecturas de Turso el 2026-10-06. Sin `PANEL_TOKEN` configurado no se mide.
+ * Medir en paralelo tampoco: si ya hay una medición en curso en esta instancia, se espera a esa.
+ */
+let midiendoEstado: Promise<Record<string, unknown>> | null = null;
+
+router.get('/api/v1/panel/estado', async (req: Request, res: Response, next: NextFunction) => {
+  const llave = process.env.PANEL_TOKEN;
+  const dada = String(req.get('x-panel-token') || req.query.token || '');
+  if (!llave) return res.status(503).json({ status: 'error', message: 'PANEL_TOKEN no configurado' });
+  if (dada !== llave) return res.status(401).json({ status: 'error', message: 'Falta la llave del panel' });
   try {
-    res.json({ status: 'success', ...(await CatalogService.estadoDelCatalogo()) });
+    midiendoEstado ??= CatalogService.estadoDelCatalogo().finally(() => { midiendoEstado = null; });
+    res.json({ status: 'success', ...(await midiendoEstado) });
   } catch (err) {
     next(err);
   }

@@ -524,8 +524,7 @@ export class FeedService {
       // `has_more` y el total se calculan sobre lo que dice la base; lo retirado en caliente solo
       // recorta ESTA página. Un hueco de dos títulos en una página de veinte no vale una consulta
       // extra, y el scroll infinito sigue avanzando igual.
-      const consumed = (safePage - 1) * safeLimit + fromDb.items.length;
-      const hasMore = consumed < fromDb.total;
+      const hasMore = fromDb.hasMore;
       const vivos = await CatalogService.sinRetirados(fromDb.items);
       return {
         page: safePage,

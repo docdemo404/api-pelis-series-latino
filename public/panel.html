@@ -1391,7 +1391,15 @@
     async function loadEstado() {
       estadoBox.innerHTML = '<div class="text-secondary small py-3">⏳ Midiendo el catálogo…</div>';
       try {
-        const res = await fetch('/api/v1/panel/estado');
+        // El estado va con llave (PANEL_TOKEN): se pide una vez y se recuerda en este navegador.
+        let llave = '';
+        try { llave = localStorage.getItem('panelToken') || ''; } catch {}
+        if (!llave) {
+          llave = (prompt('Llave del panel (PANEL_TOKEN) para ver el estado del catálogo:') || '').trim();
+          try { if (llave) localStorage.setItem('panelToken', llave); } catch {}
+        }
+        const res = await fetch('/api/v1/panel/estado', { headers: { 'x-panel-token': llave } });
+        if (res.status === 401) { try { localStorage.removeItem('panelToken'); } catch {} }
         const json = await res.json();
         if (json.status !== 'success') throw new Error('respuesta inesperada');
         renderEstado(json);
